@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-002-材料去除内核-SDF体素方案评估</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 结论先行</a></li>
+<li><a href="#1">1. 先定位：慢在哪里</a><ul>
+<li><a href="#11">1.1 网格布尔的成本模型</a></li>
+<li><a href="#12">1.2 必须采集的三个指标</a></li>
+<li><a href="#13">1.3 判别准则（写死，避免事后找理由）</a></li>
+<li><a href="#14">1.4 一个容易被忽略的"慢"的来源</a></li>
+</ul>
+</li>
+<li><a href="#2">2. 网格路径还能榨出多少</a></li>
+<li><a href="#3-sdf">3. SDF 体素方案设计</a><ul>
+<li><a href="#31-brick">3.1 数据结构：稀疏 brick + 窄带</a></li>
+<li><a href="#32-sdf">3.2 刀具的解析 SDF（旋转体统一处理）</a></li>
+<li><a href="#33-sdf">3.3 一段线性运动的扫掠 SDF</a></li>
+<li><a href="#34-csg-max">3.4 CSG：减法就是一次 max</a></li>
+<li><a href="#35">3.5 网格提取</a></li>
+<li><a href="#36-simd">3.6 并行与 SIMD</a></li>
+<li><a href="#37-bevy">3.7 与 Bevy 的接法</a></li>
+</ul>
+</li>
+<li><a href="#4">4. 精度天花板（决定性因素）</a><ul>
+<li><a href="#41">4.1 各类几何的精度表现</a></li>
+<li><a href="#42-005-mm">4.2 为什么"倒圆 0.05 mm"是致命的</a></li>
+<li><a href="#43">4.3 结论</a></li>
+</ul>
+</li>
+<li><a href="#5">5. 成本对比</a></li>
+<li><a href="#6">6. 决策规则</a></li>
+<li><a href="#7">7. 推荐路线</a></li>
+<li><a href="#8-gpu">8. 附：为什么先不做 GPU 版</a></li>
+<li><a href="#9">9. 附：被否定的方案</a></li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="adr-002-sdf-vs">ADR-002 材料去除内核：自研 SDF 体素 vs 网格布尔</h1>
+<blockquote>
+<p>状态：<strong>已决策</strong> —— 在"尽可能自研"前提下，SDF 从"可选预览层"升级为<strong>唯一的材料去除内核</strong>。
+本文 §4 得出的"精度不够做验证"这一限制，已由 <a href="ADR-003-自研技术栈边界与替代方案.html"><code>ADR-003</code></a> §4 的<strong>解析扫掠点测试</strong>补偿（过切判定不经体素，精度 ±0.001 mm）。
+§1 的测量仍有价值，但不再是立项前置——它现在用于<strong>给自研内核定性能基线</strong>。
+日期：2026-10-28
+关联：<code>技术方案-五轴CNC仿真.md</code> §2.4、§6.1、§11 R3</p>
+</blockquote>
+<hr />
+<h2 id="0">0. 结论先行</h2>
+<p><strong>能做，但它不是"更快版本的网格布尔"，而是换了一个精度上限。</strong></p>
+<p>三句话：</p>
+<ol>
+<li>
+<p><strong>SDF 体素的结构性优势是真的</strong>：单段成本 O(扫掠体积内的体素数)，<strong>与已加工细节无关</strong>；天然可并行、无分配、无拓扑修复。而网格布尔的成本随 tile 内三角面数增长——这恰恰是五轴精加工最难受的地方。</p>
+</li>
+<li>
+<p><strong>SDF 体素的精度天花板是硬的</strong>：Marching Cubes 会把尖锐棱边倒圆约 h/2。要判定 0.01 mm 级过切，需要 h≈0.01 mm，窄带内存 ∝ 1/h² → 比 h=0.1 mm 贵 100 倍，约 13 GB。<strong>不可行。</strong> 所以 SDF 永远不能做"验证"路径，只能做"预览"路径。</p>
+</li>
+<li>
+<p><strong>因此推荐双层内核</strong>：SDF 负责交互式拖动/回放，网格布尔负责出报告。两者共用同一条 <code>SimStep</code> 流与同一套刀具模型，通过 <code>RemovalEngine</code> trait 切换。这正是主方案 §11 R1 预留的接缝。</p>
+</li>
+</ol>
+<p><strong>但在动手前必须先做 §1 的测量。</strong> 如果测量显示现有路径的 95 分位单段耗时 &lt; 5 ms 且总时长可接受，那么投入 2.5 个月写第二个几何内核就是浪费——应该只做调参。</p>
+<hr />
+<h2 id="1">1. 先定位：慢在哪里</h2>
+<h3 id="11">1.1 网格布尔的成本模型</h3>
+<p><code>cutrail</code> 的每次切削做四件事（见其 <code>docs/architecture.md</code>）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>pick overlapping tiles → subtract through kernel → validate → commit
+</code></pre></div>
+
+<p>关键在第二步：Manifold 的布尔成本约 O((n+m)·log)，其中 n、m 是两侧三角面数。<strong>被切 tile 的三角面数会随加工推进而增长</strong>——同一块 10 mm tile 被精加工刀路反复扫过后，面数可能是初始的几十倍。</p>
+<p>这解释了 <code>cutrail</code> 官方基准里那个现象：10 万段 1 mm 刀路，每段中位数从 <strong>2 ms（前 100 段）涨到 6 ms（后 100 段）</strong>。涨的不是段本身，是 tile 里的细节。</p>
+<p>对五轴精加工（0.1–0.3 mm 步距、复杂曲面），这个增长会比基准更陡。<strong>这是网格布尔唯一的结构性弱点，也是唯一值得为它换内核的理由。但它必须先被测到，不能靠推测。</strong></p>
+<h3 id="12">1.2 必须采集的三个指标</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// crates/sim/benches/removal_profile.rs</span>
+<span style="color: #7F848E">// 逐段计时，输出 CSV</span>
+<span style="color: #7F848E">// segment_idx, tile_tri_before, tile_tri_after, elapsed_us, removed_volume_mm3, sweep_aabb_vol</span>
+</code></pre></div>
+
+<ol>
+<li><strong>单段耗时的分布</strong>（不只中位数，要 p50/p95/p99/max）</li>
+<li><strong>单段耗时 vs tile 三角面数</strong> 的散点与拟合 —— 这是判别"结构性问题"的唯一证据</li>
+<li><strong>单段耗时 vs 扫掠 AABB 体积</strong> —— 如果这一项相关性更高，说明成本由体积主导，SDF 的收益没那么大</li>
+</ol>
+<h3 id="13">1.3 判别准则（写死，避免事后找理由）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>观测</th>
+<th>判定</th>
+<th>行动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>elapsed</code> 与 <code>tile_tri_before</code> 强相关（R² &gt; 0.6），且 p99 &gt; 20 ms</td>
+<td>结构性</td>
+<td>上 SDF 预览层</td>
+</tr>
+<tr>
+<td><code>elapsed</code> 与 <code>sweep_aabb_vol</code> 强相关，与面数弱相关</td>
+<td>非结构性</td>
+<td>只调参，不换内核</td>
+</tr>
+<tr>
+<td>总仿真时长 &lt; 用户可接受阈值（建议：2 小时程序 ≤ 5 分钟算完）</td>
+<td>够用</td>
+<td>不做 SDF</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>先跑这一步再谈方案。</strong> 这一步 1 人日。</p>
+<h3 id="14">1.4 一个容易被忽略的"慢"的来源</h3>
+<p>在换内核之前，先确认慢的不是<strong>渲染侧</strong>：</p>
+<ul>
+<li>每帧上传了多少 MB？（§6.2 的 8 MB 预算是否被突破）</li>
+<li>是否在每帧重算全部 tile 的法线？</li>
+<li><code>changed_since</code> 的增量是否真的只返回了脏块，还是返回了全部？</li>
+</ul>
+<p><code>cutrail</code> 的 2–6 ms 是<strong>切削</strong>耗时，不含网格上传。如果实测发现瓶颈在 GPU 上传，换 SDF 内核一点用都没有（SDF 也要提取网格再上传）。</p>
+<hr />
+<h2 id="2">2. 网格路径还能榨出多少</h2>
+<p>在写第二个内核之前，先榨干第一个。按性价比排序：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>手段</th>
+<th>预期收益</th>
+<th>成本</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>粗/精分级容差</strong>：粗加工 <code>sweep_tolerance</code> 0.05 mm，精加工 0.01 mm</td>
+<td>2–3×</td>
+<td>1 人日</td>
+<td>扫掠凸包的三角面数 ∝ 1/容差</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>启用 <code>parallel</code> feature</strong>（manifold 并行布尔）</td>
+<td>2–4×（多核）</td>
+<td>0.5 人日</td>
+<td>官方 feature，可能已默认开</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>tile_size 调优</strong>：粗加工用 20 mm，精加工用 5 mm</td>
+<td>1.5–2×</td>
+<td>1 人日</td>
+<td>需实测，非单调</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>只对脏块重算法线/上传</strong></td>
+<td>消除卡顿</td>
+<td>2 人日</td>
+<td>渲染侧，与内核无关</td>
+</tr>
+<tr>
+<td>5</td>
+<td>把"每段一算"改为"每 N 段一算"（降低时间分辨率）</td>
+<td>N×</td>
+<td>0.5 人日</td>
+<td>牺牲回放平滑度，配合缓冲可接受</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>已被上游否定的路（不要重复走）</strong>：</p>
+<blockquote>
+<p><code>cutrail</code> 架构文档原文：<em>"Forming their union first was measured to add triangles without saving time, so it is not done."</em></p>
+</blockquote>
+<p>即"把连续多段扫掠先求并集、再做一次布尔"——<strong>实测只增加三角面，不省时间</strong>。所以"批量合并以减少布尔次数"这条常见优化思路在这里无效。这是上游做过对照实验的结论，别再试一遍。</p>
+<p>同理，<code>cutrail</code> 也明确否定了 B-rep 路线：<em>"Trials with several Rust B-rep kernels failed almost every coincident or touching case"</em>——加工产生的大量共面/相切面会让 B-rep 布尔失败。这也排除了"自己写 B-rep 内核"。</p>
+<p>综合手段 1–5：<strong>5–20× 是现实区间</strong>。2–6 ms → 0.1–1.2 ms。对 10 万段刀路，总时长从 200–600 s 降到 10–120 s。</p>
+<p><strong>如果这个量级够用，就不要写 SDF。</strong></p>
+<hr />
+<h2 id="3-sdf">3. SDF 体素方案设计</h2>
+<p>假设 §1 的测量证明必须上，以下是完整设计。</p>
+<h3 id="31-brick">3.1 数据结构：稀疏 brick + 窄带</h3>
+<blockquote>
+<p><strong>本节的扁平 brick 方案已被 <a href="ADR-006-稀疏体素数据结构.html"><code>ADR-006</code></a> 的三级树取代。</strong> 保留本节是因为"窄带 + 三种状态 + CSG"的语义没有变，变的只是组织方式（HashMap → 树 + 位掩码）。下文的 <code>Empty</code>/<code>Full</code>/<code>Band</code> 分别对应 OpenVDB 的 tile 值（正/负）与叶内体素。</p>
+</blockquote>
+<p><strong>不要用稠密网格。</strong> 200×200×100 mm @ h=0.1 mm = 2000×2000×1000 = 4×10⁹ 体素，1 字节/体素就是 4 GB。</p>
+<p>用稀疏 brick：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">const</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BRICK_LOG2</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">u32</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">4</span><span style="color: #ABB2BF">;              </span><span style="color: #7F848E">// 16³ 体素/brick</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">const</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BRICK_DIM</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">usize</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&lt;&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BRICK_LOG2</span><span style="color: #ABB2BF">;</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">const</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BRICK_VOXELS</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">usize</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BRICK_DIM</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BRICK_DIM</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BRICK_DIM</span><span style="color: #ABB2BF">;  </span><span style="color: #7F848E">// 4096</span>
+
+<span style="color: #98C379">/// 窄带距离：以体素为单位，钳制到 ±BAND</span>
+<span style="color: #98C379">/// i8 存 ±127，BAND 取 4 → 精度 1/32 体素，足够 MC 插值</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">const</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BAND</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">i8</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">4</span><span style="color: #ABB2BF">;</span>
+
+<span style="color: #7F848E">#[derive(Clone, Copy, PartialEq)]</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">enum</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">BrickState</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Empty</span><span style="color: #ABB2BF">,          </span><span style="color: #7F848E">// 全在外（无实体）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Full</span><span style="color: #ABB2BF">,           </span><span style="color: #7F848E">// 全在内（实心，不分配体素数组）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Band</span><span style="color: #ABB2BF">(</span><span style="color: #E5C07B">Box</span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF">[</span><span style="color: #E5C07B">i8</span><span style="color: #ABB2BF">; </span><span style="color: #E06C75">BRICK_VOXELS</span><span style="color: #ABB2BF">]</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">),   </span><span style="color: #7F848E">// 表面穿过，存窄带距离</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">SparseGrid</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">origin</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,                          </span><span style="color: #7F848E">// 体素边长</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">bricks</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">HashMap</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">IVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">BrickState</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">dirty</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">HashSet</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">IVec3</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><code>Empty</code> / <code>Full</code> 两个状态是内存优化的关键：远离表面的 brick 不占体素数组。实测中一个 200 mm 零件 90% 以上的 brick 是 <code>Empty</code> 或 <code>Full</code>。</p>
+<p><strong>内存估算</strong>（这是决定可行性的核心公式）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>窄带体素数 ≈ 表面积 A × 带宽(k·h) / h³ = k·A / h²
+
+**h 是运行期参数，不是编译期常量**：`GridConfig { h: f64, band_voxels: u8, value_type: ValueType }`，`band_voxels` 固定 4（物理带宽随 h 缩放），于是内存 ∝ 1/h²。可调带来的连带影响（速度 ∝ 1/h²、碰撞采样密度 ∝ h² 但**量化 ∝ h，h≤0.1 时量化主导**）见 [ADR-004](ADR-004-碰撞检查方案.md) §2.5.8 的保证矩阵与预设。
+
+**`value_type` 是精度旋钮**（详见 [`计算精度分析.md`](计算精度分析.md)）：
+
+| 类型 | 每档精度 | 内存（h=0.1） | 用途 |
+|---|---|---|---|
+| **`I8`（默认）** | 3.15 µm | **206 MB** | 常规验证，检出下限平面 1.6 µm / 曲面 2.0 µm |
+| `I16` | **12.2 nm** | 412 MB | µm 级过切判定 |
+
+**注意：这是精度的真正瓶颈，不是 float 宽度。** 换 f64 零收益——量化误差在**存的那一刻**就产生了。
+</code></pre></div>
+
+<p>取 A = 3.2×10⁵ mm²（200×200×100 毛坯加工后的内外表面总和），k = 4：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>h</th>
+<th>窄带体素数</th>
+<th>内存（i8）</th>
+<th>评价</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.2 mm</td>
+<td>3.2×10⁷</td>
+<td><strong>~32 MB</strong></td>
+<td>宽裕</td>
+</tr>
+<tr>
+<td>0.1 mm</td>
+<td>1.3×10⁸</td>
+<td><strong>~130 MB</strong></td>
+<td>可接受</td>
+</tr>
+<tr>
+<td>0.05 mm</td>
+<td>5.1×10⁸</td>
+<td><strong>~510 MB</strong></td>
+<td>紧张</td>
+</tr>
+<tr>
+<td>0.02 mm</td>
+<td>3.2×10⁹</td>
+<td><strong>~3.2 GB</strong></td>
+<td>不可行</td>
+</tr>
+<tr>
+<td>0.01 mm</td>
+<td>1.3×10¹⁰</td>
+<td><strong>~13 GB</strong></td>
+<td>不可行</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>这张表就是精度天花板的物理来源</strong>：内存 ∝ 1/h²，想精度翻倍要付 4 倍内存。</p>
+<blockquote>
+<p>⚠️ <strong>上表是理论下限，实际存储要乘约 1.6 倍。</strong> 因为它假设"只分配窄带体素"，而叶节点是<strong>密集分配</strong>的——表面穿过一个 8³ 叶就分配 512 字节，其中只有约一半在窄带内。</p>
+<p>修正后的实际值（8³ 叶，<code>mem ≈ 8.25·A/h²</code>）：h=0.2 → 52 MB；<strong>h=0.1 → 206 MB</strong>；h=0.05 → 825 MB；h=0.025 → 3.3 GB。详见 <a href="ADR-006-稀疏体素数据结构.html"><code>ADR-006-稀疏体素数据结构.md</code></a> §4——那里也给出了 4³ 叶（112 MB）与紧凑叶（125 MB）两个省内存选项。</p>
+</blockquote>
+<h3 id="32-sdf">3.2 刀具的解析 SDF（旋转体统一处理）</h3>
+<p>所有铣刀都是旋转体。<strong>旋转体的 SDF 等于其母线轮廓在 (ρ, z) 半平面上的 2D SDF</strong>（旋转不改变子午面内的距离）。这一条把所有刀型统一成一个函数：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #98C379">/// 母线轮廓：从刀尖开始，沿 +Z 的 (半径, 高度) 折线</span>
+<span style="color: #98C379">/// 平底刀: [(0,0),(r,0),(r,L),(0,L)]</span>
+<span style="color: #98C379">/// 球头刀: 圆弧段采样 [(0,0),(r·sinθ, r(1-cosθ))...]</span>
+<span style="color: #98C379">/// 圆鼻刀: 圆弧过渡 + 直段</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Profile</span><span style="color: #ABB2BF">(</span><span style="color: #E5C07B">Vec</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">Vec2</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">);   </span><span style="color: #7F848E">// (rho, z)</span>
+
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">sd_tool</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">profile</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">Profile</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 转到子午面</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">q</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">DVec2</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">new</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">hypot</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">y</span><span style="color: #ABB2BF">), </span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">z</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">sd_polygon_2d</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">profile</span><span style="color: #ABB2BF">)     </span><span style="color: #7F848E">// 标准 2D 多边形 SDF</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>刀杆（shank）与刀柄（holder）作为额外的 profile 段，只在碰撞检测里用，不参与去除。</p>
+<h3 id="33-sdf">3.3 一段线性运动的扫掠 SDF</h3>
+<p>扫掠体 = 工具沿线段平移的并集。距离 = 到所有中间位置的<strong>最小值</strong>：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #98C379">/// 平移扫掠的精确 SDF：d(p) = min_{t∈[0,1]} sd_tool(R^T(p - (a + t·v)))</span>
+<span style="color: #98C379">/// d(t) 关于 t 是凸函数（凸体沿直线平移的并集是凸体，到凸体的距离是凸的）</span>
+<span style="color: #98C379">/// → 黄金分割；迭代次数**按行程自适应**，见下</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">sd_linear_sweep</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">rot</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DMat3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">profile</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">Profile</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">local</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">|</span><span style="color: #E06C75">t</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">rot</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">transpose</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">lerp</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">t</span><span style="color: #ABB2BF">));</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">lo</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">; </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">hi</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">_</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0</span><span style="color: #56B6C2">..</span><span style="color: #E06C75">iters</span><span style="color: #ABB2BF"> { </span><span style="color: #7F848E">/* 黄金分割，每次缩 0.618 */</span><span style="color: #ABB2BF"> }</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">sd_tool</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">local</span><span style="color: #ABB2BF">((</span><span style="color: #E06C75">lo</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">+</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">hi</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.5</span><span style="color: #ABB2BF">), </span><span style="color: #E06C75">profile</span><span style="color: #ABB2BF">)</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>迭代次数不能写死 6。</strong> 定位误差 <code>Δx ≈ 行程 × 0.236 × 0.618ⁿ</code>，距离误差 ≈ <code>Δx²/(2R)</code>。
+实测（φ6 平底刀、R=3）：0.05 mm 段用 6 次误差 &lt; 1 µm，<strong>200 mm 段固定 6 次会到 16 µm</strong>
+（量化档的 5 倍），要加到约 17 次。实现里按 <code>TARGET_RESOLUTION_MM = 0.02</code> 自适应取 6–24 次
+（<code>voxel::sweep::golden_iters</code>）。迭代数只依赖几何，结果仍逐位可复现。</p>
+</blockquote>
+<p><strong>注意</strong>：这个"min over t"给出的是到<strong>平移扫掠体</strong>的距离，不是到刀具路径的距离——正好是我们需要的（我们要减掉的是扫掠体，不是中心线管道）。</p>
+<p><strong>圆弧段</strong>：参数化圆弧后同样做 1D 最小化（弧参数 θ），成本相同。</p>
+<p><strong>五轴（段内刀轴旋转）</strong>：按弦高容差把一段切成若干子段，每子段内刀轴视为定值，取各子段 SDF 的最小值。这与 <code>cutrail</code> 的旋转细分策略一致，<code>sweep_tolerance</code> 的语义可以复用。</p>
+<h3 id="34-csg-max">3.4 CSG：减法就是一次 max</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// 毛坯减去刀具：d_new = max(d_stock, -d_sweep)</span>
+<span style="color: #7F848E">// 只需更新扫掠 AABB 内的体素，且只在 |d| &lt; BAND 时写回</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">apply_cut</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">SparseGrid</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">sweep</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">Sweep</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">tool</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">Profile</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks_in</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">sweep</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">aabb</span><span style="color: #ABB2BF">(), </span><span style="color: #D19A66">1</span><span style="color: #ABB2BF">) {      </span><span style="color: #7F848E">// 外扩 1 brick</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">match</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">get_mut</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">            </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Empty</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">continue</span><span style="color: #ABB2BF">,           </span><span style="color: #7F848E">// 全在外，不可能被切到</span>
+<span style="color: #ABB2BF">            </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Full</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">                </span><span style="color: #7F848E">// 若扫掠体与 brick 相交，需实体化后逐体素更新</span>
+<span style="color: #ABB2BF">                </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">materialize</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">            }</span>
+<span style="color: #ABB2BF">            </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Band</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">)) </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">                </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">d</span><span style="color: #ABB2BF">) </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter_mut</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">enumerate</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">                    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">p</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">voxel_center</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">                    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">ds</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">sweep</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">sd</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">tool</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">                    </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">ds</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">BAND</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">                        </span><span style="color: #56B6C2">*</span><span style="color: #E06C75">d</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">clamp_i8</span><span style="color: #ABB2BF">((</span><span style="color: #56B6C2">*</span><span style="color: #E06C75">d</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">max</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">-</span><span style="color: #E06C75">ds</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">                    }</span>
+<span style="color: #ABB2BF">                }</span>
+<span style="color: #ABB2BF">            }</span>
+<span style="color: #ABB2BF">            </span><span style="color: #E5C07B">None</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">continue</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">        }</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><code>max(a, -b)</code> 的正确性依赖两边都是<strong>真实距离</strong>（或至少是钳制后仍保号的距离）。窄带钳制保持符号，所以 CSG 在带外仍然正确——这是窄带 SDF 能做 CSG 的前提。</p>
+<h3 id="35">3.5 网格提取</h3>
+<p>只对脏 brick 做 Marching Cubes，输出到该 brick 独立的 <code>Mesh</code>：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">extract_brick</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">SparseGrid</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">id</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">IVec3</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">Mesh</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 16³ 体素 → 15³ 个 cell → 最多 ~3375 个三角面</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 顶点位置用 d 线性插值（对平面是精确的）</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<ul>
+<li><strong>MC</strong>：简单、成熟、顶点数固定上限。<strong>棱边会被倒圆约 h/2</strong>。</li>
+<li><strong>Dual Contouring</strong>：用 QEF 把顶点吸附到特征点，能保住尖锐棱边（误差可降到 ~0.01 mm @ h=0.1）。代价是 2–3 周额外工作，且非流形/退化情况要小心处理。</li>
+</ul>
+<p>如果 SDF 只做预览，用 MC 就够。如果想让预览"看起来对"，DC 值得投入。</p>
+<h3 id="36-simd">3.6 并行与 SIMD</h3>
+<p><strong>这是 SDF 真正的性能来源，不是单体素算得快。</strong></p>
+<ul>
+<li>brick 之间<strong>完全独立</strong>（没有共享拓扑）→ <code>rayon::par_iter</code> 直接铺满所有核，无锁、无冲突。</li>
+<li>内层循环是标量距离函数，SIMD 化需要重构成 SoA（4/8 个体素一组）。可以先不上 SIMD，靠并行拿到 8×。</li>
+<li>无分配：brick 数组原地更新，MC 输出走对象池。</li>
+</ul>
+<p>对比网格布尔：Manifold 内部虽有并行，但每次布尔要建 BVH、分配中间网格、做拓扑验证——这些固定开销无法摊销（因为上游已实测合并无益）。</p>
+<p><strong>单段成本估算</strong>（标出这是估算，需实测）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>数值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1 mm 位移 + φ6 平底刀的扫掠 AABB</td>
+<td>约 70×60×200 体素 @ h=0.1</td>
+</tr>
+<tr>
+<td>需遍历的 brick 数（外扩 1）</td>
+<td>约 260</td>
+</tr>
+<tr>
+<td>实际写入的窄带体素</td>
+<td>约 2×10⁴</td>
+</tr>
+<tr>
+<td>每体素成本（含 6 次三分搜索）</td>
+<td>约 80 flops</td>
+</tr>
+<tr>
+<td>单线程标量</td>
+<td>约 1.5 ms</td>
+</tr>
+<tr>
+<td>8 线程</td>
+<td><strong>约 0.2 ms</strong></td>
+</tr>
+<tr>
+<td>8 线程 + SIMD4</td>
+<td><strong>约 0.06 ms</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>对比网格布尔 2–6 ms：<strong>10–50×</strong>。但这个数字<strong>必须实测</strong>，不要拿估算去立项。</p>
+<p><strong>实测（2026-10-29，<code>voxel</code> 存储层 + 扫掠 + CSG 已实现，单线程标量，release）</strong>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>遍历体素</th>
+<th>耗时</th>
+<th>每体素</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200 mm 直槽（φ6，切深 1 mm）</td>
+<td>1 342 000</td>
+<td><strong>893 ms</strong></td>
+<td>0.67 µs</td>
+</tr>
+<tr>
+<td><strong>0.05 mm 段（真实段长）</strong></td>
+<td>20 130</td>
+<td><strong>11.0 ms</strong></td>
+<td>0.54 µs</td>
+</tr>
+<tr>
+<td>外推 10 万段</td>
+<td>—</td>
+<td><strong>18.3 min</strong></td>
+<td>—</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>与上表估算的差距：估算说 8 线程 + SIMD4 是 0.06 ms/段；实测单线程 11 ms/段。</strong>
+按文档自己的杠杆（SIMD 3–6×、零分配 1.2–2×、8 线程 8×）叠起来约 30–100×，
+能落到 0.1–0.4 ms —— <strong>估算方向对，但当前实现离"8.3 分钟跑完 10 万段"还差 2.2×</strong>
+（早期文档的 5 ms/段是乐观值）。差距主要来自 <code>sd_profile</code> 每次重算母线的边距离，
+没有内联/向量化。这正是文档 §性能杠杆 里排第一的那项。</p>
+<p><strong>成本是"扫掠体 ∩ 材料"的体积除以 h³</strong>，与段长线性相关——长段（如 200 mm 一次走完）
+必须按段计费，不能指望细分降低总工作量（细分后总体素数不变）。</p>
+<h3 id="37-bevy">3.7 与 Bevy 的接法</h3>
+<p>SDF 内核产出的仍是<strong>每 brick 一个三角网格</strong>，接口与网格布尔完全一致：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>RemovalEngine (trait, cncsim-sim)
+├── CutrailEngine   → 调 cutrail::Engine
+└── SdfEngine       → 调 SparseGrid + MC
+        ↓ 两者都产出
+   TileUpdate { tile_id, mesh: TriMesh, version }
+        ↓
+   cncsim-render 的 apply_tile_updates（完全不变）
+</code></pre></div>
+
+<p><strong>渲染层不需要知道用的是哪个内核。</strong> 这是 §11 R1 预留 <code>RemovalEngine</code> trait 的直接回报。</p>
+<p>一致性要求：两个内核必须用<strong>同一份</strong> <code>SimStep</code> 流、<strong>同一套</strong> <code>ToolDef</code>、<strong>同一个</strong> <code>sweep_tolerance</code> 语义。否则切换内核时画面会跳变，用户会怀疑软件不可信。</p>
+<hr />
+<h2 id="4">4. 精度天花板（决定性因素）</h2>
+<h3 id="41">4.1 各类几何的精度表现</h3>
+<p>设 h = 0.1 mm：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>几何特征</th>
+<th>MC</th>
+<th>DC</th>
+<th>网格布尔</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>平面（台阶面、直壁）</td>
+<td><strong>优</strong> ~1 µm（线性插值对平面精确）</td>
+<td>优</td>
+<td>优</td>
+</tr>
+<tr>
+<td>圆柱面（刀具半径）</td>
+<td><strong>良</strong> 弦高 ≈ h²/(8r) ≈ 0.4 µm @ r=3</td>
+<td>良</td>
+<td>优</td>
+</tr>
+<tr>
+<td>凸棱边（90° 台阶）</td>
+<td><strong>差</strong> 倒圆 ≈ h/2 = <strong>0.05 mm</strong></td>
+<td>中 ≈ 0.01 mm</td>
+<td>优（锐边保留）</td>
+</tr>
+<tr>
+<td>凹棱边（内角）</td>
+<td><strong>差</strong> 同上</td>
+<td>中</td>
+<td>优</td>
+</tr>
+<tr>
+<td>薄壁 / 细筋 &lt; 2h（0.2 mm）</td>
+<td><strong>丢失</strong></td>
+<td>丢失</td>
+<td>优</td>
+</tr>
+<tr>
+<td>过切判定 @ 0.01 mm</td>
+<td><strong>不可用</strong></td>
+<td>不可用</td>
+<td>可用</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="42-005-mm">4.2 为什么"倒圆 0.05 mm"是致命的</h3>
+<p>对一个做刀路验证的软件，最核心的输出是"这里过切了 0.008 mm"。而 SDF@0.1mm 在每条棱边上都有 0.05 mm 的系统性偏差——<strong>比被检测的缺陷大 6 倍</strong>。这时的"过切报告"全是噪声。</p>
+<p>这不是调参能解决的：把 h 降到 0.01 mm 才能让倒圆降到 0.005 mm，而内存从 130 MB 涨到 13 GB。</p>
+<h3 id="43">4.3 结论</h3>
+<blockquote>
+<p><strong>SDF 体素的精度上限由 h 决定，h 由内存决定，内存 ∝ 1/h²。</strong>
+要 0.01 mm 的判定精度，需要 h ≈ 0.01 mm，内存约 13 GB —— 不可行。
+因此 SDF <strong>不能</strong>作为验证路径，<strong>只能</strong>作为预览路径。</p>
+</blockquote>
+<p>这与"网格布尔慢"并不矛盾：<strong>两者解决的是不同问题</strong>。慢的代价换来的是"报告可信"。</p>
+<hr />
+<h2 id="5">5. 成本对比</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>维度</th>
+<th>网格布尔（现状）</th>
+<th>自研 SDF（MC）</th>
+<th>自研 SDF（DC）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>单段耗时（估算）</td>
+<td>2–6 ms，随细节增长</td>
+<td>0.06–0.2 ms，<strong>与细节无关</strong></td>
+<td>0.15–0.4 ms</td>
+</tr>
+<tr>
+<td>内存（h=0.1）</td>
+<td>92 MB（官方实测）</td>
+<td>130 MB</td>
+<td>150 MB</td>
+</tr>
+<tr>
+<td>平面精度</td>
+<td>优</td>
+<td>优</td>
+<td>优</td>
+</tr>
+<tr>
+<td>棱边精度</td>
+<td>优</td>
+<td><strong>0.05 mm 倒角</strong></td>
+<td>0.01 mm</td>
+</tr>
+<tr>
+<td>过切验证</td>
+<td>可用</td>
+<td><strong>不可用</strong></td>
+<td>不可用</td>
+</tr>
+<tr>
+<td>开发成本</td>
+<td>0（已有）</td>
+<td><strong>约 8 人周</strong></td>
+<td>约 10 人周</td>
+</tr>
+<tr>
+<td>维护成本</td>
+<td>跟随上游</td>
+<td><strong>自担</strong></td>
+<td>自担</td>
+</tr>
+<tr>
+<td>正确性风险</td>
+<td>低（上游 1000 次连续切削无失败）</td>
+<td><strong>中高</strong>（自研拓扑/退化情况）</td>
+<td>高</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>SDF 的 8 人周分解</strong>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>模块</th>
+<th>人周</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>稀疏 brick + 窄带 + 哈希 + 脏块跟踪</td>
+<td>2.0</td>
+</tr>
+<tr>
+<td>旋转体 profile SDF + 线性/圆弧扫掠 + 旋转细分</td>
+<td>2.0</td>
+</tr>
+<tr>
+<td>CSG + 体素更新</td>
+<td>0.5</td>
+</tr>
+<tr>
+<td>MC 提取 + 法线 + 对接 Bevy Mesh</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td>rayon 并行 + 性能调优</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td><strong>测试（对拍网格布尔、精度边界、基准）</strong></td>
+<td>2.0</td>
+</tr>
+<tr>
+<td>集成 + 内核切换 + 一致性校验</td>
+<td>0.5</td>
+</tr>
+<tr>
+<td><strong>合计</strong></td>
+<td><strong>约 9 人周</strong>（DC 再 +2.5）</td>
+</tr>
+</tbody>
+</table></div>
+<p>注意测试占了 22%——这不是保守，是因为自研几何内核的错误极其隐蔽（表面看起来对，体积差 2%）。参考 §8 的金标准体积对拍：<strong>SDF 内核必须与 <code>cutrail</code> 在同一批刀路上跑出 1% 以内的体积一致性</strong>，否则不能用。</p>
+<hr />
+<h2 id="6">6. 决策规则</h2>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>是否需要"边拖时间轴边看毛坯变化"的交互？
+├─ 否 → 保持网格布尔，做 §2 的调参（1–2 人周，5–20×）
+└─ 是
+   ├─ 预览精度 0.1–0.2 mm 可接受？
+   │  ├─ 否 → SDF 也救不了（要 0.01 mm 得 13 GB）→ 只能优化网格布尔
+   │  └─ 是 → 上 SDF 预览层（9 人周），网格布尔保留为验证路径
+   └─ 只做预览、不做验证？
+      └─ 是 → 可以只做 SDF，省掉 cutrail（但要放弃 STEP/过切报告）
+</code></pre></div>
+
+<p><strong>最关键的一问</strong>：这个软件的卖点是"验证报告可信"还是"交互体验流畅"？</p>
+<ul>
+<li>如果是前者 → 网格布尔是核心资产，不能换。</li>
+<li>如果是后者 → SDF 值得做，但要接受"预览看到的和报告里的不完全一样"。</li>
+</ul>
+<p><strong>推荐：双层。</strong> 理由是这个产品真正的差异化（非线性误差、轴速超限、奇异点、过切量）全部依赖精确几何，不能拿体素糊弄；但交互体验也确实需要体素。</p>
+<hr />
+<h2 id="7">7. 推荐路线</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>内容</th>
+<th>人日</th>
+<th>产出</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>P0</strong></td>
+<td>写 §1.2 的 profiling harness，跑真实五轴刀路</td>
+<td>1</td>
+<td>耗时分布 + 相关性分析</td>
+</tr>
+<tr>
+<td><strong>P1</strong></td>
+<td>按 §2 调参（分级容差、parallel、tile 尺寸）</td>
+<td>5</td>
+<td>提速 5–20×，记录基线</td>
+</tr>
+<tr>
+<td><strong>P2</strong></td>
+<td>决策点：P1 后总时长是否达标？</td>
+<td>0.5</td>
+<td>若达标 → <strong>到此为止</strong></td>
+</tr>
+<tr>
+<td><strong>P3</strong></td>
+<td>SDF 稀疏网格 + profile SDF + 扫掠（含单元测试）</td>
+<td>15</td>
+<td>体积对拍通过</td>
+</tr>
+<tr>
+<td><strong>P4</strong></td>
+<td>MC 提取 + 接 Bevy + 双内核切换</td>
+<td>10</td>
+<td>可交互预览</td>
+</tr>
+<tr>
+<td><strong>P5</strong></td>
+<td>并行 + SIMD + 性能验收</td>
+<td>10</td>
+<td>达标</td>
+</tr>
+<tr>
+<td><strong>P6</strong>（可选）</td>
+<td>DC 替换 MC，保棱边</td>
+<td>12</td>
+<td>预览更接近真实</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>P0 是唯一无争议的下一步。</strong> 它只要 1 天，却能把"要不要花 2 个月"这个问题从猜测变成数据。</p>
+<hr />
+<h2 id="8-gpu">8. 附：为什么先不做 GPU 版</h2>
+<p>GPU SDF 听起来更快（50–100×），但：</p>
+<ol>
+<li><strong>读回是瓶颈</strong>：MC 在 GPU 上做完，顶点要读回 CPU 才能交给 Bevy 的 <code>Mesh</code>；或者走 GPU-driven 渲染 + 间接绘制，那是另一个量级的工程。</li>
+<li><strong>Bevy 0.20 的 mesh shader 虽已接入管线缓存</strong>，但用它做体素 MC 仍是自研管线，与 Bevy 的材质/阴影/剖切系统耦合困难。</li>
+<li><strong>CPU 8 线程已经能到 0.06–0.2 ms/段</strong>，对 60 fps 而言单帧可算 80–270 段——远超实际刀路的段密度。</li>
+</ol>
+<p>结论：<strong>先做 CPU 并行版</strong>。GPU 版留到"CPU 版实测不达标"再说，而且那时应该先问"是不是分辨率选高了"。</p>
+<hr />
+<h2 id="9">9. 附：被否定的方案</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>否定理由</th>
+<th>证据来源</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>批量合并多段扫掠再布尔</td>
+<td>只增加三角面，不省时间</td>
+<td>cutrail <code>docs/architecture.md</code> 实测</td>
+</tr>
+<tr>
+<td>自研 B-rep 布尔</td>
+<td>加工产生大量共面/相切面，B-rep 布尔几乎全失败</td>
+<td>同上（试过多个 Rust B-rep 内核）</td>
+</tr>
+<tr>
+<td>稠密体素网格</td>
+<td>200×200×100 @ 0.1 mm = 4×10⁹ 体素 = 4 GB</td>
+<td>计算</td>
+</tr>
+<tr>
+<td>单轴 Dexel</td>
+<td>不支持侧凹，五轴侧刃铣削直接出局</td>
+<td>主方案 §2.4</td>
+</tr>
+<tr>
+<td>GPU 体素优先</td>
+<td>读回/管线复杂度远超收益，CPU 并行已够</td>
+<td>§8</td>
+</tr>
+</tbody>
+</table></div>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

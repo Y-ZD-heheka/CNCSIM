@@ -1,0 +1,256 @@
+//! 切割面溯源（ADR-005 的叶级实现）：**切出来的面必须带着"是哪一刀切的"标记**。
+//!
+//! 这是"刀刃颜色 = 切面颜色"的地基：仿真在切这一刀之前把调色板索引盖到叶上
+//! （`SparseGrid::set_creator`），提取时把叶的标记写进顶点色的 R 通道。
+//! 渲染层再把这个索引查成颜色——**两边查的是同一张表**，所以颜色必然一致。
+//!
+//! 这里的测试全部是"能证伪"的：把 `set_creator` 的调用去掉、或把盖章搬到
+//! 所有切削结束之后，`cut_surfaces_keep_their_own_creator` 就会失败。
+
+use cncsim_math::DVec3;
+use cncsim_motion::Pose;
+use cncsim_tool::flat_end_mill;
+use cncsim_voxel::{GridConfig, MeshData, SparseGrid, ValueType, creator_of_cut};
+
+const H: f64 = 0.5;
+/// 毛坯边长（mm）。20 mm → 40 体素。
+const S: f64 = 20.0;
+
+fn n(mm: f64) -> i32 {
+    (mm / H).round() as i32
+}
+
+fn stock() -> SparseGrid<i8> {
+    let cfg = GridConfig { h: H, band_voxels: 4, value_type: ValueType::I8 };
+    let mut g = SparseGrid::<i8>::new(cfg, DVec3::ZERO);
+    g.fill_box_exact([0, 0, 0], [n(S), n(S), n(S)], cfg.band_mm());
+    g
+}
+
+fn pose(x: f64, y: f64, z: f64) -> Pose {
+    Pose { tip: DVec3::new(x, y, z), axis: DVec3::Z }
+}
+
+/// 沿 +X 拉一条通槽，槽底在 `z = floor`，中心线 `y = y`。
+fn slot(grid: &mut SparseGrid<i8>, y: f64, floor: f64, creator: u8) {
+    grid.set_creator(creator);
+    // 刃长 15 mm > 毛坯高，槽顶开在毛坯外面（否则是封闭内腔，测起来要多解释一堆面）
+    let cutter = flat_end_mill(6.0, 15.0);
+    grid.cut_segment(&pose(-5.0, y, floor), &pose(25.0, y, floor), &cutter);
+}
+
+fn creators(mesh: &MeshData) -> Vec<(f64, u8)> {
+    mesh.positions
+        .iter()
+        .zip(&mesh.colors)
+        .map(|(p, c)| (p[2] as f64, c[0]))
+        .collect()
+}
+
+/// 没切过的毛坯：所有顶点都是索引 0（原始毛坯面）。
+#[test]
+fn untouched_stock_is_index_zero() {
+    let g = stock();
+    let m = g.extract_surface();
+    assert!(!m.positions.is_empty(), "毛坯应该有表面");
+    let bad: Vec<_> = m.colors.iter().filter(|c| c[0] != 0).collect();
+    assert!(bad.is_empty(), "未切削的毛坯出现了 {} 个非 0 索引：{:?}", bad.len(), &bad[..bad.len().min(4)]);
+}
+
+/// 槽底和槽壁必须带这一刀的颜色；毛坯顶面（没被切到）必须仍是 0。
+#[test]
+fn cut_surface_takes_the_creator_of_the_cut() {
+    let mut g = stock();
+    slot(&mut g, 10.0, 10.0, 5);
+    let m = g.extract_surface();
+    let cs = creators(&m);
+
+    // 槽底：z ≈ 10，**且落在槽的横向范围内**
+    //
+    // 只按 z 筛是错的：毛坯四个侧壁在 z≈10 处也有顶点，它们本来就没被切过
+    // （索引 0 是对的），混进来会把正确的实现判成错的。判据要能区分
+    // "槽底"和"恰好同高的侧壁"。
+    let floor: Vec<u8> = cs
+        .iter()
+        .zip(&m.positions)
+        .filter(|((z, _), p)| {
+            (9.2..10.8).contains(z)
+                && (1.0..19.0).contains(&(p[0] as f64))
+                && (7.5..12.5).contains(&(p[1] as f64))
+        })
+        .map(|((_, c), _)| *c)
+        .collect();
+    assert!(floor.len() > 20, "槽底顶点太少（{} 个），场景没切出来", floor.len());
+    assert!(
+        floor.iter().all(|c| *c == 5),
+        "槽底有顶点不是这一刀的颜色 5：{:?}",
+        floor.iter().filter(|c| **c != 5).take(6).collect::<Vec<_>>()
+    );
+
+    // 顶面：z ≈ 20，**且离槽足够远**
+    //
+    // 只看 z 是错的：槽把 z=10 以上的料全切掉了，槽壁一直延伸到 z=20，
+    // 槽口边缘那几个顶点归属到被切过的叶是对的。
+    //
+    // 也不能只看"槽的横向范围"（y ∈ 7..13）：标记是**叶级**的，一片叶 8h 宽，
+    // 只要叶里有一个体素变了，整片叶就盖上颜色。所以着色会向未切区域溢出
+    // **最多一个叶宽**——这里 h=0.5 → 叶宽 4 mm，实测正好溢到 y=16。
+    // h=0.1 的实际场景里这个溢出是 0.8 mm，看不见。
+    let leaf_mm = 8.0 * H;
+    let edge = 3.0 + leaf_mm + 0.5; // 刀半径 + 一个叶宽 + 半个体素的余量
+    let far = |y: f64| (y - 10.0).abs() > edge;
+    let top: Vec<u8> = cs
+        .iter()
+        .zip(&m.positions)
+        .filter(|((z, _), p)| *z > 19.0 && far(p[1] as f64))
+        .map(|((_, c), _)| *c)
+        .collect();
+    assert!(top.len() > 20, "顶面顶点太少（{} 个，叶宽 {leaf_mm} mm）", top.len());
+    let bad: Vec<u8> = top.iter().copied().filter(|c| *c != 0).collect();
+    assert!(bad.is_empty(), "没切到的顶面被盖了颜色：{bad:?}");
+}
+
+/// **两条互不重叠的槽各留各的颜色**。
+///
+/// 这条是整个特性的核心断言：如果盖章被搬到"全部切削结束之后"、或者用了
+/// 一个全局变量只在最后写一次，那么先切的那条槽会被后切的覆盖成 7。
+#[test]
+fn cut_surfaces_keep_their_own_creator() {
+    let mut g = stock();
+    slot(&mut g, 5.0, 10.0, 3);
+    slot(&mut g, 15.0, 10.0, 7);
+    let m = g.extract_surface();
+
+    let mut near_y5 = 0usize;
+    let mut near_y15 = 0usize;
+    for (p, c) in m.positions.iter().zip(&m.colors) {
+        let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+        if !(9.2..10.8).contains(&z) || !(1.0..19.0).contains(&x) {
+            continue;
+        }
+        if (1.5..8.5).contains(&y) {
+            assert_eq!(c[0], 3, "第一条槽（y≈5）的颜色被改成了 {}，位置 {:?}", c[0], (x, y, z));
+            near_y5 += 1;
+        } else if (11.5..18.5).contains(&y) {
+            assert_eq!(c[0], 7, "第二条槽（y≈15）的颜色不对：{}，位置 {:?}", c[0], (x, y, z));
+            near_y15 += 1;
+        }
+    }
+    assert!(near_y5 > 10 && near_y15 > 10, "两条槽的采样点太少：{near_y5} / {near_y15}");
+}
+
+/// 顶点色不能依赖分块数——`fetch_min` 就是为了这个（并行写同一格时取最小，
+/// 与写序无关）。把 `fetch_min` 换成 `store` 后这条会**间歇性**失败。
+#[test]
+fn creators_dont_depend_on_chunking() {
+    let mut g = stock();
+    slot(&mut g, 5.0, 10.0, 3);
+    slot(&mut g, 15.0, 10.0, 7);
+    let a = g.extract_surface_chunks(1);
+    let b = g.extract_surface_chunks(7);
+    assert_eq!(a.positions.len(), b.positions.len());
+    assert_eq!(a.colors, b.colors, "分块数不同导致顶点色不同");
+}
+
+/// LOD 提取（窗口用的就是它）也必须带颜色，否则"低模看得见形状但全是灰"。
+#[test]
+fn lod_keeps_creators() {
+    let mut g = stock();
+    slot(&mut g, 10.0, 10.0, 5);
+    let m = g.extract_surface_lod(2);
+    assert!(!m.positions.is_empty());
+    let hit = m.colors.iter().filter(|c| c[0] == 5).count();
+    let zero = m.colors.iter().filter(|c| c[0] == 0).count();
+    assert!(hit > 0, "LOD 网格里没有一个顶点带切割色 5");
+    assert!(zero > 0, "LOD 网格里没有一个原始毛坯面的顶点");
+    assert_eq!(hit + zero, m.colors.len(), "LOD 出现了第三种索引");
+}
+
+/// 块号 → 调色板索引：恒在 1..=12，相邻两刀不同色，且是**往返**（两端连续）。
+#[test]
+fn creator_of_cut_walks_the_ramp_and_back() {
+    for b in 0..2000u32 {
+        let c = creator_of_cut(b);
+        assert!((1..=12).contains(&c), "第 {b} 刀的索引 {c} 超出切割色范围 1..=12");
+        if b > 0 {
+            let prev = creator_of_cut(b - 1);
+            assert_ne!(c, prev, "相邻两刀用了同一个颜色（第 {b} 刀）");
+            // 相邻块的索引只能差 1——差 2 以上说明不是渐变而是一次跳变，
+            // 面上会出现一条硬分界（正是"颜色过于混乱"的来源）
+            assert_eq!(
+                (c as i32 - prev as i32).abs(),
+                1,
+                "第 {b} 刀的索引从 {prev} 跳到 {c}，不是连续渐变"
+            );
+        }
+    }
+    // 周期必须是 2N−2 = 22，不是 12
+    assert_eq!(creator_of_cut(22), creator_of_cut(0), "往返周期应为 22");
+    assert_eq!(creator_of_cut(11), 12, "第 11 刀应到渐变最亮端");
+    assert_eq!(creator_of_cut(10), creator_of_cut(12), "往返应以第 11 刀为轴镜像");
+}
+
+// ───────────────────────── 已知边界：颜色会溢出 ─────────────────────────
+//
+// 溯源标记按**叶**存（8×8×8 体素 = 8h），而 `cut` 还会把新切面周围 ±band 的
+// 距离场重新精确化——那一片体素**真的变了**，所以所在的叶也要盖章。两者叠加，
+// 染色范围会比真实切面多出 `band + 8h` 以内的一块。
+//
+// 下面这条测试把这个上界钉住，它同时是一份说明书：谁把粒度改细，这里就会失败，
+// 那时该把上界往下调，而不是把测试删掉。
+//
+// 这里用**最粗**的一档（`creator_sub = 1`，每叶一个标记）来卡上界——它是
+// 默认配置里唯一还留得住"大块溢出"的档。四档的完整对照在
+// `crates/sim/tests/creator_granularity.rs`：
+//
+// | sub | 最坏溢出 | creator 内存 | 切削耗时 |
+// |---|---|---|---|
+// | 1 | 0.50 mm | 1 B/叶 | 基准 |
+// | 2 | 0.20 mm | 8 B/叶 | 持平 |
+// | 4 | 0.10 mm | 64 B/叶 | 持平（**默认**）|
+// | 8 | 0.025 mm | 512 B/叶 | +30% |
+//
+// 上界 `band + 8h` 只对 sub = 1 成立；粒度越细，实际溢出越小。
+
+/// 切一刀槽，量"切色区域最低点"比切深面低多少。
+///
+/// 用这个判据而不是"侧壁被染多高"：侧壁会不会被染取决于侧壁所在的那片叶
+/// 有没有体素变化，h=0.5 时侧壁那片叶整个是空气、一个体素都没变，就完全
+/// 染不到——按侧壁量会得到 inf。切色最低点与分辨率、几何都无关。
+fn bleed_below(cut_z: f64) -> (f64, f64, f64) {
+    use cncsim_motion::Pose;
+    let mut g = stock();
+    g.set_creator(1);
+    let cutter = flat_end_mill(6.0, 15.0);
+    g.cut_segment(
+        &Pose { tip: DVec3::new(-5.0, 2.0, cut_z), axis: DVec3::Z },
+        &Pose { tip: DVec3::new(25.0, 2.0, cut_z), axis: DVec3::Z },
+        &cutter,
+    );
+    let m = g.extract_surface();
+    let mut zmin = f64::INFINITY;
+    for (p, c) in m.positions.iter().zip(&m.colors) {
+        if c[0] != 0 && (p[2] as f64) < cut_z - 0.05 {
+            zmin = zmin.min(p[2] as f64);
+        }
+    }
+    let bleed = if zmin.is_finite() { cut_z - zmin } else { 0.0 };
+    (bleed, g.config.band_mm(), 8.0 * g.config.h)
+}
+
+/// 溢出存在，但不超过 `band + 叶宽`。
+#[test]
+fn color_bleed_stays_within_band_plus_one_leaf() {
+    let mut worst = 0.0f64;
+    for cut_z in [11.0, 10.9, 10.7, 10.5, 10.2, 9.9] {
+        let (bleed, band, leaf) = bleed_below(cut_z);
+        assert!(
+            bleed <= band + leaf + 1e-9,
+            "切深 {cut_z}：溢出 {bleed:.2} mm 超过上界 {:.2}（band {band:.2} + 叶宽 {leaf:.2}）",
+            band + leaf
+        );
+        worst = worst.max(bleed);
+    }
+    // 全部为 0 说明标记根本没盖到叶上——那是另一种坏法，单独卡一次
+    assert!(worst > 0.0, "所有切深下都没有溢出：标记没生效或测试几何失效");
+}

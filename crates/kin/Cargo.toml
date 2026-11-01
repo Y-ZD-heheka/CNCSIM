@@ -1,0 +1,12 @@
+[package]
+name = "cncsim-kin"
+description = "运动学：拓扑 / FK / IK / RTCP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-motion.workspace = true
+

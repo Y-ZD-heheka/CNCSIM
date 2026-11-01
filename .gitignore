@@ -1,0 +1,34 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# 生成物（文档 HTML 由 tools/md2html.py 生成，可以随时重建）
+# 如果希望把 HTML 一起提交，删掉下面这行
+# docs/*.html
+
+# 预览导出（cargo run -- --export out/preview.html）
+/out
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ── 发布到 GitHub 时额外排除 ──
+
+# LinuxCNC 源码：第三方 GPLv2，只作为语义 oracle 本地阅读，不随本仓库分发。
+# 需要时自行 clone 到 refs/linuxcnc/（见 docs/ 里引用的用法）。
+/refs/
+
+# 预编译的对比基准二进制（可由 tools/ovdb_bench/build.sh 重建）
+/tools/ovdb_bench/*.exe
+/tools/ovdb_bench/*.dll
+
+# agent / 编辑器工具的元数据，不属于项目本身
+/.workbuddy/
+/.workbuddy-ai/

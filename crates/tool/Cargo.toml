@@ -1,0 +1,10 @@
+[package]
+name = "cncsim-tool"
+description = "刀具词汇：母线 profile / CutterKind"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "cncsim-voxel"
+description = "稀疏体素：树 / SDF / 扫掠 / CSG / 表面提取 / 显示 LOD"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-motion.workspace = true
+cncsim-tool.workspace = true
+rayon.workspace = true

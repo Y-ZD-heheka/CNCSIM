@@ -1,0 +1,1442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G代码解释器设计</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">G 代码解释器设计</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 结论</a></li>
+<li><a href="#1">1. 边界</a><ul>
+<li><a href="#11">1.1 做什么</a></li>
+<li><a href="#12">1.2 不做什么</a></li>
+<li><a href="#13-twp-rtcp">1.3 关键区分：TWP 与 RTCP 不是一回事</a></li>
+</ul>
+</li>
+<li><a href="#2">2. 输出数据结构</a></li>
+<li><a href="#3">3. 模态状态机</a><ul>
+<li><a href="#31">3.1 结构</a></li>
+<li><a href="#32">3.2 块内执行顺序（最容易被忽略的坑）</a></li>
+</ul>
+</li>
+<li><a href="#4-g54">4. 坐标系统一：G54 归谁</a><ul>
+<li><a href="#41">4.1 问题</a></li>
+<li><a href="#42">4.2 解法：解释器解析到单一工件坐标系</a></li>
+<li><a href="#43-twp">4.3 TWP 同理</a></li>
+<li><a href="#44-wcs-g52-g92">4.4 三层叠加：WCS 表 + G52 + G92（已实现）</a></li>
+</ul>
+</li>
+<li><a href="#5">5. 错误处理与"可信度"</a><ul>
+<li><a href="#51">5.1 不中断，但要分级</a></li>
+<li><a href="#52-g91">5.2 为什么 G91 下必须升级为"不可信"</a></li>
+</ul>
+</li>
+<li><a href="#6-seam">6. 方言：一个 seam，不是插件系统</a></li>
+<li><a href="#7">7. 一次性解析，不做流式</a></li>
+<li><a href="#8">8. 圆弧的表示</a><ul>
+<li><a href="#81">8.1 固定循环：展开成显式刀路（已实现）</a></li>
+<li><a href="#82-g41g42">8.2 刀径补偿 G41/G42（已实现）</a></li>
+</ul>
+</li>
+<li><a href="#9">9. 测试策略</a><ul>
+<li><a href="#91">9.1 表驱动，按模态组分组</a></li>
+<li><a href="#92">9.2 组合块（专抓块内顺序）</a></li>
+<li><a href="#93">9.3 不可信标记</a></li>
+<li><a href="#94">9.4 金标准程序</a></li>
+</ul>
+</li>
+<li><a href="#10">10. 工作量</a></li>
+<li><a href="#11_1">11. 一句话</a></li>
+<li><a href="#12-linuxcnc">12. 对标 LinuxCNC</a><ul>
+<li><a href="#121">12.1 对标"语义"，不对标"功能集"</a></li>
+<li><a href="#122">12.2 功能对照表</a></li>
+<li><a href="#123-linuxcnc">12.3 LinuxCNC 的模态组（直接照搬）</a></li>
+<li><a href="#124">12.4 三个需要决策的点</a></li>
+<li><a href="#125-linuxcnc-fanuc">12.5 重要提醒：LinuxCNC ≠ Fanuc</a></li>
+<li><a href="#126">12.6 实现优先级（按"影响运动"排序）</a></li>
+<li><a href="#127-linuxcnc-oracle">12.7 用 LinuxCNC 当 oracle</a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="g">G 代码解释器设计</h1><div class="meta"><span class="chip hi">解释器</span><span class="chip hi">模态机</span></div>
+<blockquote>
+<p>日期：2026-10-28
+对应 crate：<code>cncsim-gcode</code>（依赖 <code>math</code> / <code>motion</code> / <code>tool</code>）
+补充主方案 §5</p>
+</blockquote>
+<hr />
+<h2 id="0">0. 结论</h2>
+<p>G 代码解释器是<strong>继运动学之后最大的正确性风险</strong>——解析错一行，后面所有运动都错，而画面依然"在动"。所以它的边界要划得比其它模块更死。</p>
+<p>四句话：</p>
+<ol>
+<li><strong>只做"文本 → 运动程序"，不做运动学。</strong> 输出的是<strong>工件坐标系下的位姿</strong>，不是关节值。</li>
+<li><strong>TWP（G68.2）归解释器，RTCP（G43.4）归 kin。</strong> 前者是坐标变换，后者是机床运动学——混在一起解释器就绑死机床了。</li>
+<li><strong>一次性解析成不可变 <code>MotionProgram</code></strong>，支持按块随机访问。不做流式。</li>
+<li><strong>跳过无法解析的块要标记"程序不可信"</strong>，不能只记个警告——<code>G91</code> 下跳过一块会静默污染后面所有位置。</li>
+</ol>
+<hr />
+<h2 id="1">1. 边界</h2>
+<h3 id="11">1.1 做什么</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>职责</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>词法</td>
+<td>字地址 <code>X-1.5</code>、<code>X[#1+2]</code>、注释、行号</td>
+</tr>
+<tr>
+<td>块解析</td>
+<td>一行 → 若干字地址</td>
+</tr>
+<tr>
+<td>模态状态机</td>
+<td>G90/G91、G20/G21、G54–G59、G17–G19……</td>
+</tr>
+<tr>
+<td>坐标变换</td>
+<td>WCS 偏置、<strong>TWP（G68.2）</strong>、G92 工件坐标设定</td>
+</tr>
+<tr>
+<td>刀具补偿语义</td>
+<td>G43 刀长、G41/G42 半径补偿（<strong>都已实现</strong>，见 §8.2）</td>
+</tr>
+<tr>
+<td>圆弧参数化</td>
+<td>I/J/K 与 R 两种写法 → 圆心 + 起止角</td>
+</tr>
+<tr>
+<td>进给模式</td>
+<td>G93 倒数时间 / G94 mm·min⁻¹ / G95 mm·rev⁻¹</td>
+</tr>
+<tr>
+<td>诊断</td>
+<td>不可解析的块、未定义模态、非法参数</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="12">1.2 不做什么</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>不做</th>
+<th>归谁</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>关节值反解、RTCP</td>
+<td><code>cncsim-kin</code></td>
+<td>解释器一旦调 <code>kin</code>，就绑死在某台机床上</td>
+</tr>
+<tr>
+<td>段内插补与时间</td>
+<td><code>cncsim-sim</code></td>
+<td>时长取决于轴速上限，那是机床属性</td>
+</tr>
+<tr>
+<td>材料去除、碰撞</td>
+<td><code>voxel</code> / <code>collide</code></td>
+<td>完全无关</td>
+</tr>
+<tr>
+<td>文件读写</td>
+<td><code>cncsim-app</code></td>
+<td>I/O 不进领域层</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="13-twp-rtcp">1.3 关键区分：TWP 与 RTCP 不是一回事</h3>
+<p>这两者经常被混为一谈，但归属完全不同：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>TWP（G68.2 倾斜工作平面）</th>
+<th>RTCP（G43.4 刀尖跟随）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>本质</td>
+<td><strong>坐标系变换</strong>：程序坐标在一个倾斜的平面里</td>
+<td><strong>机床运动学</strong>：程序坐标是刀尖位置，控制器反解直线轴</td>
+</tr>
+<tr>
+<td>是否依赖机床</td>
+<td><strong>不依赖</strong>，任何五轴机都一样</td>
+<td><strong>强依赖</strong>，每种构型公式不同</td>
+</tr>
+<tr>
+<td>归谁</td>
+<td><strong>解释器</strong></td>
+<td><strong>kin</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>判断标准</strong>：如果这个变换只需要知道"工件怎么摆"，就在解释器；如果需要知道"机床有几个轴、轴朝哪"，就在 kin。</p>
+<hr />
+<h2 id="2">2. 输出数据结构</h2>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">MotionProgram</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">blocks</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Vec</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">Block</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,        </span><span style="color: #7F848E">// 按源文件顺序，不可变</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">issues</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Vec</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">ParseIssue</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,   </span><span style="color: #7F848E">// 解析问题（不中断）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">trust</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Trust</span><span style="color: #ABB2BF">,              </span><span style="color: #7F848E">// 结果可信度</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Block</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">line_no</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">u32</span><span style="color: #ABB2BF">,              </span><span style="color: #7F848E">// 源文件行号（UI 高亮用）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">motion</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Motion</span><span style="color: #ABB2BF">,            </span><span style="color: #7F848E">// Rapid / Linear / Arc / Dwell / None</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">target</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Pose</span><span style="color: #ABB2BF">,              </span><span style="color: #7F848E">// 工件坐标系下的目标位姿</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">feed</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Feed</span><span style="color: #ABB2BF">,                </span><span style="color: #7F848E">// 值 + 模式（G93/94/95）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">interp</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">InterpMode</span><span style="color: #ABB2BF">,        </span><span style="color: #7F848E">// RTCP 开/关、精确停/连续</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">wcs</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">WcsId</span><span style="color: #ABB2BF">,                </span><span style="color: #7F848E">// 当前工件坐标系（仅显示用，坐标已解析）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">tool</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">ToolNo</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">spindle_rpm</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E5C07B">f64</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">enum</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Motion</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Rapid</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Linear</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Arc</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">center</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">cw</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">bool</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">plane</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Plane</span><span style="color: #ABB2BF"> },</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Dwell</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">secs</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> },</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E5C07B">None</span><span style="color: #ABB2BF">,                          </span><span style="color: #7F848E">// 纯状态块（如 G54、M8）</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #98C379">/// 关键：位姿已在**单一工件坐标系**下，下游不需要知道 G54 有几个</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Pose</span><span style="color: #ABB2BF"> { </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">tip</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">axis</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF"> }   </span><span style="color: #7F848E">// axis 由刀尖指向主轴</span>
+</code></pre></div>
+
+<p><strong><code>Block</code> 是"已解析完的语义"，不是"待解释的原文"</strong>。下游拿到的块不需要再做任何模态判断。</p>
+<hr />
+<h2 id="3">3. 模态状态机</h2>
+<h3 id="31">3.1 结构</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">ModalState</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">distance</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DistanceMode</span><span style="color: #ABB2BF">,      </span><span style="color: #7F848E">// G90 / G91</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">units</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Units</span><span style="color: #ABB2BF">,                </span><span style="color: #7F848E">// G20 / G21</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">plane</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Plane</span><span style="color: #ABB2BF">,                </span><span style="color: #7F848E">// G17 / G18 / G19</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">feed_mode</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">FeedMode</span><span style="color: #ABB2BF">,         </span><span style="color: #7F848E">// G93 / G94 / G95</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">wcs</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">WcsId</span><span style="color: #ABB2BF">,                  </span><span style="color: #7F848E">// G54–G59, G54.1 P_</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">cutter_comp</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">CutterComp</span><span style="color: #ABB2BF">,     </span><span style="color: #7F848E">// G40 / G41 / G42</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">length_comp</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">LengthComp</span><span style="color: #ABB2BF">,     </span><span style="color: #7F848E">// G43 / G44 / G49 + H 号</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">tcpm</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">TcpmMode</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,      </span><span style="color: #7F848E">// G43.4 / G43.5</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">twp</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">TwpFrame</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,       </span><span style="color: #7F848E">// G68.2 / G68.3</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">motion</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">MotionKind</span><span style="color: #ABB2BF">,          </span><span style="color: #7F848E">// G0 / G1 / G2 / G3（模态）</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>解析是一个 <strong>fold</strong>：<code>state' = step(state, block)</code>。每个块产出一个 <code>Block</code>，同时更新状态。</p>
+<h3 id="32">3.2 块内执行顺序（最容易被忽略的坑）</h3>
+<p>一行里可能同时有 <code>G43 H7 G1 Z-5 F200</code>。<strong>这些不是同时生效的，有固定顺序。</strong></p>
+<p><strong>但顺序与字在行内的位置无关。</strong> <code>overview.adoc</code> §Item order 明文：</p>
+<blockquote>
+<p>The first group (the words) may be reordered in any way without changing the meaning of the line.</p>
+</blockquote>
+<p>所以 <strong><code>G91 G1 X10</code> 与 <code>G1 X10 G91</code> 完全等价，都是增量</strong>。
+（早期版本这里写"后者按上一状态"——<strong>那是错的</strong>，已按原文更正。）</p>
+<p>顺序由下面这张表（<code>overview.adoc</code> §G-code Order of Execution 的 25 项）决定：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code> 0  O-word 流程控制
+ 1  注释 / 消息
+ 2  进给模式 G93 G94 G95
+ 3  进给率 F
+ 4  主轴转速 S
+ 5  刀具选择 T
+ 6  HAL 引脚 IO  M62–M68
+ 7  换刀 M6 / 设定刀号 M61
+ 8  主轴启停 M3 M4 M5
+ 9  保存状态 M70 M73 / 恢复 M72 / 作废 M71
+10  冷却 M7 M8 M9
+11  倍率开关 M48 M49
+12  用户自定义 M100–M199
+13  停延 G4                    ← 在平面/单位/补偿/距离之前
+14  平面选择 G17 G18 G19
+15  单位 G20 G21
+16  刀径补偿 G40 G41 G42
+17  刀长补偿 G43 G49            ← 必须在运动之前
+18  坐标系选择 G54–G59.3
+19  路径控制 G61 G61.1 G64
+20  距离模式 G90 G91            ← 必须在运动之前
+21  退刀模式 G98 G99
+22  回参考点 G28 G30 / 改坐标数据 G10 / 设轴偏置 G52 G92
+23  运动 G0–G3 G33 G38.n G73 G76 G80–G89（受 G53 修饰）
+24  停机 M0 M1 M2 M30 M60
+</code></pre></div>
+
+<p><strong>为什么必须定死</strong>：</p>
+<ul>
+<li><strong>17 在 23 之前</strong>：<code>G43 H7 G1 Z-5</code> 若先动后补，第一刀会偏一个刀长。</li>
+<li><strong>20 在 23 之前</strong>：<code>G91 G1 X10</code> 若不生效，会走成绝对坐标。</li>
+<li><strong>2 在 3 之前</strong>：<code>G93 F0.5</code> 里 F 是倒数时间，不是 mm/min。</li>
+<li><strong>13 在 14–20 之前</strong>：这是最容易写错的一条——<strong>停延排在平面/单位/补偿/距离模式之前</strong>，不是最后。</li>
+</ul>
+<p><strong>实现方式：让顺序成为结构而不是约定。</strong> 一行里的操作先收进 <code>Vec&lt;Op&gt;</code>，
+按 <code>Phase</code> <strong>排序后执行</strong>，而不是按字出现的顺序执行。这样谁往 <code>ops</code> 里塞东西都不会打乱它。</p>
+<p>顺序写错，单字测试全过，<strong>只有组合块才会错</strong>。所以测试必须专门覆盖"同一行多个模态字"，
+并且<strong>必须有一条"字序无关"的测试</strong>——<code>cncsim-gcode</code> 的 <code>word_order_within_a_block_does_not_matter</code>
+就是干这个的。去掉排序后它会报 <code>110.0 vs 10.0</code>，正是"依赖字位置"的症状。</p>
+<hr />
+<h2 id="4-g54">4. 坐标系统一：G54 归谁</h2>
+<p>这是最容易设计错的地方。</p>
+<h3 id="41">4.1 问题</h3>
+<p>程序里的 <code>X/Y/Z</code> 是<strong>当前工件坐标系</strong>下的值。而 <code>cncsim-kin</code> 需要的是<strong>相对机床的</strong>位姿。中间隔着一个 WCS 偏置。</p>
+<p>如果让解释器只输出"程序坐标 + WCS 编号"，那 <code>kin</code> 就得懂 G54 表；如果让解释器输出机床坐标，那它又得懂机床几何。<strong>两边都不对。</strong></p>
+<h3 id="42">4.2 解法：解释器解析到<strong>单一工件坐标系</strong></h3>
+<ul>
+<li>机床模型里定义<strong>一个</strong>工件坐标系（例如摇篮的 C 台面中心），这是 <code>kin</code> 的输入。</li>
+<li>解释器接收一张 <strong>WCS 偏置表</strong>（<code>G54→offset</code>、<code>G55→offset</code>…），把所有坐标<strong>解析到那一个工件坐标系</strong>。</li>
+<li>输出 <code>Block.target</code> 已经是统一坐标系下的位姿，<code>Block.wcs</code> 只作显示。</li>
+</ul>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #E06C75">gcode</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">interpret</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">src</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">dialect</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">WorkOffsets</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">MotionProgram</span>
+</code></pre></div>
+
+<p>好处：</p>
+<ul>
+<li><code>kin</code> 完全不知道 G54 的存在。</li>
+<li>切 G54/G55 不需要下游做任何事——偏置在解析时已吸收。</li>
+<li>摇篮机上台面旋转，工件坐标系跟着转，这是机床几何（<code>kin</code> 的事），与 G54 偏置正交。</li>
+</ul>
+<h3 id="43-twp">4.3 TWP 同理</h3>
+<p><code>G68.2</code> 定义一个倾斜平面。解释器把它折算成<strong>坐标变换矩阵</strong>，作用在后续所有 <code>target</code> 上——纯几何，不需要知道机床构型。</p>
+<p><code>G69</code> 取消，恢复。</p>
+<hr />
+<h3 id="44-wcs-g52-g92">4.4 三层叠加：WCS 表 + G52 + G92（已实现）</h3>
+<p><code>位置 = base + 程序坐标</code>，而 <code>base</code> 是三样东西相加：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>层</th>
+<th>来源</th>
+<th>怎么改</th>
+<th>怎么取消</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>WCS 表</strong></td>
+<td>G54–G59.3</td>
+<td><code>G10 L2 Pn</code>（给机床坐标）/ <code>G10 L20 Pn</code>（对刀）</td>
+<td>再写一次</td>
+</tr>
+<tr>
+<td><strong>G52 局部</strong></td>
+<td><code>G52 X.. Y.. Z..</code></td>
+<td>就地叠加</td>
+<td><code>G52 X0 Y0 Z0</code></td>
+</tr>
+<tr>
+<td><strong>G92 临时</strong></td>
+<td><code>G92 X..</code>（把当前位置读作给定值）</td>
+<td>就地叠加</td>
+<td><code>G92.1</code>（清零）/ <code>G92.2</code> 挂起、<code>G92.3</code> 恢复</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>三者分开存，不是一个数</strong>：G10 写的是"机床上的坐标系表"（断电保存），G92 只是一次
+临时平移（不进表）。程序里看效果一样，取消方式完全不同——合成一个数就再也分不开了。</p>
+<p><strong><code>G10</code> 改的是解释器内部的副本，不是 <code>InterpConfig</code>。</strong> 配置必须保持"程序的初始条件"：
+同一份 <code>InterpConfig</code> 跑第二遍要给出一模一样的结果，否则第二个程序的坐标已经被第一个
+污染了（<code>interp_config_stays_clean_across_runs</code> 锁这条）。</p>
+<p><strong><code>G10 L20</code> 要把 G52/G92 减掉</strong>：它也参与 <code>位置 = base + 程序坐标</code>。一次 <code>G52 X5</code>
+之后对刀，不减的话原点会整整差 5 mm——而程序看起来完全正常，只是整个零件挪了位置。</p>
+<p><strong>没有 <code>G10 L20</code> 时的常见写法</strong>是 <code>G92 X0 Y0 Z0</code>（把当前位置读作原点）。两者效果
+接近，但 G92 是临时的：程序结束、复位之后机床上的坐标系表没变。</p>
+<h2 id="5">5. 错误处理与"可信度"</h2>
+<h3 id="51">5.1 不中断，但要分级</h3>
+<p>G 代码方言差异大，一行不认识就整份失败会让工具不可用。但<strong>不能一律"跳过并警告"</strong>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>情况</th>
+<th>处理</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>未知 G 代码 / M 代码</td>
+<td>跳过，记 <code>ParseIssue</code></td>
+<td>多为无关辅助功能</td>
+</tr>
+<tr>
+<td>参数非法（如圆弧半径自相矛盾）</td>
+<td>跳过该块，记 issue</td>
+<td></td>
+</tr>
+<tr>
+<td><strong>在 G91（增量）下跳过运动块</strong></td>
+<td><strong>标记 <code>Trust::Unreliable</code></strong></td>
+<td>后续所有绝对位置都会偏移，结果不可信</td>
+</tr>
+<tr>
+<td>语法错误</td>
+<td>跳过，记 issue</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="52-g91">5.2 为什么 G91 下必须升级为"不可信"</h3>
+<div class="codehilite" data-lang="gcode"><pre style="line-height: 125%;"><span></span><code><span style="color: #E5C07B">G91</span>
+<span style="color: #E5C07B">G1 </span><span style="color: #C678DD">X</span><span style="color: #D19A66">10</span><span style="color: #ABB2BF">      </span>← 这一块解析失败被跳过
+<span style="color: #E5C07B">G1 </span><span style="color: #C678DD">X</span><span style="color: #D19A66">10</span><span style="color: #ABB2BF">      </span>← 实际少走了 10 mm
+<span style="color: #E5C07B">G90</span>
+<span style="color: #E5C07B">G1 </span><span style="color: #C678DD">X</span><span style="color: #D19A66">100</span><span style="color: #ABB2BF">     </span>← 从这里开始，工件坐标系里的一切都偏了 10 mm
+</code></pre></div>
+
+<p><strong>跳过一块增量运动，会让之后所有位置静默偏移。</strong> 报告里不能只写"第 3 行有警告"，必须把整份结果标为不可信，UI 顶部横幅提示。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">enum</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Trust</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Reliable</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// 有跳过块，且其中包含增量运动 → 后续位置全部不可信</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Unreliable</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">first_bad_line</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">u32</span><span style="color: #ABB2BF"> },</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>这条设计的价值：<strong>它把"能跑但结果错"变成"明确告诉你别信"</strong>。仿真工具最危险的输出就是看起来正常但实际错的。</p>
+<blockquote>
+<p><strong>已接线</strong>（2026-10-30）：<code>sim::run</code> 把每条 <code>ParseIssue</code> 逐条转成报告报警——
+稳定编号原样（<code>GCODE-008</code> 就是 <code>GCODE-008</code>）、严重度 1:1 映射（两层的 <code>Severity</code>
+有意不共享，但四级语义一致）、行号进 <code>TimeRef</code>。<code>Trust ∈ {Unreliable, Aborted}</code>
+而报告无 Error+ 报警时兜底 <code>GCODE_TRUST</code>（正常路径不触发——<code>Unreliable</code> 总伴随
+Error 级 issue）。总体可信度 = <code>SimReport::overall_severity()</code>。</p>
+</blockquote>
+<hr />
+<h2 id="6-seam">6. 方言：一个 seam，不是插件系统</h2>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">trait</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">Dialect</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">parse_tcpm</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E5C07B">self</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">block</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">WordList</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">TcpmCmd</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">parse_twp</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E5C07B">self</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">block</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">WordList</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">TwpCmd</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">default_feed_mode</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E5C07B">self</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">FeedMode</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">arc_ijk_relative</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E5C07B">self</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">bool</span><span style="color: #ABB2BF">;      </span><span style="color: #7F848E">// Fanuc 是相对起点</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>v1 只有一个实现 <code>FanucDialect</code>。</p>
+<p><strong>为什么还是用 trait 而不是 enum</strong>：</p>
+<ul>
+<li>它是<strong>测试接缝</strong>——可以写一个极简 <code>TestDialect</code> 只认几个字，把模态机的测试与方言细节解耦。</li>
+<li>加第二种方言时不用改签名。</li>
+</ul>
+<p><strong>但不做插件注册</strong>。方言在编译期确定，运行时不加载。</p>
+<hr />
+<h2 id="7">7. 一次性解析，不做流式</h2>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">interpret</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">src</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">str</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">d</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">dyn</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">Dialect</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">wcs</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">WorkOffsets</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">MotionProgram</span>
+</code></pre></div>
+
+<p><strong>整份读进内存，一次解析完。</strong> 理由：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>100k 块内存</th>
+<th>随机访问第 N 块</th>
+<th>复杂度</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>一次性</strong></td>
+<td>约 10 MB</td>
+<td><strong>O(1)</strong></td>
+<td>低</td>
+</tr>
+<tr>
+<td>流式迭代器</td>
+<td>O(1)</td>
+<td>需要重放</td>
+<td>高</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>随机访问是刚需</strong>：时间轴拖动、点击报告跳转到某行、断点定位，都要"直接拿到第 N 块"。流式会让这些都变复杂。</p>
+<p>10 MB 的代价换掉一整套状态回放逻辑，很划算。</p>
+<hr />
+<h2 id="8">8. 圆弧的表示</h2>
+<p>圆弧在 <code>Block.motion</code> 里存<strong>参数化结果</strong>，不存原始字地址：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #E06C75">Arc</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">center</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">cw</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">bool</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">plane</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Plane</span><span style="color: #ABB2BF"> }</span>
+</code></pre></div>
+
+<p>解析时要处理三件事：</p>
+<ol>
+<li><strong>I/J/K 的含义随平面变</strong>：G17（XY）用 I、J；G18（ZX）用 I、K；G19（YZ）用 J、K。<strong>写错一个字母整段圆弧就跑偏。</strong></li>
+<li><strong>R 形式有两个解</strong>：正 R 走劣弧（≤180°），负 R 走优弧（&gt;180°）。</li>
+<li><strong>螺旋</strong>：<code>G2/G3</code> 带 Z 字时，是"平面内圆弧 + Z 线性"，不是空间圆弧。</li>
+</ol>
+<p><strong>终点与圆心不自洽</strong>（起终点距离 ≠ 2R）时要报 issue——这是后处理错误的典型症状，不能静默修正。</p>
+<hr />
+<h3 id="81">8.1 固定循环：展开成显式刀路（已实现）</h3>
+<p><strong>不能"跳过"，必须展开</strong>：少钻一个孔，零件就是废的，而报告上看不出异常。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>循环</th>
+<th>展开成什么</th>
+<th>差别</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G81</td>
+<td>快移到孔上方 → 快速下到 R → 进给到孔底 → 快速退</td>
+<td>一次扎到底</td>
+</tr>
+<tr>
+<td>G82</td>
+<td>同上 + <strong>孔底暂停 P</strong></td>
+<td>沉孔 / 锪平</td>
+</tr>
+<tr>
+<td>G83</td>
+<td>每 <code>Q</code> 一刀，刀间<strong>完全退到 R 平面</strong>排屑</td>
+<td>深孔</td>
+</tr>
+<tr>
+<td>G73</td>
+<td>每 <code>Q</code> 一刀，刀间只抬 0.5 mm 断屑</td>
+<td>深孔、行程短</td>
+</tr>
+<tr>
+<td>G84</td>
+<td>进给进、<strong>进给退</strong>（主轴反转）</td>
+<td>攻丝</td>
+</tr>
+<tr>
+<td>G85 / G89</td>
+<td>进给进、进给退</td>
+<td>镗孔，孔壁不留退刀痕</td>
+</tr>
+<tr>
+<td>G86 / G88</td>
+<td>进给进、快速退</td>
+<td>镗孔，效率优先</td>
+</tr>
+<tr>
+<td>G76</td>
+<td>同 G86（孔底让刀不建模）</td>
+<td>精镗</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>模态复用是重点</strong>。孔阵列的后处理几乎全是这种行：</p>
+<div class="codehilite" data-lang="gcode"><pre style="line-height: 125%;"><span></span><code><span style="color: #E5C07B">G0 </span><span style="color: #C678DD">Z</span><span style="color: #D19A66">10</span>
+<span style="color: #E5C07B">G83 </span><span style="color: #C678DD">Z</span><span style="color: #D19A66">-8</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">R</span><span style="color: #D19A66">2</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">Q</span><span style="color: #D19A66">3</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">F</span><span style="color: #D19A66">100</span>
+<span style="color: #C678DD">X</span><span style="color: #D19A66">20</span><span style="color: #ABB2BF">          </span>← 第 2 个孔，不带任何 G 字
+<span style="color: #C678DD">X</span><span style="color: #D19A66">40</span><span style="color: #ABB2BF">          </span>← 第 3 个孔
+</code></pre></div>
+
+<p>只有 X/Y、没有组 1 的 G 代码 ⇒ 在下一个孔位再来一次。实现放在"隐式模态运动"之前
+（<code>step</code> 的 ②.4 段），并让隐式运动让位——否则一行会展开成"钻孔 + 一条 G1"。</p>
+<p><strong>孔间横移发生在起始高度上</strong>，不是 R 平面、也不是孔底。这是不撞夹具的前提，
+也是 <code>hole_positions_follow_the_program</code> 断言的东西。</p>
+<p><code>G98</code> / <code>G99</code> 决定每孔之间退到哪：<code>G98</code> 回起始 Z、<code>G99</code> 回 R 平面。一排孔用 <code>G99</code>
+能省掉大量空行程。</p>
+<p><strong><code>P</code> 的单位由小数点决定</strong>（Fanuc）：<code>P500</code> 是 500 <strong>毫秒</strong>，<code>P0.5</code> 是 0.5 <strong>秒</strong>。
+所以 <code>lex::Word</code> 现在带 <code>has_dot</code>——丢掉它，孔底暂停会差 1000 倍，而这种错
+在几何上完全看不出来，只在节拍估算里错。孔底暂停与 <code>G4</code> 的停延都进报告时间。</p>
+<p><strong>不做的</strong>：</p>
+<ul>
+<li><strong>G87 反镗</strong>：从工件下方向上加工，本版运动模型（刀轴沿 Z 向下、从上方进刀）
+  表达不了，报 <code>GCODE-005</code> 而不是假装沿 Z 钻一个孔。</li>
+<li><strong>G76 的孔底让刀、G84 的主轴反转</strong>：不影响几何，只影响主轴负载，不做假动作。</li>
+<li><strong>G18/G19 平面下的循环</strong>：钻孔方向变成 Y/X，同样超出本版运动模型，报 <code>GCODE-005</code>。</li>
+<li><strong>G68.2 + 循环</strong>：斜孔同理。</li>
+</ul>
+<h3 id="82-g41g42">8.2 刀径补偿 G41/G42（已实现）</h3>
+<p><strong>为什么必须单独一遍</strong>：拐角的补偿点取决于<strong>前后两段的方向</strong>——本段偏移线的终点
+要么和下一段偏移线求交（内角），要么绕顶点滚一段圆弧（外角）。逐行生成时只看得见
+本段，所以补偿是整份程序解析完之后的<strong>后处理</strong>（<code>comp::apply</code>）。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>顶点类型</th>
+<th>处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>共线（切向叉积 ≈ 0）</td>
+<td>直接过，法向偏移 r</td>
+</tr>
+<tr>
+<td>内角（偏移侧在转弯内侧）</td>
+<td>两条偏移线<strong>求交</strong></td>
+</tr>
+<tr>
+<td>外角（偏移侧在转弯外侧）</td>
+<td>绕顶点走一段 <strong>r 圆弧</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>外角必须是圆弧，不能求交</strong>：两条偏移线在外侧的交点比顶点远 <code>r·tan(θ/2)</code>，
+90° 拐角就多切 <strong>0.41r</strong>。真实机床就是绕顶点滚过去的。</p>
+<p><strong>唯一的正确性判据</strong>（<code>every_compensated_point_is_exactly_r_from_the_programmed_path</code>）：
+补偿后的每个刀位点到编程路径的距离<strong>恒等于 r</strong>。这一条同时覆盖内角求交、外角圆弧、
+法向取反、半径符号——比手算几个点强得多。</p>
+<p><strong>边界（做不到就报，不猜）</strong>：</p>
+<ul>
+<li>第一块必须是直线（引入段）——圆弧引入要新建半径，控制器也是这么要求的</li>
+<li>补偿组之后那块也必须是直线（引出段），否则引出弧的起点半径不对</li>
+<li>只支持 G17、只支持 G1/G2/G3</li>
+<li><strong>补偿半径来自 <code>D</code> 寄存器</strong>：<code>D</code> 给的是编号不是半径，表里没值就报 <code>GCODE-011</code>
+  并把 <code>Trust</code> 降级——当 0 处理会让整条路径差一个刀半径，而且看不出来</li>
+</ul>
+<p>任何一条不满足，整组<strong>还原成编程路径</strong>并报 <code>GCODE-005</code>。宁可说"没补偿"，
+也不要交出一条差一个刀半径的路径。</p>
+<p>内角求交还有个钳制：交点离顶点超过 <code>10r</code> 就退回法向偏移点（近 180° 折返时），
+并报 <code>GCODE-012</code> 提示该处可能过切。</p>
+<h2 id="9">9. 测试策略</h2>
+<h3 id="91">9.1 表驱动，按模态组分组</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">modal_distance_mode</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">st</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">ModalState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">default</span><span style="color: #ABB2BF">();</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// G91 之后 X10 是增量，累积</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">step</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">st</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"G91 X10"</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">target</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">tip</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">10.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">step</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">st</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"X10"</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">target</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">tip</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">20.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// G90 复位</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">step</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">st</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"G90 X5"</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">step</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">st</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"X10"</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">target</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">tip</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">10.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<h3 id="92">9.2 组合块（专抓块内顺序）</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">g43_applies_before_motion_in_same_block</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// G43 H7 与 G1 Z-5 同一行：刀长必须先补上，否则第一刀偏一个刀长</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">step</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">st</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"G43 H7 G1 Z-5 F200"</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">target</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">tip</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">z</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">5.0</span><span style="color: #ABB2BF">);       </span><span style="color: #7F848E">// 已含刀长补偿</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">st</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">length_comp</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">LengthComp</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">On</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">7</span><span style="color: #ABB2BF">));</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">g91_before_motion_in_same_block</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// "G91 G1 X10" 是增量，"G1 X10 G91" 按上一状态</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 两种写法必须给出不同结果</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<h3 id="93">9.3 不可信标记</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">skipped_incremental_block_marks_unreliable</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">p</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">interpret</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">"G91\nG999 X10\nG1 X10"</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">FanucDialect</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">wcs</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2; font-weight: bold">matches!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">trust</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">Trust</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Unreliable</span><span style="color: #ABB2BF"> { </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF"> }));</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<h3 id="94">9.4 金标准程序</h3>
+<p><code>testdata/gcode/</code> 里放几份真实后处理输出（AC 摆头、摇篮各一），解析后与 golden 块表逐块比对。<strong>这是唯一能抓住"方言细节差异"的手段。</strong></p>
+<hr />
+<h2 id="10">10. 工作量</h2>
+<p>对标 LinuxCNC 之后（§12），范围比初版大不少——RS274NGC 是两万行 C++ 加二十年边界情况。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>模块</th>
+<th>人日</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>词法 + 表达式 + 参数 <code>#1–#5000</code> + O-word</td>
+<td>3.0</td>
+</tr>
+<tr>
+<td>模态状态机（16 个 G 组）+ 块内顺序</td>
+<td>2.5</td>
+</tr>
+<tr>
+<td>坐标系：G54–G59.3 / G52 / G92.x / G10 L2,L20</td>
+<td>2.0</td>
+</tr>
+<tr>
+<td>TWP：G68.2 / G68.4 / G69</td>
+<td>1.5</td>
+</tr>
+<tr>
+<td>刀长：G43 / G43.1 / G43.2 / G43.4 / G49</td>
+<td>1.5</td>
+</tr>
+<tr>
+<td>圆弧：三平面 + R 形式 + 螺旋 + G90.1/91.1</td>
+<td>1.5</td>
+</tr>
+<tr>
+<td>子程序：O-word / M98 / M99</td>
+<td>1.5</td>
+</tr>
+<tr>
+<td>钻孔循环：G80–G89</td>
+<td>2.0</td>
+</tr>
+<tr>
+<td>回参考点与机床坐标：G28 / G30 / G53</td>
+<td>0.5</td>
+</tr>
+<tr>
+<td>路径模式：G61 / G61.1 / G64</td>
+<td>0.5</td>
+</tr>
+<tr>
+<td>方言 seam + <code>FanucDialect</code></td>
+<td>1.0</td>
+</tr>
+<tr>
+<td>错误处理 + <code>Trust</code> 分级</td>
+<td>0.5</td>
+</tr>
+<tr>
+<td><strong>测试（表驱动 + 组合块 + 金标准 + LinuxCNC 对拍）</strong></td>
+<td><strong>3.0</strong></td>
+</tr>
+<tr>
+<td><strong>合计</strong></td>
+<td><strong>21.0</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>可以砍的部分</strong>（只求跑通典型五轴程序）：去掉钻孔循环、子程序、路径模式 → <strong>约 14 人日</strong>。但真实生产程序几乎都有子程序和钻孔循环，砍了会经常卡住。</p>
+<p><strong>这占整个项目约 14%</strong>（总 150 人日），仅次于材料去除内核和碰撞。解释器值这个价——它是"程序能不能读进来"的唯一入口。</p>
+<h2 id="11_1">11. 一句话</h2>
+<p><strong>解释器只回答"这段代码想让它怎么动"，不回答"机床怎么动"。</strong> 前者是文本与坐标的问题，后者是机构与逆解的问题。这条线划清了，换机床不用改解析器，加方言不用碰运动学。</p>
+<hr />
+<h2 id="12-linuxcnc">12. 对标 LinuxCNC</h2>
+<blockquote>
+<p>本节基于 LinuxCNC 官方文档实测：<code>docs/src/gcode/g-code.adoc</code>（65 条 G 代码速查表）、<code>m-code.adoc</code>、<code>overview.adoc</code> 的模态组定义。已下载到 <code>refs/linuxcnc/</code>。</p>
+</blockquote>
+<h3 id="121">12.1 对标"语义"，不对标"功能集"</h3>
+<p><strong>LinuxCNC 是控制器，我们是仿真器。</strong> 这决定了四条根本差异：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>LinuxCNC（控制器）</th>
+<th>我们（仿真器）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>时间</td>
+<td>实时执行，受伺服周期约束</td>
+<td>离线重放，可快进/倒放</td>
+</tr>
+<tr>
+<td>硬件</td>
+<td>驱动主轴、冷却、I/O、换刀</td>
+<td><strong>不驱动任何东西</strong></td>
+</tr>
+<tr>
+<td>交互</td>
+<td>操作工暂停、倍率、手轮</td>
+<td>无操作工</td>
+</tr>
+<tr>
+<td>输出</td>
+<td>脉冲</td>
+<td><strong>诊断报告</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>所以"对标"的正确含义是：</p>
+<blockquote>
+<p><strong>同一份 G 代码，我们算出的刀位轨迹与 LinuxCNC 一致。</strong></p>
+</blockquote>
+<p>不是"支持同样的指令条数"。凡是<strong>不影响刀路几何</strong>的功能（冷却、I/O、暂停、倍率），我们都不需要实现——但<strong>必须正确跳过，不能报错</strong>。</p>
+<h3 id="122">12.2 功能对照表</h3>
+<h4 id="a">A. 必须对标（影响运动，仿真正确性依赖）</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>指令</th>
+<th>作用</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G0 G1 G2 G3</td>
+<td>运动</td>
+<td>核心</td>
+</tr>
+<tr>
+<td>G4</td>
+<td>停延</td>
+<td>影响节拍</td>
+</tr>
+<tr>
+<td>G17 G18 G19 / G17.1 G18.1 G19.1</td>
+<td>平面选择</td>
+<td>圆弧 IJK 含义随平面变</td>
+</tr>
+<tr>
+<td>G20 G21</td>
+<td>单位</td>
+<td></td>
+</tr>
+<tr>
+<td>G28 G30</td>
+<td>回参考点</td>
+<td><strong>这是运动</strong>，会移动轴</td>
+</tr>
+<tr>
+<td>G40</td>
+<td>取消刀补</td>
+<td><strong>已实现</strong>（G41/G42 见 §8.2）</td>
+</tr>
+<tr>
+<td>G43 G43.1 G43.2 G43.4 G49</td>
+<td>刀长 / RTCP</td>
+<td>G43.4 是五轴核心</td>
+</tr>
+<tr>
+<td>G52</td>
+<td>局部坐标系偏置</td>
+<td><strong>已实现</strong>（叠在 WCS 上，G52 X0Y0Z0 取消）</td>
+</tr>
+<tr>
+<td>G53</td>
+<td>机床坐标移动</td>
+<td><strong>绕过 WCS</strong></td>
+</tr>
+<tr>
+<td>G54–G59.3</td>
+<td>坐标系选择</td>
+<td>9 个</td>
+</tr>
+<tr>
+<td>G61 G61.1 G64</td>
+<td>路径模式</td>
+<td>影响实际轨迹（见 12.4）</td>
+</tr>
+<tr>
+<td>G68.2 G68.4 G69</td>
+<td>倾斜工作平面</td>
+<td>归解释器</td>
+</tr>
+<tr>
+<td>G80–G89</td>
+<td>钻孔循环</td>
+<td><strong>产生运动</strong>，不能只跳过。<strong>已实现</strong>（见 §8.1）</td>
+</tr>
+<tr>
+<td>G90 G91 / G90.1 G91.1</td>
+<td>距离模式</td>
+<td>圆弧 IJK 也有绝对/增量</td>
+</tr>
+<tr>
+<td>G92 G92.1 G92.2 G92.3</td>
+<td>坐标系偏移</td>
+<td><strong>已实现</strong>（临时层，与 G10 分开）</td>
+</tr>
+<tr>
+<td>G93 G94 G95</td>
+<td>进给模式</td>
+<td>五轴常用 G93</td>
+</tr>
+<tr>
+<td>G10 L1 L2 L10 L11 L20</td>
+<td>设置刀表 / 坐标系</td>
+<td><strong>L2/L20 已实现</strong>，刀表（L1/L10/L11）报不支持</td>
+</tr>
+<tr>
+<td>M3 M4 M5</td>
+<td>主轴</td>
+<td>转速进报告，不影响几何</td>
+</tr>
+<tr>
+<td>M6 T</td>
+<td>换刀</td>
+<td>换刀点也是运动</td>
+</tr>
+<tr>
+<td>M26 M27</td>
+<td>旋转轴取模</td>
+<td>A/C 角度表示，影响最短路径</td>
+</tr>
+<tr>
+<td>M61</td>
+<td>设置当前刀</td>
+<td></td>
+</tr>
+<tr>
+<td>M70 M71 M72 M73</td>
+<td>模态保存/恢复</td>
+<td>宏程序常用</td>
+</tr>
+<tr>
+<td>M98 M99</td>
+<td>子程序调用</td>
+<td>后处理常用</td>
+</tr>
+<tr>
+<td>O-word / #1–#5000 / 表达式</td>
+<td>参数与流控</td>
+<td><strong>后处理大量使用</strong></td>
+</tr>
+</tbody>
+</table></div>
+<h4 id="b">B. 降级实现（离散化或简化，但要报"已简化"）</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>指令</th>
+<th>我们的处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G5 / G5.1 / G5.2 G5.3</td>
+<td>样条 → 按弦高容差离散成折线，报 <code>Issue::Simplified</code></td>
+</tr>
+<tr>
+<td>G73 G81 G82 G83 G85 G89</td>
+<td>钻孔循环 → 展开成显式 G0/G1 序列（标准做法，不算降级）</td>
+</tr>
+<tr>
+<td>G96 G97</td>
+<td>恒线速 → 只记录，不参与几何</td>
+</tr>
+<tr>
+<td>M48 M49 M50 M51</td>
+<td>倍率 → 可选地用于节拍分析（"如果降到 80%"）</td>
+</tr>
+</tbody>
+</table></div>
+<h4 id="c-issue">C. 不做（与铣削无关，跳过并记 issue）</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>指令</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G7 G8</td>
+<td>车床直径/半径模式</td>
+</tr>
+<tr>
+<td>G12.1 G13.1</td>
+<td>极坐标插补</td>
+</tr>
+<tr>
+<td>G28.2</td>
+<td>从 G 代码回零（控制器专用）</td>
+</tr>
+<tr>
+<td>G33 G33.1 G74 G84 G76</td>
+<td>螺纹 / 刚性攻丝（不做攻丝）</td>
+</tr>
+<tr>
+<td>G38.x</td>
+<td>探测（仿真无意义）</td>
+</tr>
+<tr>
+<td>G41 G42</td>
+<td><strong>刀补</strong>——已实现（§8.2）</td>
+</tr>
+<tr>
+<td>G41.1 G42.1</td>
+<td>带参数的刀补</td>
+</tr>
+<tr>
+<td>G70 G71 G72</td>
+<td>车削循环</td>
+</tr>
+<tr>
+<td>G87 G88</td>
+<td>反镗（LinuxCNC 自己也没实现）</td>
+</tr>
+<tr>
+<td>M0 M1 M2 M30 M60</td>
+<td>暂停/结束 → <strong>忽略但继续</strong>，不停止仿真</td>
+</tr>
+<tr>
+<td>M7 M8 M9</td>
+<td>冷却</td>
+</tr>
+<tr>
+<td>M19</td>
+<td>主轴定向</td>
+</tr>
+<tr>
+<td>M62–M68</td>
+<td>数字/模拟 I/O</td>
+</tr>
+<tr>
+<td>M100–M199</td>
+<td>用户自定义</td>
+</tr>
+</tbody>
+</table></div>
+<h4 id="d-linuxcnc">D. 我们额外需要的（LinuxCNC 没有）</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>需求</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>Trust</code> 可信度分级</strong></td>
+<td>LinuxCNC 遇到错误直接停；我们跳过并继续，所以必须标记"结果不可信"</td>
+</tr>
+<tr>
+<td><strong>非线性误差统计</strong></td>
+<td>控制器不管这个，但仿真器要报（主方案 §4.6）</td>
+</tr>
+<tr>
+<td><strong>轴速超限与实际进给</strong></td>
+<td>控制器自己降速，我们要算出来给用户看（§4.7）</td>
+</tr>
+<tr>
+<td><strong>按块随机访问</strong></td>
+<td>时间轴拖动、点击跳行</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="123-linuxcnc">12.3 LinuxCNC 的模态组（直接照搬）</h3>
+<p>LinuxCNC 定义了 <strong>15 个 G 模态组 + 8 个 M 模态组</strong>。<strong>建议完全照搬编号</strong>，因为：</p>
+<ul>
+<li>它是经过验证的分类，没有遗漏</li>
+<li>遇到歧义时可以直接查 LinuxCNC 文档</li>
+<li>我们的 <code>ModalState</code> 结构可以直接按组一一对应</li>
+</ul>
+<blockquote>
+<p><strong>注意：编号 0–15 中 11 未使用</strong>（历史遗留，表里直接跳过）。
+所以是 15 个组，不是 16 个——早期文档写 16 是数错了。</p>
+</blockquote>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>G 组 0  非模态      G4 G10 G28 G28.2 G30 G52 G53 G92 G92.1 G92.2 G92.3
+G 组 1  运动        G0 G1 G2 G3 G33 G38.n G73 G76 G80–G89
+G 组 2  平面        G17 G18 G19 G17.1 G18.1 G19.1
+G 组 3  距离        G90 G91
+G 组 4  圆弧IJK距离 G90.1 G91.1
+G 组 5  进给模式    G93 G94 G95
+G 组 6  单位        G20 G21
+G 组 7  刀径补偿    G40 G41 G42 G41.1 G42.1
+G 组 8  刀长        G43 G43.1 G43.2 G43.4 G49
+G 组 9  倾斜工作平面 G68.2 G68.4 G69
+G 组 10 循环退刀    G98 G99
+（组 11 未使用）
+G 组 12 坐标系      G54–G59.3
+G 组 13 路径控制    G61 G61.1 G64
+G 组 14 主轴速度模式 G96 G97
+G 组 15 车床直径    G7 G8
+</code></pre></div>
+
+<p><strong>一条容易漏的规则</strong>（LinuxCNC 明文规定）：</p>
+<blockquote>
+<p>组 1 的 G 代码与组 0 的 G 代码<strong>同时使用轴字</strong>是错误。若组 1 已隐式生效，同行的组 0 轴字代码会<strong>暂时挂起</strong>组 1。涉及 G10、G28、G30、G52、G92。</p>
+</blockquote>
+<p>这条不实现，<code>G28 X0 Y0</code> 之后会多走一段。</p>
+<h3 id="124">12.4 三个需要决策的点</h3>
+<h4 id="1g41g42-2026-10-30comp12">（1）G41/G42 刀补：<strong>已实现</strong>（2026-10-30，<code>comp</code>，12 个测试）</h4>
+<p>当初的判断是"v1 不做，报 issue"——理由是"五轴加工几乎不用刀补，CAM 已经在刀路里补偿了"。
+这个判断对五轴连续加工成立，但对<strong>两轴半的轮廓工序</strong>不成立：现场改刀补修尺寸是常规操作，
+而且报 <code>Unsupported</code> 会把整份程序标成不可信，等于白跑。</p>
+<p>实现方式与 LinuxCNC 不同：它做在轨迹规划层（要处理自交、过切、内外角切换），
+我们在<strong>解释器的后处理</strong>里做，只解决"刀心该在哪"，不模拟加减速与拐角过渡。
+三种顶点（共线/内角求交/外角圆弧）见 §8.2，正确性判据是"每个刀位点到编程路径
+的距离恒等于 r"。</p>
+<h4 id="2g64">（2）G64 路径模式：默认模拟"理想路径"</h4>
+<p>LinuxCNC 的 <code>G64 P_ Q_</code> 是<strong>轨迹混合</strong>——拐角会按容差切掉，实际路径不是精确折线。</p>
+<p>两条路：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>优点</th>
+<th>缺点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>模拟理想路径</strong>（精确停在每拐点）</td>
+<td>与 CAM 意图一致，报告可读</td>
+<td>与实际加工有偏差</td>
+</tr>
+<tr>
+<td>按 G64 容差混合</td>
+<td>更接近实际</td>
+<td>要复现 LinuxCNC 的混合算法，且结论依赖参数</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>建议 v1 走理想路径，并在报告里注明"未模拟 G64 混合"</strong>。理由：验证刀路是否<strong>该</strong>切到这里，比模拟它<strong>实际</strong>切到哪里更有价值。v2 再提供开关。</p>
+<h4 id="3g93">（3）G93 逆时间进给：必须支持</h4>
+<p>五轴联动常用 <code>G93</code>（F = 1/时间）。不支持的话，所有五轴程序的节拍全错。</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>时长(分钟) = 1 / F
+</code></pre></div>
+
+<h3 id="125-linuxcnc-fanuc">12.5 重要提醒：LinuxCNC ≠ Fanuc</h3>
+<p>这是最容易踩的坑。<strong>"对标 LinuxCNC" 得到的是语义骨架，不是"支持 Fanuc 后处理"。</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>LinuxCNC</th>
+<th>Fanuc</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G43.4</td>
+<td>Tool Length Offset on Primary Kinematics</td>
+<td>TCPM（刀尖跟随）</td>
+</tr>
+<tr>
+<td>G68.2 参数</td>
+<td>欧拉角等</td>
+<td><code>X_ Y_ Z_ I_ J_ K_</code>（三点/两向量定义）</td>
+</tr>
+<tr>
+<td>G5/G5.1/G5.2</td>
+<td>样条</td>
+<td>无</td>
+</tr>
+<tr>
+<td>M62–M68</td>
+<td>数字/模拟 I/O</td>
+<td>无（编号含义完全不同）</td>
+</tr>
+<tr>
+<td>G12.1/G13.1</td>
+<td>极坐标插补</td>
+<td>无</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>结论</strong>：方言层（§6 的 <code>Dialect</code> trait）仍然必需。对标 LinuxCNC 让我们有了一套<strong>经过验证的语义模型</strong>，但实际后处理输出是 Fanuc 方言，两者要分别建模。</p>
+<h3 id="126">12.6 实现优先级（按"影响运动"排序）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>优先级</th>
+<th>内容</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P0</td>
+<td>词法 + 表达式 + 参数 + 模态组骨架</td>
+<td>没有它什么都跑不了</td>
+</tr>
+<tr>
+<td>P0</td>
+<td>G0/G1/G2/G3、G17-19、G90/91、G20/21、G93-95</td>
+<td>三轴能跑</td>
+</tr>
+<tr>
+<td>P0</td>
+<td>G54–G59、G43、G49</td>
+<td>定位正确</td>
+</tr>
+<tr>
+<td>P1</td>
+<td>G43.4（RTCP）、G68.2（TWP）、G53</td>
+<td><strong>五轴必需</strong></td>
+</tr>
+<tr>
+<td>P1</td>
+<td>O-word 子程序、M98/M99</td>
+<td>真实程序几乎都有</td>
+</tr>
+<tr>
+<td>~~P1~~</td>
+<td>~~G80–G89 钻孔循环~~</td>
+<td><strong>已完成</strong>（2026-10-30，17 个测试）</td>
+</tr>
+<tr>
+<td>~~P2~~</td>
+<td>~~G10 L2/L20、G52、G92.x~~</td>
+<td><strong>已完成</strong>（2026-10-30，16 个测试）；刀表 L1/L10/L11 仍未做</td>
+</tr>
+<tr>
+<td>P2</td>
+<td>G61/G61.1/G64、G28/G30</td>
+<td>路径与回零</td>
+</tr>
+<tr>
+<td>P3</td>
+<td>G5.x 样条、G96/G97、倍率</td>
+<td>少见</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="127-linuxcnc-oracle">12.7 用 LinuxCNC 当 oracle</h3>
+<p>最有力的验证手段：<strong>同一份 G 代码，分别用 LinuxCNC 与我们的解释器跑，比对逐块的刀位</strong>。</p>
+<p>LinuxCNC 可以在 sim 配置下无硬件运行，并能导出关节位置。与 ADR-003 §8.9「用 LinuxCNC 验证运动学」是同一套路，只是从运动学扩展到整个解释器。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">matches_linuxcnc_interpreter</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">ours</span><span style="color: #ABB2BF">   </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">interpret</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">src</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">FanucDialect</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">wcs</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">refr</span><span style="color: #ABB2BF">   </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">load_linuxcnc_trace</span><span style="color: #ABB2BF">(</span><span style="color: #98C379">"testdata/golden/linuxcnc_prog1.csv"</span><span style="color: #ABB2BF">);  </span><span style="color: #7F848E">// 逐块刀位</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">, (</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">)) </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">ours</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">blocks</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">zip</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">refr</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">enumerate</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">((</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">target</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">tip</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">tip</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">length</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-6</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"块 {i} 刀位偏差"</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>注意</strong>：LinuxCNC 的 G 代码方言与 Fanuc 不同（§12.5），所以这个对拍只能用于<strong>用 LinuxCNC 方言写的测试程序</strong>。Fanuc 方言的程序只能靠金标准手工核对。</p>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+[package]
+name = "cncsim-collide"
+description = "碰撞：GJK / 保守推进 / DistanceField"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-motion.workspace = true
+cncsim-tool.workspace = true

@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-010-单元格索引</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 结论</a></li>
+<li><a href="#1-openvdb">1. OpenVDB 是怎么做的</a></li>
+<li><a href="#2">2. 为什么我们的场景正好适合</a></li>
+<li><a href="#3">3. 实现</a><ul>
+<li><a href="#31">3.1 结构</a></li>
+<li><a href="#32">3.2 两遍构建</a></li>
+<li><a href="#33">3.3 顶点顺序因此变成空间序</a></li>
+<li><a href="#34">3.4 顶点色不再逐点写</a></li>
+</ul>
+</li>
+<li><a href="#4">4. 数字</a></li>
+<li><a href="#5">5. 没做的</a></li>
+<li><a href="#6">6. 一句话</a></li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="adr-010-popcount">ADR-010 单元格索引：块 + 位掩码 + popcount</h1><div class="meta"><span class="chip hi">块索引</span><span class="chip hi">位掩码</span><span class="chip">OpenVDB</span></div>
+<blockquote>
+<p>状态：<strong>已实现</strong>（2026-10-29，<code>voxel::cellmap</code>，4 个测试）
+日期：2026-10-29
+关联：ADR-006 §7.1（Surface Nets 三条坑）、ADR-008 §3（LOD 候选格）、ADR-009（并行）</p>
+</blockquote>
+<hr />
+<h2 id="0">0. 结论</h2>
+<p>三句话：</p>
+<ol>
+<li><strong>不再用一张 1600 万条的大哈希表</strong>存"单元格 → 顶点索引"。改成每 8³ 个单元格一个块，
+   块内用 <strong>512 位掩码</strong>记"哪些格有顶点"，索引 = <code>base + popcount(掩码前缀)</code>。</li>
+<li>这一手是从 OpenVDB 抄的：<strong>它的树里只有 root 是哈希表</strong>，往下一律
+   <code>children[popcount(mask &amp; 低位)]</code>。我们把同一个套路用在同一层。</li>
+<li>200 mm 毛坯提取：<strong>3.09 s → 0.81 s</strong>（3.8×）。索引内存 <strong>310 MB → 25 MB</strong>，
+   另外还省掉了原来那张 192 MB 的 <code>cells</code> 数组。</li>
+</ol>
+<hr />
+<h2 id="1-openvdb">1. OpenVDB 是怎么做的</h2>
+<p>它的树是 <code>root → 32³ → 16³ → 8³</code>，<strong>只有 root 用哈希表</strong>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>root（哈希，通常 1~8 条）          ← 唯一的哈希
+  └ internal 32³：u64 位掩码 + popcount 找子节点
+      └ internal 16³：同上
+          └ leaf 8³：512 个值的连续数组（+ 1 位/体素的 active mask）
+</code></pre></div>
+
+<p>取一个体素 = 1 次 root 哈希 + 3 次位运算 + 1 次数组下标。子节点在
+<code>children[popcount(mask &amp; ((1&lt;&lt;slot)-1))]</code>——<strong>位掩码就是"哪些槽有东西"的压缩索引</strong>，
+不需要为每个槽都分配内存（稀疏），也不需要哈希（顺序）。</p>
+<p>配套的两件事：</p>
+<ul>
+<li><strong><code>ValueAccessor</code> 缓存上一次的路径</strong>：连续查询落在同一 leaf 时直接命中缓存，
+  连 root 哈希都省掉。这就是"临时局部性"，任何按索引遍历的工具都吃得到。</li>
+<li><strong><code>LeafManager</code> 给出叶区间</strong>，工具层按区间并行，节点之间零共享。
+  （我们的 <code>par</code> 做的是同一件事：按叶 / 块区间切。）</li>
+</ul>
+<p>对我们最有用的不是它的树，而是那个<strong>思想</strong>：<strong>"有没有"用 1 bit，"是多少"用前缀和算</strong>。</p>
+<hr />
+<h2 id="2">2. 为什么我们的场景正好适合</h2>
+<p>顶点按单元格生成，而<strong>每 512 个相邻单元格里只有几十个有顶点</strong>——表面是二维的，
+单元格空间是三维的。200 mm 毛坯实测：1600 万个顶点摊在 25 万个块里，块内平均 64/512 = 12.5%。</p>
+<p>于是两种做法的内存差一个数量级：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>每块开销</th>
+<th>25 万块合计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>稠密 <code>[u32; 512]</code></td>
+<td>2 KB</td>
+<td><strong>500 MB</strong>（比哈希表还差）</td>
+</tr>
+<tr>
+<td>位掩码 <code>[u64; 8]</code> + base</td>
+<td>64 B + 4 B</td>
+<td><strong>17 MB</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>加上块表本身（25 万条 <code>[i32;3] → u32</code>，8 MB）与坐标数组（3 MB），索引总共 <strong>~25 MB</strong>，
+而原来那张 <code>FxHashMap&lt;[i32;3], u32&gt;</code> 是 <strong>310 MB</strong>。</p>
+<blockquote>
+<p>12.5% 的占用率是"块内位掩码"能赢的前提。如果占用率超过 ~30%，稠密数组反而更划算——
+这个结构是为"表面在体素空间里稀疏"这件事定制的，不是通用容器。</p>
+</blockquote>
+<hr />
+<h2 id="3">3. 实现</h2>
+<h3 id="31">3.1 结构</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">CellMap</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">blocks</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">FxHashMap</span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF">[</span><span style="color: #E5C07B">i32</span><span style="color: #ABB2BF">; </span><span style="color: #D19A66">3</span><span style="color: #ABB2BF">], </span><span style="color: #E5C07B">u32</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,  </span><span style="color: #7F848E">// 块坐标 → 块序号（已按坐标排序）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">coords</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Vec</span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF">[</span><span style="color: #E5C07B">i32</span><span style="color: #ABB2BF">; </span><span style="color: #D19A66">3</span><span style="color: #ABB2BF">]</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,             </span><span style="color: #7F848E">// 块坐标，按序号</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">words</span><span style="color: #ABB2BF">:  </span><span style="color: #E5C07B">Vec</span><span style="color: #56B6C2">&lt;</span><span style="color: #E5C07B">u64</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,                  </span><span style="color: #7F848E">// 每块 8 个 u64 = 512 位</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">base</span><span style="color: #ABB2BF">:   </span><span style="color: #E5C07B">Vec</span><span style="color: #56B6C2">&lt;</span><span style="color: #E5C07B">u32</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,                  </span><span style="color: #7F848E">// 每块第一个顶点的全局索引（前缀和）</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<ul>
+<li>块 = <code>cell &gt;&gt; 3</code>（算术右移，负坐标正确：<code>-1 &gt;&gt; 3 == -1</code>），槽 = <code>cell &amp; 7</code> 拼成 9 位。</li>
+<li><code>get(cell)</code>：块表查一次 → 读该块的 8 个 u64 → 没置位就 <code>None</code> → 否则
+  <code>base + 前面所有字的 popcount + 本字低位 popcount</code>。</li>
+</ul>
+<h3 id="32">3.2 两遍构建</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>遍</th>
+<th>做什么</th>
+<th>并行</th>
+<th>代价（1600 万顶点）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>①</td>
+<td>建块表、置位、计数</td>
+<td>串行</td>
+<td>1600 万次<strong>小表</strong>查找（8 MB，命中缓存）</td>
+</tr>
+<tr>
+<td>②</td>
+<td>按块序算 rank、写顶点数组</td>
+<td><strong>并行</strong></td>
+<td>索引唯一 → 各块写各自的下标</td>
+</tr>
+</tbody>
+</table></div>
+<p>第②遍必须等掩码定稿（rank 依赖它），所以只能两遍。</p>
+<p><strong>重复记录</strong>（相邻叶各算一次同一格）在第①遍天然合并——同一位置两次；
+第②遍它们会写同一个下标、写同样的字节，所以顶点数组用 <strong>relaxed 原子写</strong>：
+不用 <code>unsafe</code>，也不依赖"谁先谁后"。</p>
+<h3 id="33">3.3 顶点顺序因此变成空间序</h3>
+<p>索引 = 块序 + 槽序，所以顶点按坐标排列，不再是"叶迭代顺序"。</p>
+<p>这对渲染无影响，但<strong>细格与 LOD 必须走同一个构建器</strong>——<code>k=1 与细格逐位一致</code>
+那条测试就是靠这个成立的（一开始分开写，它立刻红）。</p>
+<p>副产品：顺序<strong>与分块数无关</strong>由构造保证，不再是"合并顺序恰好等于串行顺序"那么脆弱。</p>
+<h3 id="34">3.4 顶点色不再逐点写</h3>
+<p><code>colors</code> 现在是常量（调色板未接，ADR-005），直接 <code>vec![[0,128,0,255]; n]</code> 铺满，
+省掉 1600 万次写入。</p>
+<hr />
+<h2 id="4">4. 数字</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>哈希表</th>
+<th>块 + 位掩码</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200 mm 毛坯提取（3200 万面）</td>
+<td>3.09 s</td>
+<td><strong>0.81 s</strong></td>
+<td>3.8×</td>
+</tr>
+<tr>
+<td>200 mm LOD k=4（200 万面）</td>
+<td>0.33 s</td>
+<td><strong>0.25 s</strong></td>
+<td>1.3×</td>
+</tr>
+<tr>
+<td>200 mm LOD k=2（800 万面）</td>
+<td>2.21 s</td>
+<td><strong>1.68 s</strong></td>
+<td>1.3×</td>
+</tr>
+<tr>
+<td>12×12×8 块提取</td>
+<td>5 ms</td>
+<td><strong>5 ms</strong></td>
+<td>—</td>
+</tr>
+<tr>
+<td>索引内存（200 mm）</td>
+<td>310 MB</td>
+<td><strong>25 MB</strong></td>
+<td>12×</td>
+</tr>
+<tr>
+<td><code>cells</code> 数组（200 mm）</td>
+<td>192 MB</td>
+<td><strong>0</strong>（从掩码反推）</td>
+<td>—</td>
+</tr>
+</tbody>
+</table></div>
+<p>顶点数 / 三角形数 / 丢洞数与改前<strong>完全一致</strong>（16 000 002 / 32 000 000 / 0）——
+这是必须的：换的只是"怎么找到它"，不是"它是什么"。</p>
+<p>提取那 3.8× 的来由：原来是 <strong>1600 万次 × 2 次探测</strong>（<code>contains_key</code> + <code>insert</code>）
+打进 310 MB（每次都是 DRAM 延迟）；现在是 1600 万次打进 8 MB（L3 命中），
+外加第②遍的写是并行的。</p>
+<hr />
+<h2 id="5">5. 没做的</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>第①遍也并行</td>
+<td>需要给块表分片 + 计数归并；串行那 0.25 s 还能忍</td>
+</tr>
+<tr>
+<td>块粒度改 16³（4096 格）</td>
+<td>掩码 512 B/块，块数降到 1/8；但块内占用率会掉到 1.6%，前缀和变长。等实测瓶颈再说</td>
+</tr>
+<tr>
+<td>用 <code>ValueAccessor</code> 那种路径缓存</td>
+<td>现在每次 <code>get</code> 是"小表 + 掩码"，已经在缓存里，缓存路径省不了多少</td>
+</tr>
+<tr>
+<td>把这套用到树的 root 上</td>
+<td>root 只有 1~8 条，本来就是缓存友好的</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="6">6. 一句话</h2>
+<p><strong>"有没有"用 1 bit，"是多少"用前缀和</strong>——同样的信息量，一张 310 MB 的哈希表被压成
+25 MB，查找从"随机撞 DRAM"变成"小表 + 位运算"。OpenVDB 十几年前就是这么干的，
+它省内存是为了装下更大的体素场，我们顺带把 3.8 倍速度也拿到了。</p>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

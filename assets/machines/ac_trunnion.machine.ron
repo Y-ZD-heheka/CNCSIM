@@ -1,0 +1,86 @@
+// AC 双转台摇篮式立式加工中心
+// 几何参数：L = 180 mm（A 轴中心 → C 转台台面）
+// 坐标系：Z=0 取在 A 轴中心高度；X/Y=0 在 C 轴轴线上
+// 数值已验证：tools/verify_trunnion.py（RTCP↔FK 偏差 7.7e-14）
+// 文档：docs/机床建模-AC双转台.md
+(
+    name: "AC 双转台摇篮（L=180）",
+
+    // 链的顺序：工件 → 刀具。
+    // 摇篮式的旋转轴在【工件端】，所以 C、A 在前；直线轴在机床端，在后。
+    // sign = -1 是因为工件转了 +A，要表达"工具在工件坐标系里"就必须用逆变换。
+    chain: [
+        (
+            name: "C",
+            kind: Rotary(Z),
+            offset: (0.0, 0.0, 0.0),
+            pivot:  (0.0, 0.0, 0.0),
+            sign:   -1.0,
+            limit:  (-99999.0, 99999.0),
+            parts:  [],
+        ),
+        (
+            name: "A",
+            kind: Rotary(X),
+            // 从台面中心退到 A 轴中心，必须在 A 旋转【之前】施加
+            offset: (0.0, 0.0, -180.0),
+            pivot:  (0.0, 0.0, 0.0),
+            sign:   -1.0,
+            limit:  (-110.0, 110.0),
+            parts:  [
+                // 摇篮本体（碰撞代理，外形按 D=400 工作台估）
+                (shape: Box(size: (480.0, 480.0, 60.0)),
+                 local: (1,0,0,0, 0,1,0,0, 0,0,1,0, 0.0, 0.0, -30.0, 1),
+                 color: [0.35, 0.38, 0.42],
+                 collider: Derived),
+            ],
+        ),
+        (
+            name: "X",
+            kind: Linear(X),
+            offset: (0.0, 0.0, 0.0),
+            pivot:  (0.0, 0.0, 0.0),
+            sign:   1.0,
+            limit:  (-400.0, 400.0),
+            parts:  [],
+        ),
+        (
+            name: "Y",
+            kind: Linear(Y),
+            offset: (0.0, 0.0, 0.0),
+            pivot:  (0.0, 0.0, 0.0),
+            sign:   1.0,
+            limit:  (-300.0, 300.0),
+            parts:  [],
+        ),
+        (
+            name: "Z",
+            kind: Linear(Z),
+            offset: (0.0, 0.0, 0.0),
+            pivot:  (0.0, 0.0, 0.0),
+            sign:   1.0,
+            limit:  (-120.0, 520.0),
+            parts:  [
+                // 主轴头（外形简化，碰撞代理按实测改 Explicit）
+                (shape: Box(size: (220.0, 220.0, 380.0)),
+                 local: (1,0,0,0, 0,1,0,0, 0,0,1,0, 0.0, 0.0, 190.0, 1),
+                 color: [0.28, 0.30, 0.34],
+                 collider: Derived),
+            ],
+        ),
+    ],
+
+    // 刀尖即链末端；实际刀具长度由刀具表（H 寄存器）另给
+    tool_length: 0.0,
+
+    // 摇篮式的回转中心与刀尖不重合，RTCP 用的是 A 轴中心，不是 pivot_distance
+    pivot_distance: (0.0, 0.0, 0.0),
+
+    // 运动学之外的机床参数（用于节拍与轴速校核）
+    motion: (
+        interp_period_ms: 1.0,
+        max_linear_speed: (30000.0, 30000.0, 30000.0),   // mm/min
+        max_rotary_speed: (25.0, 40.0),                  // rpm，A、C
+        max_linear_accel: 2940.0,                        // mm/s²
+    ),
+)

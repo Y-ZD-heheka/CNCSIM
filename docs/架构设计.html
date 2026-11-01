@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>架构设计</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">架构设计（13 crate）</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 先说初版分层错在哪</a></li>
+<li><a href="#1-crate">1. 分层与 crate 清单</a></li>
+<li><a href="#2">2. 依赖规则</a><ul>
+<li><a href="#21">2.1 硬规则</a></li>
+<li><a href="#22">2.2 允许的边（白名单）</a></li>
+<li><a href="#23">2.3 两条关键的"解耦"设计</a></li>
+</ul>
+</li>
+<li><a href="#3-crate">3. 每个 crate 的边界（做什么 / 不做什么）</a><ul>
+<li><a href="#cncsim-math">cncsim-math</a></li>
+<li><a href="#cncsim-motion">cncsim-motion</a></li>
+<li><a href="#cncsim-tool">cncsim-tool</a></li>
+<li><a href="#cncsim-kin">cncsim-kin</a></li>
+<li><a href="#cncsim-config">cncsim-config</a></li>
+<li><a href="#cncsim-gcode">cncsim-gcode</a></li>
+<li><a href="#cncsim-voxel">cncsim-voxel</a></li>
+<li><a href="#cncsim-collide">cncsim-collide</a></li>
+<li><a href="#cncsim-sim">cncsim-sim</a></li>
+<li><a href="#cncsim-render-cncsim-ui">cncsim-render / cncsim-ui</a></li>
+<li><a href="#cncsim-app">cncsim-app</a></li>
+</ul>
+</li>
+<li><a href="#4">4. 数据流与所有权</a></li>
+<li><a href="#5">5. 线程模型</a></li>
+<li><a href="#6">6. 错误与诊断的归属</a></li>
+<li><a href="#7-god-core">7. 为什么不用 god core</a></li>
+<li><a href="#8">8. 反模式清单（写代码时对照）</a></li>
+<li><a href="#9">9. 自动化守卫</a></li>
+<li><a href="#10-adr-003">10. 与 ADR-003 的一处修正</a></li>
+<li><a href="#11">11. 落地顺序</a></li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="cncsim">CNCSIM 架构设计</h1><div class="meta"><span class="chip hi">架构契约</span><span class="chip hi">2026-10-30</span></div>
+<blockquote>
+<p>日期：2026-10-28
+目标：模块化、高内聚、低耦合，且<strong>耦合约束可机器校验</strong>
+替代：主方案 §3.1 的初版分层</p>
+</blockquote>
+<hr />
+<h2 id="0">0. 先说初版分层错在哪</h2>
+<p>主方案 §3.1 是这么分的：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>cncsim-app / ui / render / sim / kin / gcode / core
+</code></pre></div>
+
+<p>两处硬伤：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>问题</th>
+<th>后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong><code>cncsim-core</code> 是个"类型垃圾场"</strong></td>
+<td>凡是两个 crate 都要用的类型就往里塞。它会被所有 crate 依赖（高扇入），但内部没有任何内聚的概念——<strong>这是低内聚的典型形态，却伪装成"公共层"</strong></td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong><code>cncsim-sim</code> 是个杂货铺</strong></td>
+<td>去除调度 + 碰撞 + 精度比对 + 节拍统计，四个不相干的关注点挤在一个 crate 里</td>
+</tr>
+</tbody>
+</table></div>
+<p>改法：</p>
+<ul>
+<li><strong>删掉 <code>core</code></strong>。公共类型按<strong>概念簇</strong>拆成三个小 crate：<code>math</code>（数学）、<code>motion</code>（运动）、<code>tool</code>（刀具）。每个都只服务一个概念。</li>
+<li><strong>拆掉 <code>sim</code></strong>。几何内核（<code>voxel</code> / <code>collide</code>）独立成层；<code>sim</code> 只留"编排"，即把各层按时间顺序驱动起来。</li>
+<li>补上 ADR-003/006 里已经存在但分层图没体现的 <code>voxel</code> / <code>collide</code> / <code>math</code>。</li>
+</ul>
+<hr />
+<h2 id="1-crate">1. 分层与 crate 清单</h2>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>L5 装配    cncsim-app
+              │
+L4 呈现    cncsim-render ──┐   cncsim-ui ──┐
+              │            │       │       │
+L3.5 控制              cncsim-hmi ─┘       │
+                       │                   │
+L3 编排    └────────── cncsim-sim ─────────┘
+                       │
+        ┌──────────────┼──────────────┐
+L2 几何内核  cncsim-voxel      cncsim-collide
+        │              │              │
+L1 领域算法  cncsim-kin ────┴── cncsim-gcode
+        │              │              │
+L0 词汇    cncsim-motion ── cncsim-tool
+                       │
+基座       cncsim-math
+</code></pre></div>
+
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>crate</th>
+<th>一句话职责</th>
+<th>依赖</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>cncsim-math</code></strong></td>
+<td>f64 线性代数：<code>DVec3 / DMat4 / DQuat / 最小二乘</code></td>
+<td><strong>无</strong></td>
+</tr>
+<tr>
+<td><strong><code>cncsim-config</code></strong></td>
+<td>磁盘格式：<code>.machine.ron</code> → <code>MachineTopology</code>（<strong>输入适配器</strong>）</td>
+<td>math, kin</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-motion</code></strong></td>
+<td>运动词汇：<code>Pose</code>、<code>MotionSegment</code>、进给模式、时间戳</td>
+<td>math</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-tool</code></strong></td>
+<td>刀具词汇：母线 profile、<code>CutterKind</code>、刀柄</td>
+<td>math</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-kin</code></strong></td>
+<td>关节值 ↔ 刀位：拓扑、FK、解耦 IK、RTCP、奇异点</td>
+<td>math, motion</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-gcode</code></strong></td>
+<td>文本 ↔ 运动程序：词法、模态机、方言</td>
+<td>math, motion, tool</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-voxel</code></strong></td>
+<td>实体表示与 CSG：稀疏树、解析 SDF、扫掠、MC 提取、STL 解析、网格体素化</td>
+<td>math, motion, tool</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-collide</code></strong></td>
+<td>相交判定：GJK、凸体、保守推进、检出保证</td>
+<td>math, motion, tool</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-sim</code></strong></td>
+<td>编排：仿真调度、回放缓冲、后台线程、报告聚合</td>
+<td>以上全部</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-hmi</code></strong></td>
+<td>人机控制：状态机、急停、倍率、报警队列</td>
+<td>math, sim</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-render</code></strong></td>
+<td>Bevy 插件：场景、毛坯网格、剖切、着色</td>
+<td>math, motion, tool, voxel, sim</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-ui</code></strong></td>
+<td>bevy_egui 面板：时间轴、机床树、报告</td>
+<td>math, <strong>hmi</strong>（不直连 sim）</td>
+</tr>
+<tr>
+<td><strong><code>cncsim-app</code></strong></td>
+<td>装配：窗口、CLI、文件 I/O</td>
+<td>全部</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>13 个 crate 会不会太多？</strong> 判断标准是"删掉它之后耦合会不会变高"：</p>
+<ul>
+<li>删 <code>motion</code> → <code>kin</code> 和 <code>gcode</code> 必须互相依赖或各自定义 <code>Pose</code>，耦合升高 ✓ 保留</li>
+<li>删 <code>tool</code> → <code>voxel</code> 和 <code>collide</code> 各自定义刀具，两份会漂移 ✓ 保留</li>
+<li>删 <code>collide</code> → <code>sim</code> 里塞进 GJK 和保守推进，回到杂货铺 ✓ 保留</li>
+<li>删 <code>ui</code> → <code>render</code> 里塞进 egui，呈现层职责混杂 ✓ 保留</li>
+<li>删 <code>hmi</code> → 控制状态机塞进 <code>ui</code>，<strong>headless 批处理就没有急停/倍率/报警</strong>；塞进 <code>sim</code> 则仿真调度与操作语义混在一起 ✓ 保留</li>
+<li>删 <code>config</code> → <code>kin</code> 就得读整个 <code>.ron</code>，于是它必须知道 <code>Shape::Box</code> 和 <code>ColliderSpec::Derived</code>，<strong>L1 算法层被磁盘格式污染</strong>；或者 <code>app</code> 里手写解析，各层共享的字段定义无处安放 ✓ 保留</li>
+</ul>
+<p>每一个都满足"删了就变差"。</p>
+<hr />
+<h2 id="2">2. 依赖规则</h2>
+<h3 id="21">2.1 硬规则</h3>
+<ol>
+<li><strong>只能向下依赖</strong>，禁止反向与横向。</li>
+<li><strong><code>kin</code> 不知道 <code>voxel</code> 存在；<code>voxel</code> 不知道 <code>kin</code> 存在。</strong> 只有 <code>sim</code> 同时知道两者。</li>
+<li><strong>L0–L3 零 Bevy 依赖</strong>（<code>cargo tree</code> 里不出现 bevy）。</li>
+<li><strong>禁止"公共类型 crate"</strong>。新增共享类型时，先问它属于哪个概念簇；答不出来说明设计没想清，不要新建 <code>core</code>。</li>
+</ol>
+<h3 id="22">2.2 允许的边（白名单）</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>math     → (无)
+config   → math, kin            ← 输入适配器；kin 反过来不认识 .ron
+motion   → math
+tool     → math
+kin      → math, motion
+gcode    → math, motion, tool
+voxel    → math, motion, tool
+collide  → math, motion, tool
+sim      → math, motion, tool, kin, gcode, voxel, collide
+hmi      → math, sim
+render   → math, motion, tool, voxel, sim
+ui       → math, hmi          ← 不直连 sim
+app      → 全部
+</code></pre></div>
+
+<p><strong>除白名单外一律视为违规。</strong> <code>tools/check_deps.py</code> 会读每个 crate 的 <code>Cargo.toml</code> 逐条核对，违反则 CI 失败。</p>
+<h3 id="23">2.3 两条关键的"解耦"设计</h3>
+<p><strong>（a）<code>collide</code> 不依赖 <code>voxel</code>——用 trait 反转</strong></p>
+<p>碰撞要查毛坯距离场，但若 <code>collide → voxel</code>，两者就绑死了。改成：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// 定义在 collide 里，由 voxel 实现</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">trait</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">DistanceField</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// 有符号距离。正值在材料外。</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">sdf</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E5C07B">self</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// 带宽外返回钳制值（供粗筛判断"足够远"）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">band</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E5C07B">self</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>好处有三个：</p>
+<ol>
+<li><code>collide</code> 可以脱离 <code>voxel</code> 单独测试——<strong>直接用解析半空间做假实现</strong>，这正是 ADR-004 §7.7 那条"圆柱 vs 半空间"随机对拍需要的。</li>
+<li>将来换体素结构（比如换分辨率策略）不影响 <code>collide</code>。</li>
+<li><code>voxel</code> 不知道自己被碰撞用着，可以独立演进。</li>
+</ol>
+<p><strong>（b）不建共享的 <code>Diagnostic</code> 枚举</strong></p>
+<p><code>kin</code> 报奇异点、<code>collide</code> 报碰撞、<code>gcode</code> 报解析失败。如果都塞进一个底层 <code>Diagnostic</code>，那个枚举就成了第二个"垃圾场"。</p>
+<p>改成<strong>各层自带 finding 类型，<code>sim</code> 组合</strong>：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// kin 里</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">enum</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">KinFinding</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">Singularity</span><span style="color: #ABB2BF"> { </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF"> }, </span><span style="color: #E06C75">AxisLimit</span><span style="color: #ABB2BF"> { </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF"> }, </span><span style="color: #E06C75">FeedDeviation</span><span style="color: #ABB2BF"> { </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF"> } }</span>
+<span style="color: #7F848E">// collide 里</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">CollisionEpisode</span><span style="color: #ABB2BF"> { </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF"> }</span>
+<span style="color: #7F848E">// gcode 里</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">ParseIssue</span><span style="color: #ABB2BF"> { </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF"> }</span>
+
+<span style="color: #7F848E">// sim 里——只有它同时知道三者</span>
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">enum</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Diagnostic</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Kin</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">kin</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">KinFinding</span><span style="color: #ABB2BF">),</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Collision</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">collide</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">CollisionEpisode</span><span style="color: #ABB2BF">),</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Parse</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">gcode</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">ParseIssue</span><span style="color: #ABB2BF">),</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>底层互不相识，编排层负责组装。<strong>这是"低耦合"最实用的一条：不要在底层造共享词汇，让上层组合。</strong></p>
+<hr />
+<h2 id="3-crate">3. 每个 crate 的边界（做什么 / 不做什么）</h2>
+<h3 id="cncsim-math"><code>cncsim-math</code></h3>
+<ul>
+<li><strong>做</strong>：<code>DVec3 / DMat4 / DQuat</code>、<code>Transform</code> 组合、最小二乘、矩阵求逆</li>
+<li><strong>不做</strong>：任何 CNC 概念；不引入 <code>glam</code>（渲染边界才转 f32）</li>
+</ul>
+<h3 id="cncsim-motion"><code>cncsim-motion</code></h3>
+<ul>
+<li><strong>做</strong>：<code>Pose { tip: DVec3, axis: DVec3 }</code>、<code>MotionSegment</code>（直线/圆弧）、<code>FeedMode</code>、单位约定</li>
+<li><strong>不做</strong>：不解析 G 代码、不算运动学</li>
+<li><strong>必须钉死的约定</strong>：<code>Pose.axis</code> 是<strong>单位向量，方向由刀尖指向主轴</strong>（A=0 时为 +Z）。全项目只此一种约定，用测试锁住</li>
+</ul>
+<h3 id="cncsim-tool"><code>cncsim-tool</code></h3>
+<ul>
+<li><strong>做</strong>：母线 profile（ρ,z 折线）、<code>CutterKind</code>、刃长、刀柄轮廓、<code>sd_profile</code> 的<strong>几何定义</strong></li>
+<li><strong>不做</strong>：不做碰撞分解、不做扫掠</li>
+</ul>
+<h3 id="cncsim-kin"><code>cncsim-kin</code></h3>
+<ul>
+<li><strong>做</strong>：<code>MachineTopology</code>、FK、解耦 IK、RTCP、奇异点检测、轴速校核</li>
+<li><strong>不做</strong>：不读 G 代码（吃 <code>MotionSegment</code>，吐关节值）；不碰几何内核；<strong>不认识 <code>.ron</code></strong></li>
+</ul>
+<h3 id="cncsim-config"><code>cncsim-config</code></h3>
+<ul>
+<li><strong>做</strong>：解析 <code>.machine.ron</code>、语义校验（2 旋转 + 3 直线、限位不反向、<code>sign ∈ {±1}</code>）、产出各层自己的类型</li>
+<li><strong>不做</strong>：不做任何计算；不做默认值猜测（缺参数就报错，不"合理推断"）</li>
+</ul>
+<p><strong>为什么它是独立 crate</strong>：磁盘格式是<strong>跨层</strong>的——<code>chain</code> 归 <code>kin</code>，<code>parts</code> 归 <code>render</code>/<code>collide</code>，<code>motion</code> 归 <code>sim</code>。
+让 <code>kin</code> 读整个文件，它就得知道 <code>Shape::Box</code> 和 <code>ColliderSpec::Derived</code>，L1 算法层被磁盘格式污染。
+<strong>只有 <code>config</code> 知道"文件长什么样"</strong>，各领域 crate 只接收自己的类型。</p>
+<p><strong>方向不能反</strong>：<code>config → kin</code>，不是 <code>kin → config</code>。领域层永远不知道自己被序列化成了什么。</p>
+<p><strong>v1 只解析运动学部分</strong>，<code>parts</code> / <code>motion</code> 被 serde 静默忽略。这不是遗漏，是分层：
+等 <code>render</code> / <code>collide</code> 有了 <code>Shape</code> / <code>ColliderSpec</code> 类型，再在 <code>config</code> 里补，各层代码不动。</p>
+<p><strong>一条锁漂移的测试</strong>：<code>kin::MachineTopology::ac_trunnion()</code> 是测试用的硬编码夹具（测试不该依赖文件 I/O），
+<code>hardcoded_matches_file</code> 断言它与真实 <code>.ron</code> 逐字段一致。<strong>两份数据会悄悄分家，只有测试能拦住。</strong></p>
+<h3 id="cncsim-gcode"><code>cncsim-gcode</code></h3>
+<ul>
+<li><strong>做</strong>：词法、模态状态机、方言、<code>MotionProgram</code></li>
+<li><strong>不做</strong>：不做运动学（输出的块里是<strong>位姿</strong>，不是关节值）</li>
+</ul>
+<blockquote>
+<p>这条边界很重要：<code>gcode</code> 若自己调 <code>kin</code> 做 RTCP，解析器就绑死在某台机床上。<strong>RTCP 是 kin 的事，gcode 只负责把 B/C 和 X/Y/Z 原样交出去。</strong></p>
+</blockquote>
+<h3 id="cncsim-voxel"><code>cncsim-voxel</code></h3>
+<ul>
+<li><strong>做</strong>：稀疏树、<code>SparseGrid</code>、解析扫掠 SDF、CSG、MC 提取、<code>MeshData</code> 输出、
+  STL 解析与网格体素化（<code>stl</code> / <code>meshvol</code>——设计模型比对的设计场来源）</li>
+<li><strong>不做</strong>：不做碰撞判定（只提供 <code>DistanceField</code> 实现）；不碰 Bevy</li>
+</ul>
+<h3 id="cncsim-collide"><code>cncsim-collide</code></h3>
+<ul>
+<li><strong>做</strong>：GJK、凸体、保守推进、episode 聚类、<code>DistanceField</code> trait</li>
+<li><strong>不做</strong>：不拥有体素；不知道机床长什么样（吃 <code>Collider</code> 列表）</li>
+</ul>
+<h3 id="cncsim-sim"><code>cncsim-sim</code></h3>
+<ul>
+<li><strong>做</strong>：状态机、<code>PlaybackBuffer</code>、后台线程、诊断聚合、<code>SimReport</code>、
+  解释器 issue 逐条进报告（Trust 打通）、设计模型比对（<code>compare</code>）、非线性误差汇总</li>
+<li><strong>不做</strong>：不含任何算法细节；不做渲染；不做文件 I/O</li>
+</ul>
+<h3 id="cncsim-render-cncsim-ui"><code>cncsim-render</code> / <code>cncsim-ui</code></h3>
+<ul>
+<li><strong>做</strong>：把 <code>sim</code> 的快照画出来、把用户操作变成 <code>sim</code> 命令</li>
+<li><strong>不做</strong>：不做任何计算（颜色映射之外）</li>
+</ul>
+<h3 id="cncsim-app"><code>cncsim-app</code></h3>
+<ul>
+<li><strong>做</strong>：装配、窗口、CLI、读写文件</li>
+<li><strong>不做</strong>：不含业务逻辑</li>
+</ul>
+<hr />
+<h2 id="4">4. 数据流与所有权</h2>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>.gcode 文件
+   │ ① app 读文件（I/O 在 app，不在 gcode）
+   ▼
+&amp;str ──gcode::parse()──▶ MotionProgram        【不可变，解析后不再改】
+   │
+   │ ② kin：按插补周期展开
+   ▼
+Vec&lt;SimStep&gt;（关节值 + 刀位 + 时间戳）        【不可变，一次算完】
+   │
+   │ ③ 后台线程：voxel 切削 + collide 判定（顺序固定：先切后撞）
+   ▼
+TileUpdate / CollisionEpisode                 【只增不改，走 channel】
+   │
+   │ ④ sim 聚合成 PlaybackBuffer + SimReport
+   ▼
+render 读快照 / ui 读报告                      【只读】
+</code></pre></div>
+
+<p><strong>所有权三条规则</strong>：</p>
+<ol>
+<li><strong><code>MotionProgram</code> 和 <code>Vec&lt;SimStep&gt;</code> 是不可变的</strong>——算完之后谁都能读，不需要锁。</li>
+<li><strong><code>SparseGrid</code> 只有一个所有者：后台线程</strong>。其他任何地方都拿不到它，只能通过 <code>DistanceField</code> 的只读快照或 <code>TileUpdate</code> 看结果。</li>
+<li><strong>跨线程只走 channel，不共享可变状态</strong>。</li>
+</ol>
+<p>第 2 条是低耦合的关键：<strong>毛坯网格的所有权单一</strong>，就不可能出现"渲染线程和碰撞线程看到不同版本"。</p>
+<hr />
+<h2 id="5">5. 线程模型</h2>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>主线程（Bevy）
+  ├─ 读 PlaybackBuffer → 更新 Transform / Mesh
+  ├─ 跑 egui
+  ├─ hmi.tick()：推进控制状态机、聚合报警
+  └─ 把用户命令写进 cmd channel
+        │
+后台仿真线程（独占 SparseGrid）
+  ├─ 从 cmd 取命令
+  ├─ 按 SimStep 顺序：voxel.cut() → collide.check()
+  ├─ 产出 TileUpdate → tile channel（容量 64，满了阻塞＝天然限速）
+  └─ 产出 CollisionEpisode → diag channel
+</code></pre></div>
+
+<p><strong><code>voxel</code> 与 <code>collide</code> 都在同一个线程</strong>，因为它们访问同一份 <code>SparseGrid</code>。放两个线程就要加锁，锁又带来顺序不确定性——<strong>宁可串行</strong>（碰撞开销远小于去除，见 ADR-004 §8）。</p>
+<hr />
+<h2 id="6">6. 错误与诊断的归属</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>层</th>
+<th>错误类型</th>
+<th>谁处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gcode</code></td>
+<td><code>ParseIssue</code>（行号 + 原因），<strong>不中断</strong></td>
+<td><code>sim</code> 收进报告，UI 高亮行</td>
+</tr>
+<tr>
+<td><code>kin</code></td>
+<td><code>KinFinding</code>（奇异、超限、进给偏差）</td>
+<td><code>sim</code> 收进报告</td>
+</tr>
+<tr>
+<td><code>voxel</code></td>
+<td><code>VoxelError</code>（内存不足、h 非法）</td>
+<td>致命，返回 <code>sim</code> 后转 Error 态</td>
+</tr>
+<tr>
+<td><code>collide</code></td>
+<td><code>CollisionEpisode</code>（不是错误，是结果）</td>
+<td><code>sim</code> 聚类进报告</td>
+</tr>
+<tr>
+<td><code>app</code></td>
+<td>I/O 错误</td>
+<td>弹窗</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>约定：解析失败不中断</strong>。G 代码方言差异大，一行不认识就整份失败会让工具不可用——跳过该块、记录、继续。</p>
+<hr />
+<h2 id="7-god-core">7. 为什么不用 god <code>core</code></h2>
+<p>把"公共类型"抽成一个 crate 看起来整洁，实际代价：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>代价</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>内聚度为零</strong></td>
+<td><code>core</code> 里的类型彼此无关，改 A 的动机和改 B 的动机不同</td>
+</tr>
+<tr>
+<td><strong>扇入爆炸</strong></td>
+<td>所有 crate 依赖它 → 改一行全项目重编译</td>
+</tr>
+<tr>
+<td><strong>变成垃圾桶</strong></td>
+<td>下一个"两个 crate 都要用"的类型还会往里塞，因为它已经在那儿了</td>
+</tr>
+<tr>
+<td><strong>掩盖设计问题</strong></td>
+<td>两个 crate 需要同一类型，本该问"它们是不是该共享一个概念"，<code>core</code> 让这个问题消失</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>替代做法</strong>：按概念簇拆。本项目恰好有三个清晰的簇——数学、运动、刀具。三个都小、都稳定、都有明确归属。</p>
+<p>如果将来出现第四个跨 crate 概念，先问："它是不是某个现有簇的成员？"答不出来，再考虑新 crate——但<strong>不要叫 <code>core</code></strong>，要用概念命名。</p>
+<hr />
+<h2 id="8">8. 反模式清单（写代码时对照）</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>反模式</th>
+<th>症状</th>
+<th>正确做法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>core</code> 垃圾场</td>
+<td>新建 <code>utils</code> / <code>common</code> / <code>types</code> crate</td>
+<td>按概念簇归属</td>
+</tr>
+<tr>
+<td>循环依赖</td>
+<td><code>kin</code> 里 <code>use voxel</code></td>
+<td>由 <code>sim</code> 编排</td>
+</tr>
+<tr>
+<td>解析器懂运动学</td>
+<td><code>gcode</code> 里调 <code>kin::inverse</code></td>
+<td>输出位姿，RTCP 归 <code>kin</code></td>
+</tr>
+<tr>
+<td>渲染层算东西</td>
+<td><code>render</code> 里做几何计算</td>
+<td>算在 <code>voxel</code>，<code>render</code> 只上传</td>
+</tr>
+<tr>
+<td>共享可变状态</td>
+<td><code>Arc&lt;Mutex&lt;SparseGrid&gt;&gt;</code></td>
+<td>单一所有者 + channel</td>
+</tr>
+<tr>
+<td>底层共享枚举</td>
+<td><code>enum Diagnostic</code> 放在 <code>math</code></td>
+<td>各层自带 finding，<code>sim</code> 组合</td>
+</tr>
+<tr>
+<td><code>Pose</code> 约定漂移</td>
+<td>各处自己定 axis 方向</td>
+<td><code>motion</code> 里一种约定 + 测试锁</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="9">9. 自动化守卫</h2>
+<p><code>tools/check_deps.py</code>：读每个 crate 的 <code>Cargo.toml</code>，逐条核对白名单，并额外检查两条：</p>
+<ol>
+<li><strong>L0–L3 不得出现 <code>bevy</code> 依赖</strong>（除 <code>render</code> / <code>ui</code> / <code>app</code>）</li>
+<li><strong>不得存在 <code>cncsim-core</code> / <code>cncsim-common</code> / <code>cncsim-utils</code></strong> 这类名字</li>
+</ol>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>python<span style="color: #ABB2BF"> </span>tools/check_deps.py<span style="color: #ABB2BF">          </span><span style="color: #7F848E"># 违规则退出码 1</span>
+</code></pre></div>
+
+<p>架构约束写在文档里会腐化，<strong>只有写进 CI 才有效</strong>。</p>
+<hr />
+<h2 id="10-adr-003">10. 与 ADR-003 的一处修正</h2>
+<p>ADR-003 原计划"第一步借 cutrail 当运行时脚手架，用 <code>RemovalEngine</code> trait 隔离"。按本架构改为：</p>
+<ul>
+<li><strong>删掉 <code>RemovalEngine</code> trait</strong>——它是为"运行时切换内核"设计的，而我们最终只用自研内核。</li>
+<li><strong>cutrail 降级为 <code>dev-dependency</code></strong>，放进 <code>cncsim-voxel/tests/</code> 当<strong>测试预言机</strong>（对拍体积与包围盒，容差 1%）。</li>
+</ul>
+<p>好处：少一层间接、少一个 trait、<code>sim</code> 不需要知道"引擎可换"。而 ADR-003 想要的两件事——"有对照"和"不阻塞开发"——用测试依赖同样能得到，且不污染运行时。</p>
+<hr />
+<h2 id="11">11. 落地顺序</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>步</th>
+<th>内容</th>
+<th>为什么先做它</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>math</code> + <code>motion</code> + <code>tool</code>（三个词汇 crate）</td>
+<td>无依赖，先立地基</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>kin</code> + 三个锚点测试</td>
+<td>风险最高，最早验证</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>tools/check_deps.py</code> + CI</td>
+<td><strong>架构一立起来就上锁</strong>，别等腐化</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>voxel</code>（自研；ADR-002 后不再引 cutrail，用解析 SDF / 暴力采样做 oracle）</td>
+<td>最重的一块</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>collide</code>（用半空间假实现单测）</td>
+<td>依赖 trait，可脱离 voxel</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>sim</code> 编排</td>
+<td>前面都通了才有意义</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>render</code> / <code>ui</code> / <code>app</code></td>
+<td>最后</td>
+</tr>
+</tbody>
+</table></div>
+<p>第 3 步的位置是刻意的：<strong>架构守卫要在只有 3 个 crate 的时候上线</strong>，那时违规成本最低；等到 11 个 crate 再上，改起来就疼了。</p>
+<blockquote>
+<p><strong>落地状态</strong>（2026-10-30）：1–6 全部完成（<code>render</code> 完成了缓冲层与自包含 HTML 预览，
+Bevy 外壳待接——见 ADR-011）。372 个测试；第 10 节的 cutrail 预言机最终也未引入，
+对拍 oracle 用解析几何与暴力采样实现（<code>sd_sweep_sampled</code>、<code>closest_point_on_triangle</code>
+对拍、Box/Field 设计互证），保持了 L2 零外部依赖。</p>
+</blockquote>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

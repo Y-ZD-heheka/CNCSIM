@@ -1,0 +1,1669 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-004-碰撞检查方案</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 结论</a></li>
+<li><a href="#1">1. 问题分解：谁和谁撞</a><ul>
+<li><a href="#11">1.1 对象分类</a></li>
+<li><a href="#12">1.2 必须排除的"合法接触"</a></li>
+<li><a href="#13">1.3 需要检查的配对</a></li>
+</ul>
+</li>
+<li><a href="#2">2. 算法分层</a><ul>
+<li><a href="#21-bvh">2.1 粗筛：不需要 BVH</a></li>
+<li><a href="#22-a-sdf">2.2 窄相 A：旋转体 × 毛坯（复用解析 SDF）</a></li>
+<li><a href="#23-b-gjk-support-function">2.3 窄相 B：凸体 × 凸体（GJK，解析 support function）</a></li>
+<li><a href="#24">2.4 为什么不用"点采样"做凸体 × 凸体</a></li>
+<li><a href="#25-01-mm">2.5 检出保证：0.1 mm 采样到底能保证什么（修正）</a></li>
+<li><a href="#i16-f64">想提精度就换 i16，不是换 f64</a></li>
+<li><a href="#26">2.6 凸体 × 凸体为什么是精确的</a></li>
+</ul>
+</li>
+<li><a href="#3">3. 连续化：这是真正的风险点</a><ul>
+<li><a href="#31">3.1 问题</a></li>
+<li><a href="#32">3.2 三种解法</a></li>
+<li><a href="#33">3.3 算法</a></li>
+<li><a href="#34">3.4 为什么这个方案便宜</a></li>
+</ul>
+</li>
+<li><a href="#4-v15-v1">4. 安全间隙（v1.5，不在 v1）</a><ul>
+<li><a href="#41-sdf">4.1 障碍：窄带 SDF 的带宽</a></li>
+<li><a href="#42-edt">4.2 解法：粗网格 EDT</a></li>
+</ul>
+</li>
+<li><a href="#5">5. 毛坯演化对碰撞的影响（关键）</a><ul>
+<li><a href="#51">5.1 三类必须重算的情形</a></li>
+<li><a href="#52">5.2 顺序：先去除，后碰撞</a></li>
+<li><a href="#53">5.3 段内不一致性——以及它为什么可以忽略</a></li>
+<li><a href="#54-brick">5.4 brick 状态迁移：必须做，否则误报</a></li>
+<li><a href="#55-episode">5.5 碰撞事件要聚类成"episode"</a></li>
+<li><a href="#56">5.6 不支持"从中间继续仿真"</a></li>
+<li><a href="#57">5.7 同一个线程</a></li>
+</ul>
+</li>
+<li><a href="#6">6. 数据结构</a></li>
+<li><a href="#7-tdd">7. 测试策略（TDD）</a><ul>
+<li><a href="#71">7.1 已知答案的几何对</a></li>
+<li><a href="#72">7.2 穿透反例（最重要）</a></li>
+<li><a href="#73">7.3 误报测试</a></li>
+<li><a href="#74-cutrail-oracle">7.4 与 cutrail 对拍（第一步的 oracle）</a></li>
+<li><a href="#75-5">7.5 毛坯演化测试（§5 的正确性验证）</a></li>
+<li><a href="#76">7.6 性能基准</a></li>
+<li><a href="#77">7.7 随机对拍：把"不会漏报"变成可验证的</a></li>
+</ul>
+</li>
+<li><a href="#8">8. 性能预算</a></li>
+<li><a href="#9">9. 工作量</a></li>
+<li><a href="#10">10. 参考文献</a></li>
+<li><a href="#11_1">11. 与主方案的差异</a></li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="adr-004">ADR-004 碰撞检查方案</h1><div class="meta"><span class="chip hi">碰撞</span><span class="chip hi">保守推进</span><span class="chip">GJK</span></div>
+<blockquote>
+<p>状态：<strong>§2.2 / §2.3 / §2.5 / §2.6 / §3 已实现</strong>，<code>collide</code> 34 个测试 + <code>sim::stock</code> 11 个测试。
+<strong>进度 2026-10-29</strong>：方向 B（刀杆表面采样 + 保守推进）、GJK、EPA、episode 聚类、毛坯窄相 A
+（<code>sim::stock::shank_vs_stock_voxels</code>）全部落地。仍未做：夹具/机床的 GJK 接线、
+自适应 LOD、<code>i16</code> 值的切换。
+<strong>修订 2026-10-29（最终口径）</strong>：检出下限有<strong>两项</strong>误差，早期只算了量化那一项。
+① <code>i8</code> 量化半档 <strong>1.58 µm</strong>（∝h）；② 三线性重建 <code>h²/(8R_c)</code>（∝h²，平面为零）。
+<strong>最终口径：平面 1.6 µm；曲面 R_c ≥ 0.8 mm 时 2.0 µm；R_c 更小时按 1.6 + h²/(8R_c) 增长</strong>（φ0.5 球刀面 6.6 µm）。
+详见 <a href="计算精度分析.html"><code>计算精度分析.md</code></a> §2 与本文 §2.5.9。
+<strong>修订 2026-10-28</strong>：§2.5 的 0.17 µm 是错的（那是采样密度，不是符号可信度）。
+日期：2026-10-28
+关联：主方案 §7.2、ADR-003 §2</p>
+</blockquote>
+<hr />
+<h2 id="0">0. 结论</h2>
+<p>三句话：</p>
+<ol>
+<li>
+<p><strong>不需要通用网格碰撞。</strong> 因为毛坯是体素 SDF 不是网格、夹具与机床部件是凸体、刀具是旋转体——没有一对是"网格 vs 网格"。这砍掉了 BVH 动态重建这个最麻烦的部分。</p>
+</li>
+<li>
+<p><strong>正确性风险不在算法，在时间采样。</strong> 100 m/min 快移 = 1.67 mm/ms，2 mm 薄壁会被整步跳过。必须做<strong>保守推进（conservative advancement）</strong>，不能靠加密采样硬扛。</p>
+</li>
+<li>
+<p><strong>可以完全复用材料去除的解析刀具 SDF</strong>，而且碰撞判定是<strong>精确的</strong>（不是体素近似）：拿毛坯的窄带体素位置去测刀具解析 SDF 的符号。</p>
+</li>
+</ol>
+<p>工作量 <strong>14 人日</strong>（原估 12，增量在连续化与测试）。</p>
+<hr />
+<h2 id="1">1. 问题分解：谁和谁撞</h2>
+<h3 id="11">1.1 对象分类</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>对象</th>
+<th>几何表示</th>
+<th>来源</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>切削刃部分（刀尖 → 刃长）</td>
+<td>旋转体 profile</td>
+<td>刀具定义</td>
+</tr>
+<tr>
+<td>刀杆 + 刀柄 + 夹头</td>
+<td>旋转体 profile（同一条母线）</td>
+<td>刀具定义</td>
+</tr>
+<tr>
+<td>主轴头 / Z 滑枕 / 立柱</td>
+<td>OBB（参数化机床生成，§6.7）</td>
+<td>拓扑配置</td>
+</tr>
+<tr>
+<td>工作台 / 转台 / 桥板</td>
+<td>OBB</td>
+<td>拓扑配置</td>
+</tr>
+<tr>
+<td>毛坯</td>
+<td>稀疏窄带 SDF</td>
+<td><code>cncsim-voxel</code></td>
+</tr>
+<tr>
+<td>夹具 / 压板</td>
+<td>OBB（v1 只支持方块，不支持导入网格）</td>
+<td>用户输入</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>关键观察</strong>：v1 里没有三角形网格参与碰撞。毛坯是体素，其余是 OBB 或旋转体。</p>
+<h3 id="12">1.2 必须排除的"合法接触"</h3>
+<p>不做这一步，程序会疯狂误报：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>合法接触</th>
+<th>排除方法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>切削刃 vs 毛坯</strong></td>
+<td>这是切削不是碰撞。只把 <strong>刃长以上</strong> 的 profile 段（刀杆+刀柄）拿去测毛坯</td>
+</tr>
+<tr>
+<td>父子关节（Z 滑枕 vs 主轴头）</td>
+<td>拓扑链上距离 ≤ 1 的关节对跳过</td>
+</tr>
+<tr>
+<td>相邻关节（C 轴 vs A 轴）</td>
+<td>距离 ≤ 2 的跳过</td>
+</tr>
+<tr>
+<td>刀具 vs 主轴头</td>
+<td>同一装配体，直接排除</td>
+</tr>
+<tr>
+<td>毛坯 vs 工作台</td>
+<td>毛坯本来就放在台面上，恒接触。改为只测"毛坯底面是否低于台面"这一条标量</td>
+</tr>
+</tbody>
+</table></div>
+<p>第 5 条是最容易漏的：毛坯放在台面上，两者永远"相交"。正确做法是单独一条规则（毛坯 Z 下界 ≥ 台面 Z 上界），不进入通用碰撞流程。</p>
+<h3 id="13">1.3 需要检查的配对</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>刀杆/刀柄  ×  毛坯            ← 最常见、最危险（撞工件）
+刀杆/刀柄  ×  夹具/压板
+刀杆/刀柄  ×  工作台/转台
+切削刃      ×  夹具/压板       ← 切到压板
+主轴头      ×  毛坯            ← 五轴摆头时主轴头碰工件
+主轴头      ×  转台/桥板
+滑枕        ×  转台/桥板
+毛坯        ×  夹具            ← 装夹干涉
+</code></pre></div>
+
+<p>约 20–50 对（取决于机床部件数量）。</p>
+<hr />
+<h2 id="2">2. 算法分层</h2>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>① 粗筛：球/ AABB            每对每步，O(n²) 但 n≈50
+      ↓ 通过（约 5%）
+② 窄相：距离 / 相交
+      ├─ 旋转体 × SDF    → 体素点 × 解析 SDF（精确）
+      └─ 凸体 × 凸体      → GJK 距离
+      ↓
+③ 连续化：保守推进（只在②报"近"时触发）
+</code></pre></div>
+
+<h3 id="21-bvh">2.1 粗筛：不需要 BVH</h3>
+<p>n ≈ 50 且大部分对象是静态的。50² / 2 = 1250 次 AABB 测试，每次约 20 flops → 25k flops/步。100k 步 = 2.5e9 flops ≈ 2 秒<strong>总计</strong>，可忽略。</p>
+<p><strong>所以 v1 不要 BVH。</strong> 这一条把工作量从"BVH + refit + 退化处理"降到"一个 AABB 数组"。如果将来夹具支持导入网格（几千个三角形），再加 BVH 也不迟。</p>
+<blockquote>
+<p>学术界对五轴碰撞的经典做法是"包围球粗筛 + sweep plane 精筛"（见 §10 参考文献 [1][2]），其中包围球粗筛这一层与我们的 AABB 粗筛等价。他们的 sweep plane 是为了处理<strong>带毛坯几何更新的全局碰撞</strong>；我们因为毛坯已经是体素，直接查体素即可，不需要 sweep plane。</p>
+</blockquote>
+<h3 id="22-a-sdf">2.2 窄相 A：旋转体 × 毛坯（复用解析 SDF）</h3>
+<p>毛坯的窄带 SDF 存的是体素中心到毛坯表面的<strong>有符号距离</strong>；刀具的解析 SDF（ADR-002 §3.2 的 <code>sd_profile</code>）给出任意点到刀具实体的距离，<strong>没有带宽限制</strong>。</p>
+<p>于是判定变成：<strong>取与刀杆 AABB 相交的 brick 里的体素，逐点求 <code>sd_profile</code>，若存在 &lt; 0 的点则碰撞。</strong></p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">revbody_vs_stock</span><span style="color: #ABB2BF">(</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">SparseGrid</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">revbody</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">Profile</span><span style="color: #ABB2BF">,          </span><span style="color: #7F848E">// 只含刃长以上的段</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">xform</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">DMat4</span><span style="color: #ABB2BF">,              </span><span style="color: #7F848E">// 刀具位姿</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">axis_samples</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #ABB2BF">[</span><span style="color: #E06C75">DVec3</span><span style="color: #ABB2BF">],     </span><span style="color: #7F848E">// 刀杆轴线代表点（世界系）</span>
+<span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">Collision</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">aabb</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">revbody</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">aabb</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">xform</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">inv</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">xform</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">inverse</span><span style="color: #ABB2BF">();</span>
+
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks_overlapping</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">aabb</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">match</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">            </span><span style="color: #7F848E">// 无材料。只去料不加料 → 永久安全，可跳过</span>
+<span style="color: #ABB2BF">            </span><span style="color: #E5C07B">None</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Empty</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">continue</span><span style="color: #ABB2BF">,</span>
+
+<span style="color: #ABB2BF">            </span><span style="color: #7F848E">// 整块实心：刀杆深埋。用轴线代表点做包含测试</span>
+<span style="color: #ABB2BF">            </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Full</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">                </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">axis_samples</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">any</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">|</span><span style="color: #E06C75">p</span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">brick_contains</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">*</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">)) {</span>
+<span style="color: #ABB2BF">                    </span><span style="color: #C678DD">return</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">Collision</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">deep</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">));</span>
+<span style="color: #ABB2BF">                }</span>
+<span style="color: #ABB2BF">            }</span>
+
+<span style="color: #ABB2BF">            </span><span style="color: #7F848E">// 表面穿过该块：逐体素精确判定（主力路径）</span>
+<span style="color: #ABB2BF">            </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Band</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">)) </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">                </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">d</span><span style="color: #ABB2BF">) </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">enumerate</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">                    </span><span style="color: #7F848E">// 只测带内体素；|d| == BAND 的钳制值直接跳过</span>
+<span style="color: #ABB2BF">                    </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">d</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">abs</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&gt;=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">BAND</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> { </span><span style="color: #C678DD">continue</span><span style="color: #ABB2BF">; }</span>
+<span style="color: #ABB2BF">                    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">p_local</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">inv</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">transform_point3</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">voxel_center</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">));</span>
+<span style="color: #ABB2BF">                    </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">sd_profile</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p_local</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">revbody</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">                        </span><span style="color: #C678DD">return</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">Collision</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">at</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">voxel_center</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">)));</span>
+<span style="color: #ABB2BF">                    }</span>
+<span style="color: #ABB2BF">                }</span>
+<span style="color: #ABB2BF">            }</span>
+<span style="color: #ABB2BF">        }</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E5C07B">None</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>为什么这是精确的（修正上一版的说法）</strong>：不是"体素近似"。毛坯 SDF 是<strong>解析距离的 CSG 结果</strong>——初始毛坯（方块/圆柱）SDF 精确，每次切削做 <code>max(d_stock, -d_sweep)</code>，而 <code>d_sweep</code> 由解析 <code>sd_profile</code> 沿段取最小值得到。所以<strong>体素中心上的 SDF 值是到真实加工面的精确距离</strong>，不是 h/2 的近似。</p>
+<blockquote>
+<p>钳制安全性的证明：窄带把 |d| &gt; band 的值钳到 ±band。对<strong>减法</strong> CSG，若真实值 d₀ &gt; band 而存储值被钳为 band，则 <code>max(band, -d_sweep) = band</code> 与 <code>max(d₀, -d_sweep) = d₀</code> 同号且都满足 ≥ band——符号与"至少 band 远"这两个性质都不丢失。因为只去料不加料，钳制是安全的。</p>
+</blockquote>
+<p><strong>唯一的误差来源是采样覆盖</strong>（体素中心有没有落在穿透区内），不是距离精度。</p>
+<p><strong>但覆盖保证只有 h/2 = 0.05 mm</strong>：穿透区是厚度 ε 的三维薄片，若毛坯表面正好卡在两个体素层中间，ε &lt; h/2 时一个体素中心都不在里面。所以<strong>这条路径是兜底与定位，不是主力检出</strong>。</p>
+<p>主力检出改在<strong>刀柄表面采样</strong>（方向 B，§2.5.2）：同一个相交判定，采样域从"毛坯的体素格"换成"刀柄的表面"，穿透区从三维薄片变成二维补丁，采样密度阈值从 <code>h/2</code> 提升到 <code>δ²/(2R)</code> = 0.17 µm。</p>
+<p><strong>但真正的瓶颈不是采样密度，是 <code>i8</code> 量化 + 三线性重建</strong>：<code>sdf_stock(p)</code> 的符号可信度由两项决定——量化半档 1.58 µm（∝h）与重建 <code>h²/(8R_c)</code>（∝h²）。所以实际检出下限是<strong>平面 1.6 µm、常规曲面 2.0 µm</strong>。详见 §2.5.9。</p>
+<p>两个方向都做：B 负责"绝不漏报"，A 负责"报出毛坯上哪个位置被撞了"。</p>
+<p><strong><code>Full</code> brick 的处理是上一版的漏洞</strong>：原代码用 <code>let Some(Band) = ... else { continue }</code> 把 <code>Full</code> 一起跳过了。刀杆斜插进实体区域时，周围可能全是 <code>Full</code> brick、没有 <code>Band</code> brick 在附近，就会<strong>整段漏报</strong>。现在用轴线代表点做包含测试兜住。</p>
+<blockquote>
+<p>这个兜底是<strong>后盾而非主力</strong>：由 §5.4 的重分类规则，表面只存在于 <code>Band</code> brick 中，<code>Full</code> brick 意味着所有体素都在表面内 ≥ band（0.4 mm）。所以任何真实碰撞必须先穿过 <code>Band</code> 外壳，在那里被逐体素路径捕获。<code>Full</code> 路径只负责"刀杆已深埋"这种极端情形。</p>
+</blockquote>
+<p><strong>代价</strong>：每个 Band brick 最多 4096 个体素，只有刀杆 AABB 覆盖的才遍历（通常 1–3 个）→ 约 1e4 次 <code>sd_profile</code>。刀杆贴近毛坯的时间占比 &lt; 5%，总开销可忽略。</p>
+<h3 id="23-b-gjk-support-function">2.3 窄相 B：凸体 × 凸体（GJK，解析 support function）</h3>
+<p>涉及：OBB × OBB（机床自碰）、OBB × 旋转体（夹具 × 刀柄）。</p>
+<p>旋转体做<strong>精确</strong>凸分解：母线 profile 在拐点处切成若干圆台/圆柱/球，每一段本身就是凸体，<strong>不做多边形离散</strong>（理由见 §2.6）。一个刀柄通常 3–6 段。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">enum</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">ConvexPart</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">Obb</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">Obb</span><span style="color: #ABB2BF">), </span><span style="color: #E06C75">Cylinder</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">r</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> }, </span><span style="color: #E06C75">Frustum</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">r0</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">r1</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> }, </span><span style="color: #E06C75">Sphere</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">r</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> } }</span>
+
+<span style="color: #98C379">/// GJK 只需要支持映射，不需要顶点表</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">support</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">part</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">ConvexPart</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">xform</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">DMat4</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">dir</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">;</span>
+
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">gjk_distance</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">ConvexPart</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">ta</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">DMat4</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">ConvexPart</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">tb</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">DMat4</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">f64</span>
+</code></pre></div>
+
+<p><strong>为什么用 GJK 而不是纯 SAT</strong>：SAT 只给布尔相交，保守推进需要<strong>距离</strong>。GJK 同时给出两者。</p>
+<p><strong>GJK 的退化陷阱</strong>（必须写进代码注释）：</p>
+<ul>
+<li>当两形状<strong>恰好相切</strong>时，单纯形可能退化（体积为零），方向向量求不出来 → 迭代震荡或返回错误距离。</li>
+<li>处理：① 用 <code>margin</code> 把"相切"变成"明确分离"（所有查询加 0.1 mm 膨胀）；② 单纯形体积小于 1e-12 时提前返回 0；③ 迭代上限 32 次，超限返回上一次的下界。</li>
+</ul>
+<blockquote>
+<p>这正是 ADR-003 §8 S2 说的"用保守距离代替精确接触流形"。<strong>碰撞检测只需要回答"距离是否小于安全间隙"，不需要精确接触点。</strong> 加 0.1 mm 膨胀后，所有退化情形都变成明确分离或明确相交，GJK 的数值问题消失。</p>
+</blockquote>
+<h3 id="24">2.4 为什么不用"点采样"做凸体 × 凸体</h3>
+<p>一个诱人但错误的简化：把 OBB 的 8 个角点拿去测旋转体 SDF。<strong>会漏报</strong>——旋转体可能穿过 OBB 的面而所有角点都在外面（细长刀柄斜穿大压板）。</p>
+<p>所以凸体对凸体必须用 GJK，不能采样。</p>
+<h3 id="25-01-mm">2.5 检出保证：0.1 mm 采样到底能保证什么（修正）</h3>
+<p>先纠正上一版的一个错误结论。上一版用"穿透区体积 / h³ ≥ 8"推出"0.6 µm 必定检出"——<strong>这个推导用了均匀分布假设，而保证不能依赖分布</strong>。真实的最坏情况差三个数量级。下面是正确版本。</p>
+<h4 id="251-a-sdf-h2-005-mm">2.5.1 方向 A（毛坯体素 → 刀柄 SDF）的保证只有 h/2 = 0.05 mm</h4>
+<p>原方案的采样域是<strong>毛坯的体素格</strong>：遍历 Band brick 里的体素中心，测它是否落在刀柄内。</p>
+<p>穿透区是夹在"毛坯表面"与"刀柄表面"之间的一层薄片，厚度就是穿透深度 ε。</p>
+<p>最坏情况：毛坯表面（局部为平面）恰好落在两个体素层<strong>正中间</strong>。</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>体素层 z = 0.0    ← 深度 0.05 mm（在毛坯内）
+         ↑ 毛坯表面 z = 0.05
+         ↑ 刀柄侵入到 z = 0.05 + ε
+体素层 z = 0.1    ← 深度 0.05 mm（在毛坯外）
+</code></pre></div>
+
+<p>若 ε &lt; 0.05 mm，这层薄片里<strong>一个体素中心都没有</strong> → 完全漏报。</p>
+<p>所以：</p>
+<blockquote>
+<p><strong>方向 A 的严格保证是 ε ≥ h/2 = 0.05 mm。</strong></p>
+</blockquote>
+<p>0.05 mm 对"会不会撞"这个工程问题其实够用（真实碰撞都在 0.1 mm 以上），但<strong>它撑不起"面片级"的说法</strong>，也不能说成 µm。上一版的 µm 是错的。</p>
+<h4 id="252-b-sdf-017-m">2.5.2 方向 B（刀柄表面 → 毛坯 SDF）：采样密度保证 0.17 µm</h4>
+<p>同一个相交判定，换一个采样域，结果完全不同。</p>
+<p>相交的充要条件是"存在刀柄表面上的点落在毛坯内部"。所以直接<strong>采样刀柄表面</strong>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>对刀柄表面上的每个采样点 p（间距 δ）：
+    若 sdf_stock(p) &lt; 0  →  碰撞
+</code></pre></div>
+
+<p>为什么这一下就好三个数量级——因为穿透区在<strong>刀柄表面上是二维补丁</strong>，不是三维薄片：</p>
+<ul>
+<li>圆柱（半径 R）侧面切入平面深度 ε，交线在圆柱面上形成一个补丁，周向宽度 <code>w = 2√(2Rε)</code></li>
+<li>δ 间距的采样要漏掉它，必须 <code>w &lt; δ</code></li>
+<li>反解：<strong><code>ε &gt; δ² / (2R)</code></strong></li>
+</ul>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>δ</th>
+<th>R</th>
+<th>最小可检出 ε</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.1 mm</td>
+<td>30 mm</td>
+<td><strong>0.17 µm</strong>（这是<strong>采样密度</strong>，不是最终下限——符号可信度见 §2.5.9）</td>
+</tr>
+<tr>
+<td>0.1 mm</td>
+<td>15 mm</td>
+<td>0.33 µm</td>
+</tr>
+<tr>
+<td>0.1 mm</td>
+<td>5 mm</td>
+<td>1.0 µm</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>关键点</strong>：这里的 0.1 mm 仍然是采样间距，但因为是二维采样，阈值按 <code>δ²</code> 而不是 <code>δ</code> 缩小。三维薄片只能靠 <code>ε &gt; h</code>，二维补丁可以靠 <code>ε &gt; δ²/(2R)</code>。</p>
+<h4 id="253-b-sdf">2.5.3 为什么方向 B 不需要宽频带 SDF</h4>
+<p>方向 B 只问"这个点是否在毛坯内"，即 <code>sdf_stock(p) &lt; 0</code>。窄带的 0.4 mm 完全够——<strong>超出带宽的点被钳制成 +0.4，而它本来就远离表面、不可能碰撞，钳制方向正好是安全的</strong>。</p>
+<p>这是方向 B 的第二个优势：它不需要为了覆盖刀柄半径（30 mm）去加宽带宽（那会让内存 ×75）。</p>
+<p>反观方向 A 如果要做到同样精度，就得让 band ≥ 刀柄半径，内存从 130 MB 涨到 9.75 GB——不可行。</p>
+<h4 id="254">2.5.4 最终方案：两个方向都做</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方向</th>
+<th>作用</th>
+<th>保证</th>
+<th>成本</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>B（主）</strong> 刀柄表面 → 毛坯 SDF</td>
+<td>主力检出</td>
+<td><strong>0.17–1 µm</strong></td>
+<td>采样点数 ∝ 接触面积/δ²</td>
+</tr>
+<tr>
+<td><strong>A（辅）</strong> 毛坯体素 → 刀柄 SDF</td>
+<td>兜底 + 提供接触位置</td>
+<td>0.05 mm</td>
+<td>1e4 体素/次</td>
+</tr>
+</tbody>
+</table></div>
+<p>A 保留的理由不是检出，是<strong>定位</strong>：碰撞点报在体素中心，比报在刀柄表面采样点上更贴近"毛坯上哪里被撞了"这个语义。而且 A 能在 B 的采样出现空洞时兜住。</p>
+<h4 id="255-brick">2.5.5 成本控制：按 brick 裁剪采样域</h4>
+<p>整根刀柄表面积 <code>2πRL</code>，δ=0.1 时约 94 万点，不可接受。裁剪办法：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// 只在与 Band brick 相交的那部分刀柄表面上生成采样点</span>
+<span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks_overlapping</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">holder_aabb</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Band</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">_</span><span style="color: #ABB2BF">)) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">) </span><span style="color: #C678DD">else</span><span style="color: #ABB2BF"> { </span><span style="color: #C678DD">continue</span><span style="color: #ABB2BF"> };</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">box_ws</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">brick_aabb</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">brick_id</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">expand</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BAND</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">p</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">sample_revbody_surface_in_box</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">holder</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">box_ws</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">DELTA</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">sdf</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF"> { </span><span style="color: #C678DD">return</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">Collision</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">at</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">)); }</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><code>sample_revbody_surface_in_box</code> 只需要在给定的 box 内生成圆柱面上的格点（角度区间 + 轴向区间求交），实现约 60 行。</p>
+<p>实际接触面积通常 &lt; 200 mm²，δ=0.1 时约 2 万点；首点命中即返回，平均远小于此。</p>
+<h4 id="256">2.5.6 保证的边界（必须说清）</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>情形</th>
+<th>保证</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>刀柄侧面切入毛坯</td>
+<td>✅ <strong>0.17–1 µm</strong></td>
+<td>方向 B，§2.5.2</td>
+</tr>
+<tr>
+<td>刀柄端面切入毛坯</td>
+<td>✅ 更宽松</td>
+<td>端面是平面，补丁面积 ∝ ε</td>
+</tr>
+<tr>
+<td>刀柄 vs 夹具/台面/机床</td>
+<td>✅ <strong>精确</strong></td>
+<td>解析 support function 的 GJK，零误差（§2.6）</td>
+</tr>
+<tr>
+<td>毛坯内部孔洞，刀柄穿过不碰壁</td>
+<td>✅ 不误报</td>
+<td>孔洞周围是 Band，采样点都在毛坯外</td>
+</tr>
+<tr>
+<td><strong>薄壁厚度 &lt; 2h（0.2 mm）</strong></td>
+<td>⚠️ 几何本身失真</td>
+<td>体素场无法分辨"薄壁"与"无壁"。要覆盖必须 h ≤ 0.05（内存 ×4）</td>
+</tr>
+<tr>
+<td>毛坯表面<strong>曲率半径 &lt; h</strong> 的尖角</td>
+<td>⚠️ 表面位置误差 ≤ h/2</td>
+<td>方向 B 的采样点落在真实表面上，但 <code>sdf_stock</code> 在尖角附近受带宽插值影响</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>薄壁那条是硬约束</strong>，不是实现问题：0.1 mm 的体素场里，0.15 mm 的薄壁和 0.05 mm 的薄壁在数值上几乎无法区分。如果你的零件有 0.2 mm 以下的筋，现在就要把 h 定到 0.05。</p>
+<h4 id="258-h">2.5.8 h 可调时的保证矩阵</h4>
+<p>h 不做成编译期常量，而是 <code>GridConfig { h: f64, band_voxels: u8 }</code>。<strong>一个旋钮同时控制内存、速度和检出保证</strong>，三者都是 h 的幂函数：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>量</th>
+<th>与 h 的关系</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>窄带内存</td>
+<td><strong>∝ 1/h²</strong></td>
+<td><code>mem ≈ 8.25 · A / h²</code>（8³ 叶，见 ADR-006 §4）</td>
+</tr>
+<tr>
+<td>单段去除耗时</td>
+<td><strong>∝ 1/h²</strong></td>
+<td>带宽固定 4 体素，只随面积变</td>
+</tr>
+<tr>
+<td>方向 A 采样保证</td>
+<td><strong>∝ h</strong>（h/2）</td>
+<td>三维薄片，卡在两个体素层之间</td>
+</tr>
+<tr>
+<td>方向 B 采样保证</td>
+<td><strong>∝ h²</strong>（<code>h²/8R_c</code>；平面精确）</td>
+<td>二维补丁，δ 取 h</td>
+</tr>
+<tr>
+<td><strong><code>i8</code> 量化</strong></td>
+<td><strong>∝ h</strong>（<code>band·h/254</code>）</td>
+<td>带宽随 h 缩放，档距跟着缩放</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>注意：采样间距 δ 取 h，采样项按 h² 改善——但最终总误差不是 h²。</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>h</th>
+<th>内存</th>
+<th>单段耗时</th>
+<th>方向 A 采样</th>
+<th>方向 B 采样（平面 R=30）</th>
+<th>方向 B 采样（曲面 R_c=3）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.2 mm</td>
+<td>52 MB</td>
+<td>~0.02 ms</td>
+<td>0.1 mm</td>
+<td>0.67 µm</td>
+<td>1.7 µm</td>
+</tr>
+<tr>
+<td><strong>0.1 mm</strong></td>
+<td><strong>206 MB</strong></td>
+<td><strong>~0.06 ms</strong></td>
+<td><strong>0.05 mm</strong></td>
+<td>0.17 µm</td>
+<td>0.42 µm</td>
+</tr>
+<tr>
+<td>0.05 mm</td>
+<td>825 MB</td>
+<td>~0.25 ms</td>
+<td>0.025 mm</td>
+<td>0.042 µm</td>
+<td>0.10 µm</td>
+</tr>
+<tr>
+<td>0.025 mm</td>
+<td>3.3 GB</td>
+<td>~1.0 ms</td>
+<td>0.0125 mm</td>
+<td>0.011 µm</td>
+<td>0.026 µm</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>采样密度不是最终保证，还要加量化（∝h）。合计（取最坏同号）：</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>h</th>
+<th><code>i8</code> 量化半档</th>
+<th><strong>方向 B 平面 合计</strong></th>
+<th><strong>方向 B 曲面 R_c=3 合计</strong></th>
+<th>主导项</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.2 mm</td>
+<td>3.15 µm</td>
+<td><strong>3.2 µm</strong></td>
+<td><strong>4.8 µm</strong></td>
+<td>量化</td>
+</tr>
+<tr>
+<td><strong>0.1 mm</strong></td>
+<td><strong>1.58 µm</strong></td>
+<td><strong>1.6 µm</strong></td>
+<td><strong>2.0 µm</strong></td>
+<td>量化</td>
+</tr>
+<tr>
+<td>0.05 mm</td>
+<td>0.79 µm</td>
+<td><strong>0.79 µm</strong></td>
+<td><strong>0.89 µm</strong></td>
+<td>量化</td>
+</tr>
+<tr>
+<td>0.025 mm</td>
+<td>0.39 µm</td>
+<td><strong>0.39 µm</strong></td>
+<td><strong>0.42 µm</strong></td>
+<td>量化</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>这张表推翻了"h 减半精度翻四倍"的说法</strong>：h ≤ 0.1 时量化项主导，<strong>总误差只按 h 线性改善</strong>——h 减半、内存 4 倍，误差只降一半。想要 h² 的收益必须同时换 <code>i16</code> 把量化项压下去。</p>
+<p><strong>曲面那一列为什么更差</strong>：<code>sdf_stock(p)</code> 由三线性插值得到，平面上插值精确，曲面上误差 ~<code>h²/(8R_c)</code>。所以曲面区域的采样保证取 <code>max(h²/2R, h²/8R_c)</code>——曲率半径越小，越受插值限制。</p>
+<p><strong>三个预设</strong>（UI 上显示预估内存与保证，让用户自己权衡）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>预设</th>
+<th>h</th>
+<th>用途</th>
+<th>不适合</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>快速检查</td>
+<td>0.2 mm</td>
+<td>验证会不会撞、刀路有没有明显错误</td>
+<td>出报告；薄壁件</td>
+</tr>
+<tr>
+<td><strong>标准</strong></td>
+<td><strong>0.1 mm</strong></td>
+<td>日常验证，过切/残留报告</td>
+<td>0.2 mm 以下的筋</td>
+</tr>
+<tr>
+<td>精密</td>
+<td>0.05 mm</td>
+<td>薄壁件、高价值件、正式报告</td>
+<td>2 小时以上的长程序（算得慢）</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>自动反推</strong>：用户给内存上限，程序算 h 并回显保证：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">auto_h</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">area</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">mem_budget</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">usize</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// mem ≈ 8.25 · A / h²（8³ 叶的实测系数，见 ADR-006 §4）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">//   →  h = sqrt(8.25 · A / mem)</span>
+<span style="color: #ABB2BF">    ((</span><span style="color: #D19A66">8.25</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">area</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">mem_budget</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">sqrt</span><span style="color: #ABB2BF">()).</span><span style="color: #E06C75">clamp</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">0.02</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.5</span><span style="color: #ABB2BF">)</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>例：A=2.5×10⁵ mm²、预算 500 MB → h ≈ 0.064 mm。</p>
+<p><strong>两条约束必须说清</strong>：</p>
+<ol>
+<li><strong>h 是加载期参数，不是运行中可拖的滑块。</strong> 改 h 要重建整个体素场（重新切削），代价等于一次完整仿真。UI 上做成"下次仿真生效"。</li>
+<li><strong>可调不等于可以规避薄壁问题。</strong> 零件若有 0.2 mm 以下的筋，就必须选 h ≤ 0.05；可调只是让你<strong>按任务选</strong>，不是让粗网格也能覆盖细特征。</li>
+</ol>
+<h4 id="259-i8-16-20-m">2.5.9 真正的瓶颈：<code>i8</code> 量化 + 三线性重建（1.6 / 2.0 µm）</h4>
+<p>§2.5.2 算出 0.17 µm，那是<strong>采样密度</strong>的限制。但方向 B 的判定是 <code>sdf_stock(p) &lt; 0</code>，而 <code>sdf_stock(p)</code> 由 <code>i8</code> 体素值三线性插值得到——所以有<strong>两项</strong>误差：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>① 量化        band = 4 体素 × h=0.1 mm = ±0.4 mm
+              分档 ±127 → 每档 3.15 µm → 半档 1.58 µm        （∝ h）
+② 三线性重建  h²/(8·R_c)，平面上为 0                            （∝ h²）
+</code></pre></div>
+
+<p><strong>穿透 0.5 µm 时，插值出来的值可能是 +1 µm，判为"没碰到"。</strong> 所以采样再密也没用——<strong>符号本身的置信度由这两项决定</strong>。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>限制来源</th>
+<th>数值</th>
+<th>是否瓶颈</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>采样密度 <code>δ²/(2R)</code></td>
+<td>0.17 µm</td>
+<td>否</td>
+</tr>
+<tr>
+<td><strong><code>i8</code> 量化半档</strong></td>
+<td><strong>1.58 µm</strong></td>
+<td><strong>是（平面）</strong></td>
+</tr>
+<tr>
+<td><strong>三线性重建</strong> <code>h²/(8R_c)</code></td>
+<td><strong>0.42 µm</strong>（R_c=3）</td>
+<td><strong>是（曲面）</strong></td>
+</tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>曲面曲率半径</th>
+<th>量化</th>
+<th>重建</th>
+<th><strong>合计</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>平面（∞）</td>
+<td>1.58 µm</td>
+<td>0</td>
+<td><strong>1.6 µm</strong></td>
+</tr>
+<tr>
+<td>10 mm</td>
+<td>1.58 µm</td>
+<td>0.13 µm</td>
+<td>1.7 µm</td>
+</tr>
+<tr>
+<td><strong>3 mm</strong>（φ6 球刀）</td>
+<td>1.58 µm</td>
+<td>0.42 µm</td>
+<td><strong>2.0 µm</strong></td>
+</tr>
+<tr>
+<td>1 mm</td>
+<td>1.58 µm</td>
+<td>1.25 µm</td>
+<td>2.8 µm</td>
+</tr>
+<tr>
+<td><strong>0.25 mm</strong>（φ0.5 球刀）</td>
+<td>1.58 µm</td>
+<td>5.00 µm</td>
+<td><strong>6.6 µm</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>最终口径（三项分档，不是一个数）</strong>：</p>
+<ul>
+<li><strong>平面 → 穿透超过 1.6 µm 必定检出</strong></li>
+<li><strong>曲面 R_c ≥ 0.8 mm → 2.0 µm</strong>（h=0.1 时插值项不超过量化项的临界曲率是 0.79 mm）</li>
+<li><strong>R_c &lt; 0.8 mm → 1.6 + h²/(8R_c)</strong>，φ0.5 球刀精加工面是 6.6 µm</li>
+</ul>
+<p><strong>第三条最容易被忽略</strong>：小刀具精加工面的瓶颈不是 <code>i8</code>，是<strong>网格太粗</strong>。承诺"1.6 µm"对 φ0.5 球刀面差了 4 倍。</p>
+<p><strong>设计规则</strong>：要插值项不超过量化项，取 <code>h ≤ 0.11·√R_c</code>（mm）。R_c=3 → h ≤ 0.19；R_c=0.25 → h ≤ 0.056。
+反解"总误差 ≤ ε"：<code>h ≤ min(254·ε/band_voxels, √(8·R_c·ε))</code>。ε=2 µm、R_c=3 → h ≤ 0.127（h=0.1 够）；ε=1 µm → h ≤ 0.064（必须降到 0.05）。</p>
+<h3 id="i16-f64">想提精度就换 <code>i16</code>，不是换 f64</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>每档</th>
+<th>内存（h=0.1）</th>
+<th>相对</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>i8, band=4（默认）</strong></td>
+<td>3.15 µm</td>
+<td><strong>206 MB</strong></td>
+<td>1×</td>
+</tr>
+<tr>
+<td><strong>i16, band=4</strong></td>
+<td><strong>12.2 nm</strong></td>
+<td><strong>412 MB</strong></td>
+<td>2× 内存换 <strong>258×</strong> 精度</td>
+</tr>
+<tr>
+<td>f32, band=4</td>
+<td>48 nm</td>
+<td>824 MB</td>
+<td>4× 换 65×（不如 i16）</td>
+</tr>
+</tbody>
+</table></div>
+<p>换 f64 <strong>零收益</strong>——量化误差在<strong>存的那一刻</strong>就产生了，算的时候用多宽都救不回来。</p>
+<p><code>i16</code> 做成 <code>GridConfig</code> 的选项（<code>value_type: I8 | I16</code>），默认 <code>I8</code>。需要 µm 级验证时切 <code>I16</code>。</p>
+<h4 id="257">2.5.7 三个前提</h4>
+<ol>
+<li><strong><code>sdf_stock(p)</code> 的符号必须可信</strong>。这一条由 §2.2 的钳制安全性证明保证：对减法 CSG，钳到 ±band 不丢符号。</li>
+<li><strong>扫掠 SDF 的搜索精度不能降</strong>。黄金分割迭代次数<strong>按行程自适应（6–24 次）</strong>：
+   短段（0.05 mm）6 次就够，距离误差 &lt; 1 µm；<strong>200 mm 长段固定 6 次会到 16 µm</strong>（实测），
+   必须加到约 17 次。下限不要降到 2 次（误差 2.6×10⁻³ mm，会污染阈值）。</li>
+<li><strong><code>Full</code> brick 不能跳过</strong>（§2.2 的漏洞），否则刀柄深埋实体时整段漏报。</li>
+</ol>
+<h3 id="26">2.6 凸体 × 凸体为什么是精确的</h3>
+<blockquote>
+<p><strong>已实现</strong>（2026-10-29，<code>collide::convex</code>，17 个测试）。下面是当初的论证；
+实现细节与三个坑见本章末尾的「2.6.1 实现记录」。
+<strong>穿透深度（EPA）也已落地</strong>（<code>collide::penetration</code>，7 个测试）。</p>
+</blockquote>
+<p>上一版说"旋转体离散成 16 边棱柱"，这会引入<strong>外切误差</strong>：<code>r(1−cos(π/16)) ≈ 0.019r</code>，对 R=30 的刀柄是 0.57 mm 的<strong>系统性误报</strong>。</p>
+<p>正确做法：<strong>不polygonize，直接用解析 support function 做 GJK</strong>。GJK 只需要支持映射，不需要顶点表：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// 圆柱的支持点：轴向取两端，径向沿给定方向</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">support_cylinder</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">c</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">axis</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">r</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">dir</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">axial</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dir</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">dot</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">axis</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">axis</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.5</span><span style="color: #ABB2BF">) } </span><span style="color: #C678DD">else</span><span style="color: #ABB2BF"> { </span><span style="color: #56B6C2">-</span><span style="color: #E06C75">axis</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.5</span><span style="color: #ABB2BF">) };</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">radial</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">dir</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">axis</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dir</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">dot</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">axis</span><span style="color: #ABB2BF">)).</span><span style="color: #E06C75">normalize_or_zero</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">r</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">+</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">axial</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">+</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">radial</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">// 圆台同理（半径随轴向线性变化），球头是球，都是解析的</span>
+</code></pre></div>
+
+<p>于是<strong>凸体对凸体的碰撞是精确的</strong>（浮点精度），误差为零。刀柄按 profile 拐点分解成若干圆台/圆柱/球——分解本身是精确的（旋转体在拐点处正好分段），不是近似。</p>
+<p>这一条让"夹具/台面/机床 vs 刀具"这一类碰撞达到真正的<strong>面片级（甚至解析级）</strong>精度，而毛坯那一类由 §2.5.9 的 <strong>1.6 µm（平面）/ 2.0 µm（曲面）</strong> 下限兜底。</p>
+<h4 id="261">2.6.1 实现记录</h4>
+<p><strong>形状</strong>：<code>Cone</code>（圆台 / 圆柱 / 圆锥 / 退化圆盘）、<code>Sphere</code>、<code>Capsule</code>、<code>Box3</code>（有向）、
+<code>Hull</code>（顶点表，给导入件用——只要顶点，不用三角化）、<code>Placed&lt;S&gt;</code>（局部形状 + 刚体变换）。
+整把刀 = <code>cones_of(profile)</code> 的圆台并集；刀具不必凸，距离取各段最小即可。</p>
+<p><strong>为什么算距离而不是判相交</strong>：保守推进（§3）要的是距离下界来算安全步长，
+布尔判定给不出这个量；顺带最近点对就是报告要的"哪里撞了"。</p>
+<p><strong>性能</strong>（release，单核）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>耗时</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>单对 圆柱 vs 球（7.1 迭代）</td>
+<td><strong>297 ns</strong></td>
+</tr>
+<tr>
+<td>整把刀（3 段圆台）vs 夹具</td>
+<td><strong>1.67 µs</strong></td>
+</tr>
+<tr>
+<td><code>aabb_gap</code> 粗筛</td>
+<td>3.1 ns</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>distance()</code> 始终精确（最近点对就是报告要的位置），粗筛由独立的 <code>aabb_gap()</code> 提供。
+早版本让 <code>distance()</code> 在 AABB 分离时直接返回盒间距离——快，但两个点变成盒面上的
+近似位置，报告会说错地方。</p>
+<p><strong>实现选择：穷举子集，不做增量单纯形维护。</strong>
+每轮把当前点集（≤ 4）里<strong>含最新点</strong>的子集（≤ 8 个）各求一次闭式最近点，取最小。
+增量维护的经典 bug 是"该丢的点没丢"，只在少数几何下显形，且错了以后距离<strong>偏小</strong>
+（更危险的方向）。闭式解 + 穷举是 O(1) 且不可能错；用定长数组（零堆分配）把成本补回来——
+用 <code>Vec</code> 的版本是 2313 ns，定长数组版 297 ns（8×）。</p>
+<p><strong>三个坑</strong>：</p>
+<ol>
+<li><strong>退化圆台（<code>half_h == 0</code>，平底刀的端面）不能按轴向正负挑端圆。</strong>
+   两端在同一个 z 平面上，<code>r_lo / r_hi</code> 是同心圆，凸包是半径 max 的那个圆盘。
+   按 <code>d &lt; 0</code> 挑 <code>r_lo</code> 会挑到圆心，距离虚高。</li>
+<li><strong>非退化的圆台也要比较两端。</strong> <code>f(端) = z_端·d + r_端·|dir_radial|</code>，
+   轴向正负只说明 z 分量谁有利；当 <code>−2h·d</code> 与 <code>(r_lo − r_hi)·|dir_radial|</code> 反号时半径会翻盘。
+   这一条让某随机用例的距离虚高 <strong>0.06 mm</strong>。</li>
+<li><strong>上面两条都只有"支撑点合法性"测试能抓到。</strong> KKT 最优性断言当时全绿——
+   因为断言里的 <code>support</code> 和 GJK 里的是同一份错实现，两边一起错就自洽了。
+   凡是"用同一份实现自证"的检查，都必须再配一条独立 oracle（这里是表面密采样）。</li>
+</ol>
+<h4 id="262-epa">2.6.2 穿透深度：EPA</h4>
+<p><code>distance()</code> 在穿透时返回 0；<code>penetration()</code> 补上深度与分离轴。同样在 Minkowski 差
+<code>W = A − B</code> 里做：原点到 <code>W</code> 边界的最近距离就是穿透深度。初始多面体由 GJK 的单纯形
+扩成（不足 4 点就按"最远支撑点"补齐），然后反复"最近面 → 沿法向取支撑点 → 撑大"。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>球 vs 球（解析 2.0）</td>
+<td>1.99998 mm</td>
+</tr>
+<tr>
+<td>盒 vs 盒（解析 0.5）</td>
+<td>0.50000</td>
+</tr>
+<tr>
+<td>φ6 圆柱插板（解析 1.0）</td>
+<td>1.00000</td>
+</tr>
+<tr>
+<td>3 段圆台 vs 盒（平均 5.9 迭代）</td>
+<td>1.70 µs</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>验收方式是"照着推开"</strong>：按报出的 <code>depth / axis</code> 移动 A，两体必须恰好接触（距离 &lt; 1e-4）。
+120 例随机穿透全部通过。这比"和解析解比"覆盖更广——解析解只对球、盒这类有闭式式的形状存在。</p>
+<p><strong>两个坑</strong>：</p>
+<ol>
+<li><strong>符号</strong>。<code>point_a − point_b</code> 在穿透时<strong>不是</strong>"从 b 指向 a"：因为 <code>point_a</code> 不再是
+   "a 上离 b 最近的点"，而是"a 上扎得最深的点"。分离位移是 <code>−axis · depth</code>，
+   字段因此叫 <code>axis</code> 不叫 <code>normal</code>。</li>
+<li><strong>外法向不能用原点判朝向</strong>。GJK 的单纯形贴着原点，原点可能正好落在某个面的平面上
+   （<code>n·O = 0</code>），判不出哪边是外；判错的后果是最深的面被当成"最浅出口"，深度直接报 0。
+   改用四面体重心（一定严格在内部）。</li>
+</ol>
+<p><strong>精度边界</strong>：曲面被多面体平面逼近，64 次迭代时球面误差 ~2e-5 mm，再往上只能靠更多面。
+需要 µm 级深度的场景（比如过切分析）应该用解析特例，不是加迭代。</p>
+<p><strong>仍未做</strong>：<code>CollisionEpisode</code> 的聚类与 <code>sim</code> 接线。</p>
+<hr />
+<h2 id="3">3. 连续化：这是真正的风险点</h2>
+<h3 id="31">3.1 问题</h3>
+<p>五轴快移速度：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>速度</th>
+<th>每 1 ms 位移</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>30 m/min</td>
+<td>0.5 mm</td>
+</tr>
+<tr>
+<td>60 m/min</td>
+<td>1.0 mm</td>
+</tr>
+<tr>
+<td>100 m/min</td>
+<td>1.67 mm</td>
+</tr>
+</tbody>
+</table></div>
+<p>薄壁、压板边缘、转台挡边都可以薄到 1–2 mm。<strong>按 1 ms 采样，2 mm 的薄壁会被整步跳过，仿真报"无碰撞"而实际撞了。</strong></p>
+<p>这不是精度问题，是正确性问题——一个漏报的碰撞检测比没有碰撞检测更危险，因为它给了虚假的安全感。</p>
+<h3 id="32">3.2 三种解法</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>原理</th>
+<th>问题</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>加密采样</td>
+<td>Δt 小到位移 &lt; 最小特征/2</td>
+<td>100 m/min + 1 mm 特征 → Δt &lt; 0.3 ms，成本 ×3.3，且"最小特征"未知</td>
+</tr>
+<tr>
+<td>扫掠体求交</td>
+<td>构造运动体的扫掠体，与静态几何求交</td>
+<td>旋转体扫掠体非凸，构造复杂；且五轴段内刀轴还在转</td>
+</tr>
+<tr>
+<td><strong>保守推进（CA）</strong></td>
+<td>用距离下界算安全时间步</td>
+<td>需要可靠的距离下界</td>
+</tr>
+</tbody>
+</table></div>
+<p>选 <strong>保守推进</strong>。它是自适应的：远时一步跨完，近时自动细分。</p>
+<h3 id="33">3.3 算法</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #98C379">/// 在一段运动 [t0, t1] 内找最早碰撞时刻</span>
+<span style="color: #98C379">/// d(t)：当前位姿下的最小距离（下界）</span>
+<span style="color: #98C379">/// v：该段内任意点的最大速度（由关节速度上界推出，见主方案 §4.7）</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">earliest_collision</span><span style="color: #ABB2BF">(</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">pair</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">Pair</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">t0</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">t1</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">d</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">impl</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Fn</span><span style="color: #ABB2BF">(</span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E5C07B">f64</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">const</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">EPS</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-6</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">t</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">t0</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">_</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">64</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dist</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">d</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">t</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dist</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF"> { </span><span style="color: #C678DD">return</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">t</span><span style="color: #ABB2BF">); }          </span><span style="color: #7F848E">// 已相交</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dist</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">EPS</span><span style="color: #ABB2BF"> { </span><span style="color: #C678DD">return</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">t</span><span style="color: #ABB2BF">); }           </span><span style="color: #7F848E">// 接触</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dt_safe</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dist</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">;                     </span><span style="color: #7F848E">// 这段时间内不可能撞</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">t</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">+</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dt_safe</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&gt;=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">t1</span><span style="color: #ABB2BF"> { </span><span style="color: #C678DD">return</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">None</span><span style="color: #ABB2BF">; }       </span><span style="color: #7F848E">// 安全跨过整段</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">t</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">+=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dt_safe</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">max</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">1e-5</span><span style="color: #ABB2BF">);                     </span><span style="color: #7F848E">// 至少前进一点，防死循环</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">t</span><span style="color: #ABB2BF">)                                          </span><span style="color: #7F848E">// 迭代耗尽，保守报碰撞</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>关键点</strong>：</p>
+<ul>
+<li><code>v</code> 必须是<strong>该段内任意点的最大速度</strong>，不是刀尖速度。五轴摆动时刀柄末端的速度可能远大于刀尖（<code>|ω × r|</code>）。用主方案 §4.7 的关节速度上界推：<code>v = |v_tip| + max|ω_i| × r_max</code>。</li>
+<li><code>v</code> 取上界 → <code>dt_safe</code> 取下界 → <strong>永远不会漏报</strong>。</li>
+<li>迭代耗尽时<strong>保守报碰撞</strong>（宁可误报）。误报可以人工排除，漏报不行。</li>
+</ul>
+<h3 id="34">3.4 为什么这个方案便宜</h3>
+<ul>
+<li>刀具远离毛坯时（刀路 90% 的时间），<code>dist</code> 大 → 一步跨完整段，<strong>1 次距离查询</strong>。</li>
+<li>接近时自动细分，但只在真正接近的那一小段。</li>
+<li>最坏情况（沿壁面平行移动，距离恒为 0.5 mm）→ <code>dt_safe = 0.5/v</code>，会退化成加密采样。这是 CA 的已知弱点。缓解：距离变化率小于阈值时（平行运动）允许跨越，用"距离下界单调性"判断。</li>
+</ul>
+<hr />
+<h2 id="4-v15-v1">4. 安全间隙（v1.5，不在 v1）</h2>
+<p>主方案 A5 只要求"报出碰撞时刻与部件对"，不要求最小距离。但"快撞了"的预警很有用。</p>
+<h3 id="41-sdf">4.1 障碍：窄带 SDF 的带宽</h3>
+<p>窄带 band = 4 体素 = 0.4 mm（h=0.1）。SDF 在带宽外被钳制为 0.4，<strong>无法区分"0.5 mm 远"和"50 mm 远"</strong>。所以窄带 SDF 不能直接回答"距离是否小于 5 mm"。</p>
+<h3 id="42-edt">4.2 解法：粗网格 EDT</h3>
+<p>加一层 <strong>2 mm 分辨率的粗欧氏距离场</strong>，覆盖毛坯 AABB + 20 mm 边距：</p>
+<ul>
+<li>尺寸：200×200×100 + 边距 @ 2 mm → 约 120×120×70 = 1.0e6 格</li>
+<li>存储：i16（单位 0.1 mm）→ <strong>2 MB</strong></li>
+<li>构建：从毛坯 band 体素出发做<strong>可分离欧氏距离变换</strong>（Felzenszwalb，两遍扫描，约 60 行）</li>
+<li>更新：只重算脏 brick 对应的粗格（增量）</li>
+</ul>
+<p>粗筛用粗 EDT（误差 ≤ 2 mm），进入 2 mm 以内再用窄相精确判定。</p>
+<p><strong>这是纯自研、复用现有体素结构、2 MB 内存的方案</strong>，比引入通用几何库便宜得多。</p>
+<hr />
+<h2 id="5">5. 毛坯演化对碰撞的影响（关键）</h2>
+<p>毛坯在加工过程中形状持续变化，碰撞判定不能只做一次。这一节把影响拆成六条，其中 5.3 是本方案成立的关键论证。</p>
+<h3 id="51">5.1 三类必须重算的情形</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>情形</th>
+<th>例子</th>
+<th>后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>新表面出现</strong></td>
+<td>去除材料产生型腔壁；刀柄撞上 1 秒前还不存在的面</td>
+<td>漏报（最危险）</td>
+</tr>
+<tr>
+<td><strong>旧表面消失</strong></td>
+<td>原本挡路的材料被切掉</td>
+<td>误报</td>
+</tr>
+<tr>
+<td><strong>可通行空间变化</strong></td>
+<td>粗加工后刀柄能进型腔；精加工时可能贴壁</td>
+<td>需逐步评估</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>结论</strong>：碰撞必须随加工逐步评估，不能只在开头和结尾各做一次。这也是为什么碰撞必须和去除引擎跑在同一条数据流上——用同一份毛坯状态。</p>
+<h3 id="52">5.2 顺序：先去除，后碰撞</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>SimStep (关节值 + 刀具位姿)
+   ├─→ ① 去除引擎：更新 SDF（脏 brick + 状态重分类）
+   └─→ ② 碰撞引擎：查询 SDF（同一份数据）
+</code></pre></div>
+
+<p>顺序颠倒会怎样：刀杆会撞上<strong>已经被切掉的材料</strong>——典型误报场景是螺旋下刀，刀杆跟着刀具进入型腔，而型腔是本段刚挖出来的。先碰撞后去除，刀杆会被"本段即将消失的材料"判为碰撞。</p>
+<h3 id="53">5.3 段内不一致性——以及它为什么可以忽略</h3>
+<p>这是最容易被忽略的坑。</p>
+<p><strong>问题</strong>：保守推进（§3.3）会在<strong>段内</strong>的中间时刻 t 查询距离 <code>d(t)</code>，但毛坯只有<strong>段级</strong>的更新粒度——<code>d(t)</code> 实际是拿"段末毛坯"算的。严格说，段内任意时刻的毛坯状态 <code>stock(t) = stock_pre − sweep(0..t)</code>，而 <code>stock(1) = stock_pre − sweep(0..1)</code> 是它的子集，即<strong>段末毛坯更"空"</strong>。用更空的毛坯算距离 → 距离偏大 → 可能漏报。</p>
+<p><strong>为什么可以忽略</strong>：因为两种效应<strong>在物理上不同源，且不会同时放大</strong>。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>材料去除速率</th>
+<th>刀柄运动速率</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>决定因素</td>
+<td><strong>刀尖进给</strong></td>
+<td>刀尖速度 + <code>\|ω\|·r_max</code></td>
+</tr>
+<tr>
+<td>G1 切削 3000 mm/min</td>
+<td>0.05 mm / ms</td>
+<td>0.05–1.5 mm / ms</td>
+</tr>
+<tr>
+<td>G0 快移 100 m/min</td>
+<td><strong>0</strong></td>
+<td>1.67 mm / ms</td>
+</tr>
+</tbody>
+</table></div>
+<p>两条结论：</p>
+<ol>
+<li><strong>切移动时毛坯变化极慢。</strong> 即使进给拉到 10000 mm/min（167 mm/s），每毫秒也只切掉 0.167 mm 材料。而碰撞安全间隙通常 ≥ 1 mm。</li>
+<li><strong>快移时毛坯完全不变化。</strong> G0 不切削。所以"穿透薄壁"（需要 1.67 mm/ms）和"毛坯演化"（需要高切削速率）<strong>永远不会同时发生</strong>。</li>
+</ol>
+<p>这正是 §3 的保守推进能成立的前提：<strong>穿透风险只存在于不切削的快移段，而快移段毛坯是静止的</strong>。</p>
+<p><strong>兜底措施</strong>：碰撞 margin 取 <code>feed_per_step × 2 + h</code>（切削时约 0.1 + 0.1 = 0.2 mm）。这个 margin 同时覆盖了段内不一致性与体素离散误差。</p>
+<blockquote>
+<p>如果将来要更严格（例如支持高速切削 HSM，进给 20000 mm/min 以上），可以把切削段按 0.1 mm 弧长再细分一次碰撞子步——但这不是 v1 的需求。</p>
+</blockquote>
+<h3 id="54-brick">5.4 brick 状态迁移：必须做，否则误报</h3>
+<p>毛坯演化不只是"距离值变小"，还包括 <strong>brick 状态的迁移</strong>。<code>SparseGrid</code> 有三种状态（ADR-002 §3.1）：<code>Empty</code> / <code>Full</code> / <code>Band</code>。</p>
+<p>每次切削后，被触碰的 brick 必须<strong>重分类</strong>：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">reclassify</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">SparseGrid</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">id</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">IVec3</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">match</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">get</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">id</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Band</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">)) </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">            </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">band</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">BAND</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">            </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">all</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">|&amp;</span><span style="color: #E06C75">d</span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">d</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&gt;=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">band</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">                </span><span style="color: #7F848E">// 整块都被切空了 → 降级为 Empty，释放体素数组</span>
+<span style="color: #ABB2BF">                </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">insert</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">id</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Empty</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">            } </span><span style="color: #C678DD">else</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">v</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">all</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">|&amp;</span><span style="color: #E06C75">d</span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">d</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">h</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&lt;=</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #E06C75">band</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">                </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">insert</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">id</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Full</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">            }</span>
+<span style="color: #ABB2BF">        }</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">_</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> {}</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>为什么这是正确性问题而不只是内存优化</strong>：</p>
+<ul>
+<li><code>Full</code> brick 在碰撞里意味着"整块都是材料"。如果一块砖被切空却仍是 <code>Full</code>，碰撞引擎会把"穿过空腔的刀杆"判为碰撞 → <strong>持续误报</strong>。</li>
+<li><code>Empty</code> brick 可以<strong>永久跳过</strong>（我们只去除材料，永不加料）。这是单调性，可以直接用来做粗筛：碰撞只需要遍历 AABB 内的 <code>Band</code> brick。</li>
+</ul>
+<p><code>Full → Band</code> 的迁移在去除引擎里已经要做（ADR-002 §3.4 的 <code>materialize</code>），<code>Band → Empty</code> 是这里新增的、容易被漏掉的一条。</p>
+<h3 id="55-episode">5.5 碰撞事件要聚类成"episode"</h3>
+<p>刀杆沿着型腔壁拖动 3 秒，会产生几千条碰撞事件。直接列出来用户没法看。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">CollisionEpisode</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">BodyTag</span><span style="color: #ABB2BF">, </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">BodyTag</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">t_start</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">t_end</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,      </span><span style="color: #7F848E">// 起止时刻</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">block_start</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">u32</span><span style="color: #ABB2BF">, </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">block_end</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">u32</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">max_penetration</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,               </span><span style="color: #7F848E">// 最深穿透</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">worst_position</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">,              </span><span style="color: #7F848E">// 最深点的位置（用于 3D 高亮）</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>聚类规则：同一对部件、时间间隔 &lt; 50 ms 的连续事件合并为一个 episode。报告只列 episode，UI 在时间轴上用一段红色区间表示。</p>
+<h3 id="56">5.6 不支持"从中间继续仿真"</h3>
+<p>用户拖到 50% 再点"继续仿真"，需要恢复该时刻的毛坯状态。三条路：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>代价</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>定期快照</td>
+<td>130 MB/次 × 10 次 = 1.3 GB</td>
+<td>不可接受</td>
+</tr>
+<tr>
+<td>增量撤销</td>
+<td>需要记录每次切削的逆操作，实现复杂且易错</td>
+<td>不值得</td>
+</tr>
+<tr>
+<td><strong>从头确定性重算</strong></td>
+<td>100k 段 × 0.2 ms ≈ 20 秒</td>
+<td><strong>采用</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>重算是确定性的（同样输入必得同样输出），所以"继续仿真"= 后台从头跑到目标时刻再接着算。20 秒的等待对自用工具可以接受，而且实现上零风险。</p>
+<p><strong>推论</strong>：碰撞事件不需要持久化到磁盘，也不需要增量更新——每次重算都重新产生。这省掉了整个"历史状态管理"模块。</p>
+<h3 id="57">5.7 同一个线程</h3>
+<p>碰撞与去除都访问 <code>SparseGrid</code>，放同一个后台线程串行执行，避免锁。碰撞是只读的，开销远小于去除（§8：碰撞约 0.05 ms/步 vs 去除 0.2–6 ms/段），串行的代价可忽略。</p>
+<p>碰撞只需要遍历刀具 AABB 覆盖的 brick——这个信息在 <code>HashMap&lt;IVec3, BrickState&gt;</code> 里直接查，无需额外索引结构。</p>
+<hr />
+<h2 id="6">6. 数据结构</h2>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">CollisionWorld</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// 静态碰撞体：夹具、台面、机床部件</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">statics</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Vec</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">StaticBody</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// 毛坯体素（与去除引擎共享）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Arc</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">SparseGrid</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// 粗 EDT（v1.5）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">coarse_edt</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">CoarseEdt</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">StaticBody</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">shape</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Shape</span><span style="color: #ABB2BF">,                 </span><span style="color: #7F848E">// Obb | Prism | ConvexHull</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">joint_index</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Option</span><span style="color: #56B6C2">&lt;</span><span style="color: #E5C07B">u8</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,      </span><span style="color: #7F848E">// 挂在哪个关节上（机床部件）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">tag</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">BodyTag</span><span style="color: #ABB2BF">,                 </span><span style="color: #7F848E">// Fixture | Table | Trunnion | Ram | SpindleHead</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">clearance_exempt</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">bool</span><span style="color: #ABB2BF">,       </span><span style="color: #7F848E">// 例如毛坯 vs 台面</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">MovingBody</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">kind</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">MovingKind</span><span style="color: #ABB2BF">,             </span><span style="color: #7F848E">// Cutter | Shank | Holder</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">profile</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Profile</span><span style="color: #ABB2BF">,             </span><span style="color: #7F848E">// 该段的母线</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">xform</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DMat4</span><span style="color: #ABB2BF">,                 </span><span style="color: #7F848E">// 当前位姿</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">tag</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">BodyTag</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Collision</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">BodyTag</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">BodyTag</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">at_time</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,                 </span><span style="color: #7F848E">// 仿真时间</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">block_index</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">u32</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">penetration</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,             </span><span style="color: #7F848E">// 深度（负距离）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">position</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">,              </span><span style="color: #7F848E">// 接触点，用于 3D 高亮</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><code>position</code> 很重要——用户要看到"撞在哪里"。对 SDF 判定，取第一个 <code>sd_profile &lt; 0</code> 的体素中心即可（精度 h）。</p>
+<hr />
+<h2 id="7-tdd">7. 测试策略（TDD）</h2>
+<p>碰撞检测的测试必须是<strong>可证伪的</strong>——不能写 <code>assert!(collision.is_some())</code>，要断言<strong>具体时刻和部件对</strong>。</p>
+<h3 id="71">7.1 已知答案的几何对</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">obb_pair_distance_is_exact</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">Obb</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">new</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">DVec3</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">ZERO</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">DVec3</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">splat</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">10.0</span><span style="color: #ABB2BF">), </span><span style="color: #E06C75">DMat3</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">IDENTITY</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">Obb</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">new</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">DVec3</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">new</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">25.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">), </span><span style="color: #E06C75">DVec3</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">splat</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">10.0</span><span style="color: #ABB2BF">), </span><span style="color: #E06C75">DMat3</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">IDENTITY</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 两盒 x 向半宽各 5，中心距 25 → 距离 15</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">((</span><span style="color: #E06C75">distance_obb_obb</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">15.0</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">abs</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-12</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<h3 id="72">7.2 穿透反例（最重要）</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">fast_rapid_through_thin_wall_is_detected</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 2 mm 薄壁，刀杆以 100 m/min（1.67 mm/ms）穿过，采样周期 1 ms</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 朴素离散采样：t=0 在壁前 0.8mm，t=1 在壁后 0.87mm → 全部"无碰撞"（漏报）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 保守推进：必须在 0 &lt; t &lt; 1 之间报出碰撞</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">hit</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">earliest_collision</span><span style="color: #ABB2BF">(</span><span style="color: #7F848E">/* ... */</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">hit</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">is_some</span><span style="color: #ABB2BF">(), </span><span style="color: #98C379">"薄壁穿透漏报"</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">hit</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">unwrap</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&amp;&amp;</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">hit</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">unwrap</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>这个测试必须先红</strong>——先写一个朴素的离散采样实现，确认它在这个用例上失败（漏报），再换成保守推进让它变绿。否则你无法确认 CA 真的解决了问题。</p>
+<h3 id="73">7.3 误报测试</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">holder_above_stock_no_collision</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 刀杆底面距毛坯顶面 5 mm，全程无接触 → 必须报无碰撞</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">run_collision_check</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">path</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">is_empty</span><span style="color: #ABB2BF">());</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>漏报和误报要成对测。只有漏报测试会诱导出"永远报碰撞"的实现。</p>
+<h3 id="74-cutrail-oracle">7.4 与 cutrail 对拍（第一步的 oracle）</h3>
+<p><code>cutrail</code> 的 <code>CutReport</code> 里有 <code>Collision</code> 字段，<code>EngineOptions</code> 有 <code>collision check</code> 开关——它做 shank/holder 碰撞检测。</p>
+<p>第一步（ADR-003 §6，暂借 cutrail 当脚手架）时，<strong>同一批刀路分别跑我们的碰撞与 cutrail 的碰撞，比对"碰撞/不碰撞"与时刻</strong>。允许我们的结果更保守（多报），但不允许漏报。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">our_collision_is_at_least_as_strict_as_cutrail</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">ours</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">run_our_collision</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">path</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">theirs</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">run_cutrail_collision</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">path</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">theirs</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">ours</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">any</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">|</span><span style="color: #E06C75">o</span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">o</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">at_time</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">at_time</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">abs</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-3</span><span style="color: #ABB2BF">),</span>
+<span style="color: #ABB2BF">                </span><span style="color: #98C379">"cutrail 报碰撞而我们漏报：{:?}"</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<h3 id="75-5">7.5 毛坯演化测试（§5 的正确性验证）</h3>
+<p>这类测试最容易漏，因为<strong>只用静态毛坯测不出来</strong>。</p>
+<p><strong>(a) 进入刚挖出的型腔 → 不能误报</strong></p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">holder_entering_fresh_pocket_is_not_a_collision</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 1. 用 φ6 刀螺旋下刀挖一个 φ10 的型腔（深 30 mm）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 2. 随后刀杆随刀具进入型腔（刀杆在型腔内部，但不碰壁）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 3. 必须报"无碰撞"</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 如果忘了 §5.2 的顺序（先碰撞后去除），这里会误报</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">run_collision_check</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">pocket_path</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">is_empty</span><span style="color: #ABB2BF">(), </span><span style="color: #98C379">"型腔进入误报：{:?}"</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>(b) 贴着型腔壁拖动 → 必须报，且聚类成 1 个 episode</strong></p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">holder_dragging_along_pocket_wall_is_one_episode</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">run_collision_check</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">drag_path</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">len</span><span style="color: #ABB2BF">(), </span><span style="color: #D19A66">1</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"应聚类为一个 episode，实际 {:?}"</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF">[</span><span style="color: #D19A66">0</span><span style="color: #ABB2BF">].</span><span style="color: #E06C75">max_penetration</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF">[</span><span style="color: #D19A66">0</span><span style="color: #ABB2BF">].</span><span style="color: #E06C75">t_end</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">episodes</span><span style="color: #ABB2BF">[</span><span style="color: #D19A66">0</span><span style="color: #ABB2BF">].</span><span style="color: #E06C75">t_start</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>(c) brick 降级</strong></p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">fully_cut_brick_becomes_empty</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">stock_block</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">60.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">40.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">20.0</span><span style="color: #ABB2BF">, </span><span style="color: #7F848E">/*tile*/</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">10.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">cut_through</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">, </span><span style="color: #7F848E">/* 一刀切穿整个 10mm brick */</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">id</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">touched_bricks</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">!</span><span style="color: #56B6C2; font-weight: bold">matches!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">bricks</span><span style="color: #ABB2BF">[</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">id</span><span style="color: #ABB2BF">], </span><span style="color: #E06C75">BrickState</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Full</span><span style="color: #ABB2BF">),</span>
+<span style="color: #ABB2BF">                </span><span style="color: #98C379">"brick {id:?} 已切空但仍为 Full → 会持续误报"</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>这三个测试都要先红</strong>：先用"静态毛坯 + 单一时刻检查"的朴素实现跑，确认 (a) 误报、(c) 失败，再逐条修好。</p>
+<h3 id="76">7.6 性能基准</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">bench_collision_100k_steps</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">c</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">Criterion</span><span style="color: #ABB2BF">) { </span><span style="color: #7F848E">/* ... */</span><span style="color: #ABB2BF"> }</span>
+</code></pre></div>
+
+<p>阈值：100k 步、50 对，总耗时 &lt; 3 秒（与去除引擎并行后不成为瓶颈）。</p>
+<h3 id="77">7.7 随机对拍：把"不会漏报"变成可验证的</h3>
+<p>§2.5 的检出下限是<strong>推导</strong>出来的。推导可能错，所以必须有测试来证伪它。</p>
+<p>思路：构造<strong>解析可算真值</strong>的场景，随机撒位姿，断言"真值穿透 &gt; 阈值 ⇒ 必须报碰撞"。</p>
+<p><strong>(a) 圆柱 vs 半空间（解析真值）</strong></p>
+<blockquote>
+<p>下面用 <code>proptest!</code> 是为可读性；实现时改用 <code>kin/tests/roundtrip.rs</code> 那套<strong>固定种子 xorshift</strong>
+（ADR-003 §2 修订：proptest 已移除，理由是两条被上游钉死的传递依赖）。</p>
+</blockquote>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #E06C75">proptest</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// 毛坯 = 半空间 z&lt;0，刀杆 = 半径 R 的圆柱，姿态随机、位置随机</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// 解析穿透深度 ε 可精确计算 → 真值无误差</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">#[test]</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">never_misses_penetration_above_5um</span><span style="color: #ABB2BF">(</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">r</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">3.0</span><span style="color: #C678DD">f64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">40.0</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">tilt</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">60.0</span><span style="color: #C678DD">f64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">60.0</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">eps</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.0</span><span style="color: #C678DD">f64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">seed</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0</span><span style="color: #C678DD">u64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">1000</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    ) {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">holder</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">setup_halfspace_case</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">r</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">tilt</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">eps</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">seed</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">truth</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">analytic_penetration</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">holder</span><span style="color: #ABB2BF">);      </span><span style="color: #7F848E">// 精确</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">hit</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">revbody_vs_stock</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">holder</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF">.).</span><span style="color: #E06C75">is_some</span><span style="color: #ABB2BF">();</span>
+<span style="color: #ABB2BF">        </span><span style="color: #7F848E">// 阈值取 5 µm ≈ 2.5 倍最坏下限（2.0 µm）。不能取 1 µm：</span>
+<span style="color: #ABB2BF">        </span><span style="color: #7F848E">// 断言"1 µm 也必检出"就是在断言一件按定义做不到的事，测试会随机红。</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">truth</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">5e-3</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">            </span><span style="color: #E06C75">prop_assert</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">hit</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"漏报：真实穿透 {} mm，R={}，tilt={}"</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">truth</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">r</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">tilt</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">        }</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<blockquote>
+<p><strong>这个阈值本身是个坑</strong>：早期写的是 <code>truth &gt; 1e-3</code>（1 µm），注释还写着"方向 B 的保证是 0.17 µm，留 6 倍裕度"。
+1.6–2.0 µm 的下限一确认，这个测试就变成了"断言一件做不到的事"——随机对拍会间歇性失败，
+而失败原因看起来像"实现有 bug"。<strong>测试阈值必须由保证下限反推，不能凭"看起来很小"来定。</strong></p>
+</blockquote>
+<p><strong>(b) 回归：刀杆深埋（§2.2 的 <code>Full</code> brick 漏洞）</strong></p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">holder_deep_inside_solid_block_is_detected</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 毛坯 200×200×100 未加工（全部 Full brick），刀杆从侧面斜插进去 20 mm</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 原实现（跳过 Full brick）会漏报</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">hit</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">revbody_vs_stock</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">grid</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">holder</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF">.);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">hit</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">is_some</span><span style="color: #ABB2BF">(), </span><span style="color: #98C379">"刀杆深埋实体内漏报 —— Full brick 未被测试"</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>(c) 对照：与密集采样参考实现比对</strong></p>
+<p>对复杂毛坯（已加工的型腔），用 10 倍密集的采样做参考（h=0.01 mm 的离线参考，跑得慢但只用于测试），断言我们的结果不弱于参考。</p>
+<p><strong>这三个测试的定位</strong>：(a) 是主证据，(b) 是刚发现的漏洞的回归锁，(c) 是复杂形状的兜底。<strong>全部要能在 CI 里跑</strong>——(a) 用 proptest 限 200 个 case，(c) 用固定 5 个场景。</p>
+<hr />
+<h2 id="8">8. 性能预算</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>环节</th>
+<th>每步成本</th>
+<th>100k 步总计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>粗筛（1250 次 AABB）</td>
+<td>25k flops</td>
+<td>~0.05 s</td>
+</tr>
+<tr>
+<td>窄相 GJK（约 5% 通过粗筛，约 60 对）</td>
+<td>60 × 1 µs</td>
+<td>~6 s ⚠</td>
+</tr>
+<tr>
+<td>窄相 SDF（仅刀具贴近毛坯时，&lt;5% 步）</td>
+<td>1e4 × 30 flops</td>
+<td>~0.5 s</td>
+</tr>
+</tbody>
+</table></div>
+<p>GJK 那 6 秒是主要开销。优化：</p>
+<ol>
+<li><strong>关节对静态化</strong>：机床部件只随关节运动，可预计算"哪些关节组合下这两件可能接近"（查表），运行时跳过不可能的对。这一条通常能砍掉 80%。</li>
+<li>粗筛用<strong>球</strong>而非 AABB（更快，略保守）。</li>
+<li>只在<strong>距离变化率大</strong>的步做 GJK，其余用上次结果外推。</li>
+</ol>
+<p>目标：&lt; 3 秒 / 100k 步。</p>
+<hr />
+<h2 id="9">9. 工作量</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>模块</th>
+<th>人日</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OBB / 棱柱 / 凸包 + AABB + 粗筛</td>
+<td>2</td>
+</tr>
+<tr>
+<td>GJK 距离（含退化处理）</td>
+<td>4</td>
+</tr>
+<tr>
+<td>旋转体凸分解（外切棱柱）</td>
+<td>1</td>
+</tr>
+<tr>
+<td>旋转体 × SDF 判定</td>
+<td>2</td>
+</tr>
+<tr>
+<td>保守推进 + 速度上界</td>
+<td>2</td>
+</tr>
+<tr>
+<td><strong>毛坯演化：brick 重分类 + 顺序保证 + 确定性重放</strong></td>
+<td><strong>2</strong></td>
+</tr>
+<tr>
+<td>集成（排除规则、episode 聚类、3D 高亮）</td>
+<td>2</td>
+</tr>
+<tr>
+<td><strong>测试（穿透反例、演化用例、随机对拍、对拍 cutrail、基准）</strong></td>
+<td>6</td>
+</tr>
+<tr>
+<td><strong>合计</strong></td>
+<td><strong>21</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>比 ADR-003 最初估的 12 人多 9：连续化 +2、毛坯演化 +2、检出保证与随机对拍 +3、其余微调。<strong>建议按 21 报</strong>。</p>
+<hr />
+<h2 id="10">10. 参考文献</h2>
+<ol>
+<li>Ho, S., Sarma, S., Adachi, Y. <em>Real-time interference analysis between a tool and an environment</em>. Computer-Aided Design, 2001. —— 刀具与环境实时干涉的经典处理。</li>
+<li>Tang, T.D., Bohez, E.L.J., Koomsap, P. <em>The sweep plane algorithm for global collision detection with workpiece geometry update for five-axis NC machining</em>. Computer-Aided Design, 2007. —— 五轴 + <strong>毛坯几何更新</strong>下的全局碰撞；其复杂度分解为 <code>T = T_b(包围球) + T_u(毛坯更新) + T_s(扫描平面)</code>，说明"碰撞成本与毛坯更新成本必须一起算"。</li>
+<li>Tang, T.D., Bohez, E.L.J. <em>A new collision avoidance strategy and its integration with collision detection for five-axis NC machining</em>. Int J Adv Manuf Technol, 2015. —— 包围球粗筛 + 扫描平面精筛的组合。</li>
+<li>van den Bergen, G. <em>Collision Detection in Interactive 3D Environments</em>. Morgan Kaufmann, 2003. —— GJK + EPA 的标准参考，含退化情形处理。</li>
+<li>Montanari, M., Petrinic, N., Barbieri, E. <em>Improving the GJK algorithm for faster and more reliable distance queries between convex objects</em>. ACM TOG, 2017. —— GJK 可靠性与性能改进（OpenGJK 的理论基础）。</li>
+<li>Wang, B. et al. <em>Tight-Inclusion: Robust and Accurate Continuous Collision Detection</em>. 2021. —— 带最小分离距离的 CCD，若将来要做更严格的连续化可参考。</li>
+</ol>
+<hr />
+<h2 id="11_1">11. 与主方案的差异</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>主方案 §7.2 原述</th>
+<th>本 ADR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>方法</td>
+<td>"parry3d 几何查询"</td>
+<td>自研 GJK + 体素 SDF 判定</td>
+</tr>
+<tr>
+<td>粗筛</td>
+<td>包围球</td>
+<td>AABB（不建 BVH）</td>
+</tr>
+<tr>
+<td>毛坯表示</td>
+<td><code>TriMesh</code> + QueryPipeline</td>
+<td>体素 SDF（复用去除引擎）</td>
+</tr>
+<tr>
+<td>连续化</td>
+<td>未提及</td>
+<td><strong>保守推进</strong>（新增，关键）</td>
+</tr>
+<tr>
+<td>安全间隙</td>
+<td>未提及</td>
+<td>粗网格 EDT（v1.5）</td>
+</tr>
+<tr>
+<td>工作量</td>
+<td>12 人日</td>
+<td>21 人日</td>
+</tr>
+<tr>
+<td>毛坯演化</td>
+<td>未提及</td>
+<td><strong>brick 重分类 + 段内不一致性论证 + episode 聚类 + 确定性重放</strong>（§5）</td>
+</tr>
+</tbody>
+</table></div>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

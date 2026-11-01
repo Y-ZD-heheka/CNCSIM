@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>点位预读与流水线缓冲</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">点位预读与流水线缓冲</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 结论</a></li>
+<li><a href="#1">1. 三级成本（数量级）</a></li>
+<li><a href="#2-1-ms">2. 修正：点流密度用弦高容差，不是 1 ms</a><ul>
+<li><a href="#21">2.1 上一版错在哪</a></li>
+<li><a href="#22">2.2 正确的密度：弦高容差</a></li>
+<li><a href="#23-r-175-mm">2.3 实测子步数（R = 175 mm）</a></li>
+<li><a href="#24">2.4 这条修正的连带影响</a></li>
+</ul>
+</li>
+<li><a href="#3-">3. 生产-消费结构</a><ul>
+<li><a href="#31">3.1 环形缓冲 + 背压</a></li>
+<li><a href="#32">3.2 缓冲深度：小比大好</a></li>
+</ul>
+</li>
+<li><a href="#4">4. 取消与失效</a><ul>
+<li><a href="#41">4.1 三种失效场景</a></li>
+<li><a href="#42">4.2 取消要快</a></li>
+</ul>
+</li>
+<li><a href="#5">5. 回放不走点流</a></li>
+<li><a href="#6">6. 完整线程模型</a></li>
+<li><a href="#7">7. 与"先算后播"的关系</a></li>
+<li><a href="#8">8. 测试</a></li>
+<li><a href="#9">9. 工作量</a></li>
+<li><a href="#10">10. 一句话</a></li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="_1">点位预读与流水线缓冲</h1><div class="meta"><span class="chip hi">性能</span><span class="chip hi">流水线</span></div>
+<blockquote>
+<p>日期：2026-10-28
+补充 <a href="G代码到轴运动.html"><code>G代码到轴运动.md</code></a>，并<strong>修正其 §2.3/§2.4 的采样密度设定</strong></p>
+</blockquote>
+<hr />
+<h2 id="0">0. 结论</h2>
+<p>三句话：</p>
+<ol>
+<li><strong>生产比消费快约 200 倍</strong>（实测估算），所以缓冲不是性能问题，而是<strong>响应性</strong>问题——缓冲该小不该大。</li>
+<li><strong>点流密度必须按弦高容差，不是固定 1 ms</strong>。上一版说"固定 1 ms 跟控制器一致"，这个理由站不住：需要控制器行为的三个量（非线性误差、轴速降额、伺服周期）<strong>都有闭式公式</strong>，不需要逐周期采样。按 1 ms 采样，一个 3 秒段要 3000 个子步，10 万段要跑 <strong>16.7 小时</strong>。</li>
+<li><strong>"充足"的判据是"消费者永不空转"，不是"越多越好"</strong>。生产快 200 倍，几十个点就已经充足。</li>
+</ol>
+<blockquote>
+<p><strong>实现状态</strong>（2026-10-30）：v1 落地为<strong>块级回放</strong>——<code>sim::playback::Playback</code>
+预计算每块的时间区间（与 <code>run</code> 同一套口径：同样的圆弧离散、<code>segment_time</code>、
+M0/M2/M30 截断，总时长与 <code>SimReport::programmed_time_s</code> 逐位相等），
+<code>at(t)</code> 做 tip 线性 + 刀轴 slerp。后台任务用<strong>任务并行</strong>（整段仿真挪到工作线程，
+<code>mpsc</code> 事件流，进度 50 ms 节流）——<strong>不是</strong>本文档第 0 节讨论的点流；
+弦高容差点流留给 v2 的高保真拖拽（每段内部按 Δθ 插值），当前块级插值在
+段内是直线近似，与 1 ms 点流相比在圆弧段会有弦高量级的偏差（约 0.01 mm 级）。</p>
+</blockquote>
+<hr />
+<h2 id="1">1. 三级成本（数量级）</h2>
+<p>以 100k 段、平均每段 30° 摆动、弦高容差 0.01 mm 为例：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>单位成本</th>
+<th>总量</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>解析（文本 → <code>MotionProgram</code>）</td>
+<td>~100 ns/行</td>
+<td><strong>约 10 ms</strong></td>
+<td>一次性，可忽略</td>
+</tr>
+<tr>
+<td>插补 + 逆解（段 → 点位）</td>
+<td>~1 µs/点</td>
+<td><strong>约 2.5 s</strong></td>
+<td>25 点/段 × 100k</td>
+</tr>
+<tr>
+<td><strong>去除 + 碰撞（消费点位）</strong></td>
+<td>~0.2 ms/子步</td>
+<td><strong>约 500 s</strong></td>
+<td>5 ms/段 × 100k</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>比例约 200 : 1。</strong></p>
+<blockquote>
+<p>这些数是从 ADR-002（去除 0.2 ms/子步）与 §3 的子步数推出来的<strong>估算</strong>，不是实测。落地后第一步就该用 benchmark 校正（主方案 §8.7）。</p>
+</blockquote>
+<hr />
+<h2 id="2-1-ms">2. 修正：点流密度用弦高容差，不是 1 ms</h2>
+<h3 id="21">2.1 上一版错在哪</h3>
+<p><code>G代码到轴运动.md</code> §2.4 写：</p>
+<blockquote>
+<p><strong>选固定周期。</strong> 理由：我们要模拟控制器的实际行为（含非线性误差、轴速降额），而不是算一个数学上更优的轨迹。</p>
+</blockquote>
+<p>这个理由<strong>不成立</strong>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>需要控制器行为的量</th>
+<th>真的需要逐周期采样吗</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>非线性误差</td>
+<td><strong>不需要</strong>——有闭式公式 <code>R·(1−cos(Δθ/2))</code></td>
+</tr>
+<tr>
+<td>轴速降额</td>
+<td><strong>不需要</strong>——<code>max(|Δq_j|/v_max_j)</code> 用端点即可</td>
+</tr>
+<tr>
+<td>插补周期</td>
+<td>只是一个参数（1 ms），进公式，不进循环</td>
+</tr>
+<tr>
+<td>几何精度（扫掠体）</td>
+<td><strong>由弦高容差决定，与 1 ms 无关</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>结论：1 ms 采样是多余的。</strong> 按它算，一个 3 秒段 3000 个子步 × 0.2 ms = <strong>600 ms/段</strong>，10 万段 <strong>16.7 小时</strong>——荒谬。</p>
+<h3 id="22">2.2 正确的密度：弦高容差</h3>
+<p>刀轴在段内旋转时，扫掠体的真实表面是曲面。用两个姿态的凸包近似会有弦高误差：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>弦高 ≈ R · (1 − cos(Δθ/2))          （与非线性误差同一个公式，都是弧与弦的拱高）
+</code></pre></div>
+
+<p>要求弦高 ≤ <code>ε</code>，得每个子步的最大转角：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>Δθ_max = 2 · acos(1 − ε/R)
+</code></pre></div>
+
+<p>于是：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>子步数 n = ceil( Δθ_segment / Δθ_max )
+</code></pre></div>
+
+<h3 id="23-r-175-mm">2.3 实测子步数（R = 175 mm）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>弦高容差 ε</th>
+<th>Δθ_max</th>
+<th>摆 5°</th>
+<th>摆 15°</th>
+<th>摆 30°</th>
+<th>摆 60°</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.05 mm</td>
+<td>2.74°</td>
+<td>2</td>
+<td>6</td>
+<td>11</td>
+<td>22</td>
+</tr>
+<tr>
+<td>0.02 mm</td>
+<td>1.73°</td>
+<td>3</td>
+<td>9</td>
+<td>18</td>
+<td>35</td>
+</tr>
+<tr>
+<td><strong>0.01 mm</strong></td>
+<td><strong>1.23°</strong></td>
+<td><strong>5</strong></td>
+<td><strong>13</strong></td>
+<td><strong>25</strong></td>
+<td><strong>49</strong></td>
+</tr>
+<tr>
+<td>0.005 mm</td>
+<td>0.87°</td>
+<td>6</td>
+<td>18</td>
+<td>35</td>
+<td>70</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>对比固定 1 ms：3 秒段 = 3000 子步。弦高容差下只要 25 个——少 120 倍。</strong></p>
+<h3 id="24">2.4 这条修正的连带影响</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>修正前（1 ms）</th>
+<th>修正后（弦高容差）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>每段点数</td>
+<td>3000</td>
+<td><strong>5–50</strong>（随摆角）</td>
+</tr>
+<tr>
+<td>100k 段去除耗时</td>
+<td>16.7 小时</td>
+<td><strong>约 8 分钟</strong></td>
+</tr>
+<tr>
+<td>生产耗时</td>
+<td>300 s</td>
+<td><strong>2.5 s</strong></td>
+</tr>
+<tr>
+<td>内存（若存点流）</td>
+<td>3 亿点</td>
+<td><strong>250 万点</strong></td>
+</tr>
+</tbody>
+</table></div>
+<blockquote>
+<p>注意 8 分钟仍不短。<strong>5 轴去除的真实成本是"摆角 / 弦高容差"驱动的</strong>——摆得越多、容差越紧，越慢。这个关系要写进 UI 的预估里。</p>
+</blockquote>
+<hr />
+<h2 id="3-">3. 生产-消费结构</h2>
+<h3 id="31">3.1 环形缓冲 + 背压</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">PointStream</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">ring</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">VecDeque</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">PreparedPoint</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">capacity</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">usize</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">PreparedPoint</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">time</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">,             </span><span style="color: #7F848E">// 仿真时间</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">seg_index</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">u32</span><span style="color: #ABB2BF">,        </span><span style="color: #7F848E">// 所属段（诊断定位用）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Pose</span><span style="color: #ABB2BF">,            </span><span style="color: #7F848E">// 刀尖 + 刀轴</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">: [</span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">; </span><span style="color: #D19A66">5</span><span style="color: #ABB2BF">],           </span><span style="color: #7F848E">// 关节值（碰撞与回放要用）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">is_seg_start</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">bool</span><span style="color: #ABB2BF">,    </span><span style="color: #7F848E">// 段首标记（新段要重置保守推进状态）</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>单点约 104 B。<strong>容量 256 点 = 27 KB</strong>，可以忽略。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// 生产者（预读）</span>
+<span style="color: #C678DD">while</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">!</span><span style="color: #E06C75">cancel</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">is_set</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">stream</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">len</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">LOW_WATER</span><span style="color: #ABB2BF"> {          </span><span style="color: #7F848E">// 低水位补水</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">batch</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">program</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">next_points</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">BATCH</span><span style="color: #ABB2BF">);   </span><span style="color: #7F848E">// 例如一个段的子步</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">stream</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">push_batch</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">batch</span><span style="color: #ABB2BF">)</span><span style="color: #56B6C2">?</span><span style="color: #ABB2BF">;               </span><span style="color: #7F848E">// 满了阻塞</span>
+<span style="color: #ABB2BF">    } </span><span style="color: #C678DD">else</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">park</span><span style="color: #ABB2BF">();                                   </span><span style="color: #7F848E">// 睡到消费者唤醒</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">// 消费者（仿真）</span>
+<span style="color: #C678DD">while</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Some</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">stream</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">pop</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">voxel</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">cut</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">tool</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">prev</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">collide</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">check</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">prev</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>生产者在缓冲满时阻塞是特性不是缺陷</strong>——它自动把生产速度压到消费速度，不需要任何限速逻辑。</p>
+<h3 id="32">3.2 缓冲深度：小比大好</h3>
+<p>因为生产快 200 倍，缓冲很快填满，生产者大部分时间在睡。所以深度不决定吞吐，只决定<strong>浪费</strong>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>缓冲</th>
+<th>内存</th>
+<th>生产者最多超前（消费时间）</th>
+<th>改参数时丢弃的工作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>64 点</td>
+<td>7 KB</td>
+<td>2.5 段 ≈ 12 ms</td>
+<td>可忽略</td>
+</tr>
+<tr>
+<td><strong>256 点</strong></td>
+<td><strong>27 KB</strong></td>
+<td><strong>10 段 ≈ 50 ms</strong></td>
+<td><strong>可忽略</strong></td>
+</tr>
+<tr>
+<td>4096 点</td>
+<td>426 KB</td>
+<td>160 段 ≈ 800 ms</td>
+<td>值得考虑</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>建议 256。</strong> 理由：需要大于"生产/消费的粒度比"（一个段 25 点），否则会出现"生产者补一批、消费者吃半批、再等"的抖动；但不需要更大，因为没有吞吐收益。</p>
+<p><strong>"充足"的正确定义是"消费者永不空转"，而不是"预读越多越好"。</strong> 生产快 200 倍这件事本身就保证了充足。</p>
+<hr />
+<h2 id="4">4. 取消与失效</h2>
+<h3 id="41">4.1 三种失效场景</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>影响范围</th>
+<th>处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>拖时间轴（回放）</td>
+<td><strong>无</strong></td>
+<td>回放不走点流（§5），不需要失效</td>
+</tr>
+<tr>
+<td>改弦高容差 / h</td>
+<td><strong>全部</strong></td>
+<td>清空缓冲、从头重算</td>
+</tr>
+<tr>
+<td>改刀路文件</td>
+<td><strong>全部</strong></td>
+<td>同上</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="42">4.2 取消要快</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">struct</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">Cancel</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">Arc</span><span style="color: #56B6C2">&lt;</span><span style="color: #E06C75">AtomicBool</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF">);</span>
+</code></pre></div>
+
+<p>生产者的循环每批检查一次 <code>cancel</code>，消费者在 <code>pop()</code> 返回 <code>None</code> 时检查。<strong>取消延迟 ≤ 一批（约 25 点 ≈ 25 µs）</strong>，用户不会感到卡顿。</p>
+<p><strong>不要用 <code>join()</code> 等线程退出</strong>——那会让 UI 卡住。改为：置位 cancel → 丢弃缓冲 → 立即启动新任务 → 旧线程自然结束。</p>
+<hr />
+<h2 id="5">5. 回放不走点流</h2>
+<p>这是容易搞混的一点。<strong>回放不需要消费点流</strong>：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">update_joints</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">time</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">program</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">segment_at</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">time</span><span style="color: #ABB2BF">);     </span><span style="color: #7F848E">// O(log n)</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pose_at</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">time</span><span style="color: #ABB2BF">);          </span><span style="color: #7F848E">// 与计算线程同一个函数</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">kin</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">inverse_into</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">);         </span><span style="color: #7F848E">// 每帧一次，µs 级</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>理由：</p>
+<ol>
+<li><strong><code>pose_at</code> 是闭式函数</strong>，任意时刻可求值，不需要"在采样点之间插值"。</li>
+<li><strong>点流的密度是按去除的弦高容差定的</strong>（0.01 mm 级），回放用它会浪费；按帧求值更准也更省。</li>
+<li><strong>拖时间轴时不需要重算点流</strong>——这是"回放独立于计算"的直接好处。</li>
+</ol>
+<p><strong>唯一要求：<code>pose_at</code> 必须是同一个函数</strong>（<code>G代码到轴运动.md</code> §4.1）。否则"看到的"和"算的"不一致。</p>
+<hr />
+<h2 id="6">6. 完整线程模型</h2>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>主线程（Bevy）
+  ├─ 回放：pose_at(t) → IK → Transform      【不消费点流】
+  ├─ hmi.tick()
+  └─ 命令 → cmd channel
+
+解析（一次性，主线程或专用线程，约 10 ms）
+  └─ MotionProgram（不可变）
+
+预读线程
+  ├─ MotionProgram → 逐段生成子步（弦高容差）
+  ├─ 每子步：pose_at + IK
+  └─ push → PointStream（容量 256，满则阻塞）
+
+仿真线程
+  ├─ pop ← PointStream（空则阻塞）
+  ├─ voxel.cut()      0.2 ms/子步   ← 瓶颈
+  ├─ collide.check()
+  └─ TileUpdate / Episode → channel → 主线程
+</code></pre></div>
+
+<p><strong>为什么预读要单独一个线程</strong>：不是因为生产慢，而是因为<strong>生产与消费的粒度不同</strong>（一次一批 vs 一个子步），放同一线程会让消费者偶尔等生产者算完一批。分开后靠缓冲解耦，两边都是流水。</p>
+<blockquote>
+<p>如果实测发现线程切换开销占比大，可以退化成<strong>单线程交替</strong>（低水位补水、然后消费一批）。架构上留了这个余地：<code>PointStream</code> 既可以跨线程也可以同线程。</p>
+</blockquote>
+<hr />
+<h2 id="7">7. 与"先算后播"的关系</h2>
+<p>缓冲是<strong>线程间</strong>的（预读 → 仿真），与<strong>回放缓冲</strong>（仿真 → 主线程）是两回事：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>缓冲</th>
+<th>方向</th>
+<th>容量</th>
+<th>满了怎么办</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PointStream</code></td>
+<td>预读 → 仿真</td>
+<td>256 点</td>
+<td>生产者阻塞（压速）</td>
+</tr>
+<tr>
+<td><code>PlaybackBuffer</code></td>
+<td>仿真 → 回放</td>
+<td>按仿真时间，容量大</td>
+<td><strong>丢弃旧的</strong>（只保留最近 N 秒）</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>PlaybackBuffer</code> 满了要丢旧的而不是阻塞——否则仿真会被"用户没在看"拖死。这两个缓冲的背压策略<strong>相反</strong>，别搞混。</p>
+<hr />
+<h2 id="8">8. 测试</h2>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">substep_count_matches_chord_tolerance</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 摆 30°、R=175、eps=0.01 → 25 个子步</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">substeps</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">30.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">175.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.01</span><span style="color: #ABB2BF">), </span><span style="color: #D19A66">25</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 摆 5° → 5 个</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">substeps</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">5.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">175.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.01</span><span style="color: #ABB2BF">), </span><span style="color: #D19A66">5</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">chord_error_within_tolerance</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 每个子步的实际弦高必须 &lt;= eps（用 FK 算，不信任公式）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">substeps_of</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.01</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">chord_error</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">&lt;=</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.01</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">+</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-9</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">producer_blocks_when_buffer_full</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 消费者不消费时，生产者不能无限增长</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">spawn_producer</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #C678DD">mut</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">stream</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">sleep</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">50</span><span style="color: #E06C75">ms</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert_eq!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">stream</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">len</span><span style="color: #ABB2BF">(), </span><span style="color: #E06C75">stream</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">capacity</span><span style="color: #ABB2BF">());</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">cancel_takes_effect_within_one_batch</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 置位 cancel 后，生产者应在 1 ms 内退出</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">playback_does_not_touch_point_stream</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 回放 1000 帧，PointStream 的消费计数必须为 0</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>最后两条防的是最容易搞混的耦合：<strong>回放误消费点流</strong>、<strong>取消延迟过长</strong>。</p>
+<hr />
+<h2 id="9">9. 工作量</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>人日</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>弦高容差细分（子步数 + 边界）</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td><code>PointStream</code>（环形 + 背压 + 低水位）</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td>预读线程与取消语义</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td>测试</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td><strong>合计</strong></td>
+<td><strong>4.0</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>含在 <code>sim</code> 的编排里（ADR-003 未单列 <code>sim</code>）。</p>
+<hr />
+<h2 id="10">10. 一句话</h2>
+<p><strong>生产快 200 倍，所以"预读充足"是个假问题——几十个点就够了。</strong> 真正要定的是<strong>点流密度</strong>：按弦高容差而不是 1 ms，这一条把 10 万段的去除从 16.7 小时压到 8 分钟。</p>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

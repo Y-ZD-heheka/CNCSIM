@@ -1,0 +1,25 @@
+[package]
+name = "cncsim-app"
+description = "装配：窗口 / CLI / 文件 I/O"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-motion.workspace = true
+cncsim-tool.workspace = true
+cncsim-kin.workspace = true
+cncsim-config.workspace = true
+cncsim-gcode.workspace = true
+cncsim-voxel.workspace = true
+cncsim-collide.workspace = true
+cncsim-sim.workspace = true
+cncsim-hmi.workspace = true
+cncsim-render.workspace = true
+cncsim-ui.workspace = true
+
+[features]
+# 转发到 render 的窗口层：`cargo run --features window -- --demo`
+window = ["cncsim-render/window"]

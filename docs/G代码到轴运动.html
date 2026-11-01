@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G代码到轴运动</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">G 代码 → 各轴运动</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 结论</a></li>
+<li><a href="#1-cncsim-gcode-cncsim-sim">1. 第一步：块 → 段（cncsim-gcode + cncsim-sim）</a><ul>
+<li><a href="#11">1.1 段长</a></li>
+<li><a href="#12">1.2 时长（进给模式决定）</a></li>
+<li><a href="#13">1.3 还要算一个"轴速下限时长"</a></li>
+</ul>
+</li>
+<li><a href="#2-cncsim-sim">2. 第二步：段 → 采样（cncsim-sim，核心）</a><ul>
+<li><a href="#21">2.1 插补空间：这是五轴仿真的分水岭</a></li>
+<li><a href="#22">2.2 位姿插补要分开处理位置和姿态</a></li>
+<li><a href="#23-1-ms">2.3 采样密度：弦高容差，不是固定 1 ms</a></li>
+<li><a href="#24">2.4 点位不存储，流式消费</a></li>
+</ul>
+</li>
+<li><a href="#3-cncsim-kin">3. 第三步：位姿 → 关节值（cncsim-kin）</a><ul>
+<li><a href="#31">3.1 每个采样做一次逆解</a></li>
+<li><a href="#32">3.2 三件必须做的事</a></li>
+</ul>
+</li>
+<li><a href="#4-cncsim-render">4. 第四步：关节值 → 动画（cncsim-render）</a><ul>
+<li><a href="#41">4.1 回放时重新算，不查表</a></li>
+<li><a href="#42">4.2 帧率 ≠ 插补周期</a></li>
+<li><a href="#43">4.3 只更新变化的关节</a></li>
+</ul>
+</li>
+<li><a href="#5">5. 一个完整算例（带数字）</a><ul>
+<li><a href="#51">5.1 第一步：段</a></li>
+<li><a href="#52-rtcp">5.2 第二步：采样（RTCP 开 → 位姿插补）</a></li>
+<li><a href="#53">5.3 第三步：逆解</a></li>
+<li><a href="#54-rtcp">5.4 对照：如果 RTCP 关（关节空间插补）</a></li>
+</ul>
+</li>
+<li><a href="#6">6. 非线性误差的公式（从算例里提炼）</a><ul>
+<li><a href="#61">6.1 这个公式直接给出"后处理要多密"</a></li>
+<li><a href="#62">6.2 这就是"非线性误差"在链路里的位置</a></li>
+</ul>
+</li>
+<li><a href="#7">7. 三个必须决定的点</a></li>
+<li><a href="#8-crate">8. 与 crate 的对应</a></li>
+<li><a href="#9">9. 测试</a></li>
+<li><a href="#10">10. 一句话</a></li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="g">G 代码如何变成各轴运动</h1><div class="meta"><span class="chip hi">四步流水线</span><span class="chip hi">弦高容差细分</span><span class="chip">5.963mm 算例</span><span class="chip">2026-10-28</span></div>
+<blockquote>
+<p>日期：2026-10-28
+串起 <code>gcode → kin → sim → render</code> 四层
+关联：主方案 §3.3、§4.6；<code>G代码解释器设计.md</code>；<code>机床建模-AC双转台.md</code></p>
+</blockquote>
+<hr />
+<h2 id="0">0. 结论</h2>
+<p><strong>四步，每步的边界都很硬：</strong></p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>G 代码文本
+   │ ① gcode：块 → 段（带时间参数化）
+   ▼
+Vec&lt;Segment&gt;          起点/终点位姿 + 时长 + 插补模式
+   │ ② sim：段 → 采样（**插补空间**是核心决策）
+   ▼
+pose_at(t)            任意时刻的位姿（纯函数，不存储）
+   │ ③ kin：位姿 → 关节值
+   ▼
+q_at(t)               5 个关节值（+ 奇异/限位诊断）
+   │ ④ render：关节值 → Transform
+   ▼
+画面
+</code></pre></div>
+
+<p><strong>最关键的一句话：第 ② 步"在哪个空间插补"决定了五轴仿真对不对。</strong></p>
+<ul>
+<li><strong>RTCP 开</strong> → 在<strong>工件空间</strong>插补（刀尖走直线），每个周期再做一次逆解</li>
+<li><strong>RTCP 关</strong> → 在<strong>关节空间</strong>插补（各轴匀速），刀尖走弧线</li>
+</ul>
+<p>选错这一个，误差可以是毫米级（§6 有算例：<strong>5.963 mm</strong>）。</p>
+<hr />
+<h2 id="1-cncsim-gcode-cncsim-sim">1. 第一步：块 → 段（<code>cncsim-gcode</code> + <code>cncsim-sim</code>）</h2>
+<p><code>MotionProgram</code> 里的 <code>Block</code> 已经是"位姿到位置"，但还没有<strong>时间</strong>。要变成段，需要算时长。</p>
+<h3 id="11">1.1 段长</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>运动</th>
+<th>段长</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G0 / G1</td>
+<td><code>|tip_end − tip_start|</code></td>
+</tr>
+<tr>
+<td>G2 / G3（平面圆弧）</td>
+<td><code>R · Δθ</code></td>
+</tr>
+<tr>
+<td>G2 / G3（螺旋）</td>
+<td><code>√((R·Δθ)² + Δz²)</code></td>
+</tr>
+<tr>
+<td>G4 停延</td>
+<td>由 P/X 给定</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>注意</strong>：段长用的是<strong>刀尖</strong>走的距离，不是各轴走的距离。五轴联动时两者差很多。</p>
+<h3 id="12">1.2 时长（进给模式决定）</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">match</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">feed_mode</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">G94</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dur</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">len</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">F</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">60.0</span><span style="color: #ABB2BF">),              </span><span style="color: #7F848E">// F: mm/min</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">G93</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dur</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">F</span><span style="color: #ABB2BF">,                        </span><span style="color: #7F848E">// F: 1/min（逆时间）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">G95</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dur</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">len</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">F</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">spindle_rpm</span><span style="color: #ABB2BF">),        </span><span style="color: #7F848E">// F: mm/rev</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>G93 在五轴里很常见</strong>——后处理用逆时间能让刀尖速度在摆动时保持恒定。</p>
+<h3 id="13">1.3 还要算一个"轴速下限时长"</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// 由轴速上限反推的最短时间（主方案 §4.7）</span>
+<span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">t_min</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">max</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">over</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">joints</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">of</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF">Δ</span><span style="color: #E06C75">q_j</span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">v_max_j</span><span style="color: #ABB2BF">;</span>
+<span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dur_final</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">max</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">dur</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">t_min</span><span style="color: #ABB2BF">);      </span><span style="color: #7F848E">// 控制器会自动降速</span>
+</code></pre></div>
+
+<p>如果 <code>t_min &gt; dur</code>，说明这段被轴速卡住了——记一条 <code>KIN-00x</code> 警告，报告里体现"实际进给低于程序值"。</p>
+<hr />
+<h2 id="2-cncsim-sim">2. 第二步：段 → 采样（<code>cncsim-sim</code>，核心）</h2>
+<h3 id="21">2.1 插补空间：这是五轴仿真的分水岭</h3>
+<p>同一个段，两种插补方式给出完全不同的刀尖轨迹：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>RTCP 开（G43.4）</th>
+<th>RTCP 关</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>插补对象</td>
+<td><strong>位姿</strong>（刀尖位置 + 刀轴方向）</td>
+<td><strong>关节值</strong></td>
+</tr>
+<tr>
+<td>刀尖轨迹</td>
+<td>工件空间里的<strong>直线</strong></td>
+<td>空间<strong>曲线</strong></td>
+</tr>
+<tr>
+<td>每个周期要做</td>
+<td>位姿插值 → <strong>逆解</strong></td>
+<td>直接给关节值</td>
+</tr>
+<tr>
+<td>谁在用</td>
+<td>现代五轴控制器</td>
+<td>3+2 定位、老式控制器</td>
+</tr>
+</tbody>
+</table></div>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">pub</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">enum</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">InterpSpace</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// RTCP 开：位姿空间插补，每周期逆解</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Pose</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">    </span><span style="color: #98C379">/// RTCP 关：关节空间插补，直接得到 q</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Joint</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>这不是"精度选项"，是语义区别。</strong> 程序里写了 <code>G43.4</code> 就该用 <code>Pose</code>，没写就该用 <code>Joint</code>——用错的话仿真的不是同一个程序。</p>
+<h3 id="22">2.2 位姿插补要分开处理位置和姿态</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">pose_at</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">Segment</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">t</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">Pose</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">s</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">t</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">dur</span><span style="color: #ABB2BF">;                       </span><span style="color: #7F848E">// 归一化 0..1</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">Pose</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">tip</span><span style="color: #ABB2BF">:  </span><span style="color: #E5C07B">seg</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">tip_start</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">lerp</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">tip_end</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">s</span><span style="color: #ABB2BF">),      </span><span style="color: #7F848E">// 位置：线性</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">axis</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">slerp</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">axis_start</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">axis_end</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">s</span><span style="color: #ABB2BF">),  </span><span style="color: #7F848E">// 姿态：球面插值</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>姿态必须用 <code>slerp</code> 不能用 <code>lerp</code> + 归一化。</strong> 后者角速度不均匀——在两端慢中间快，会让仿真的非线性误差算错。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">slerp</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">s</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">) -&gt; </span><span style="color: #E5C07B">DVec3</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dot</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">dot</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">clamp</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">-</span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">theta</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">dot</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">acos</span><span style="color: #ABB2BF">();</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">theta</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-9</span><span style="color: #ABB2BF"> { </span><span style="color: #C678DD">return</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">; }</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">sa</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">sb</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> ((</span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">s</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">theta</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">s</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">theta</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    (</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">sa</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">sin</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">+</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">b</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">sb</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">sin</span><span style="color: #ABB2BF">()) </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">theta</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">sin</span><span style="color: #ABB2BF">()</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>边界情况</strong>：<code>a</code> 与 <code>b</code> 几乎反向（<code>dot ≈ -1</code>）时 <code>slerp</code> 无定义——五轴机不会出现（刀轴不会翻转 180°），但要断言。</p>
+<h3 id="23-1-ms">2.3 采样密度：弦高容差，不是固定 1 ms</h3>
+<blockquote>
+<p><strong>修正</strong>：本节初版说"选固定 1 ms 采样，跟控制器行为一致"。这个理由不成立——需要控制器行为的三个量（非线性误差、轴速降额、伺服周期）<strong>都有闭式公式</strong>，不需要逐周期采样。按 1 ms 算，3 秒段要 3000 子步，10 万段要跑 <strong>16.7 小时</strong>。详见 <a href="点位预读与流水线缓冲.html"><code>点位预读与流水线缓冲.md</code></a> §2。</p>
+</blockquote>
+<p>刀轴在段内旋转时，扫掠体的真实表面是曲面。用两个姿态的凸包近似会有弦高误差：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>弦高 ≈ R · (1 − cos(Δθ/2))          // 与非线性误差同一个公式，都是弧与弦的拱高
+</code></pre></div>
+
+<p>要求弦高 ≤ <code>ε</code>，得每子步最大转角 <code>Δθ_max = 2·acos(1−ε/R)</code>，于是：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>子步数 n = ceil( Δθ_segment / Δθ_max )
+</code></pre></div>
+
+<p><code>R = 175 mm</code>、<code>ε = 0.01 mm</code> 时 <code>Δθ_max = 1.23°</code>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>段内摆角</th>
+<th>子步数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>5°</td>
+<td>5</td>
+</tr>
+<tr>
+<td>15°</td>
+<td>13</td>
+</tr>
+<tr>
+<td><strong>30°</strong></td>
+<td><strong>25</strong></td>
+</tr>
+<tr>
+<td>60°</td>
+<td>49</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>对比固定 1 ms 的 3000 子步——少 120 倍。</strong></p>
+<h3 id="24">2.4 点位不存储，流式消费</h3>
+<p><strong>关键：点位不存储，流式消费。</strong></p>
+<p>即使按弦高容差，10 万段 × 25 点 = 250 万点 × 104 B ≈ <strong>260 MB</strong>——能存但没必要。而且改参数时要全部作废。</p>
+<p>所以：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// 仿真线程：逐子步消费，直接喂给 voxel / collide，不保留</span>
+<span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">point_stream</span><span style="color: #ABB2BF"> {                  </span><span style="color: #7F848E">// 生产者按弦高容差预读</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">voxel</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">cut</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">tool</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">prev_pose</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">);   </span><span style="color: #7F848E">// 去料</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">collide</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">check</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">);            </span><span style="color: #7F848E">// 碰撞</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">prev_pose</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pt</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>回放时按需重算</strong>（§4），不查表。</p>
+<p>生产比消费快约 200 倍，所以缓冲只需 256 点（27 KB）——<strong>"预读充足"的判据是"消费者永不空转"，不是"越多越好"</strong>。</p>
+<h2 id="3-cncsim-kin">3. 第三步：位姿 → 关节值（<code>cncsim-kin</code>）</h2>
+<h3 id="31">3.1 每个采样做一次逆解</h3>
+<p>摇篮机的 RTCP 逆解（<code>机床建模-AC双转台.md</code> §3.3）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>u = x·cosC − y·sinC
+v = x·sinC + y·cosC
+X = u
+Y = v·cosA − (z+L)·sinA
+Z = v·sinA + (z+L)·cosA
+</code></pre></div>
+
+<p><strong>A、C 从哪来？</strong> 由刀轴方向反解（§5 of 建模文档）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>n_W = (sinA·sinC,  sinA·cosC,  cosA)
+→ A = acos(n_z)
+→ C = atan2(n_x, n_y)          // 注意是 (nx, ny) 不是 (nx, -ny)
+</code></pre></div>
+
+<h3 id="32">3.2 三件必须做的事</h3>
+<p><strong>（1）多解选择：取离上一周期最近的那个</strong></p>
+<p><code>atan2</code> 给的是 <code>(-π, π]</code>，但 C 轴可以连续转。如果每周期都取主值，C 轴会在 ±180° 处来回跳。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">c_raw</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">n</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">atan2</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">n</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">y</span><span style="color: #ABB2BF">);                    </span><span style="color: #7F848E">// 主值</span>
+<span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">nearest_wrap</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">c_raw</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">prev_c</span><span style="color: #ABB2BF">);           </span><span style="color: #7F848E">// 展开到上一值附近</span>
+</code></pre></div>
+
+<p><strong>这是"关节值看起来乱跳"的最常见原因。</strong></p>
+<p><strong>（2）奇异点：保持上一值，不要跳变</strong></p>
+<p><code>A ≈ 0</code> 时 C 无定义。控制器行为是<strong>保持 C 不动</strong>，不是跳到 0 或 180。</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">sin</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">abs</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-3</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">prev_c</span><span style="color: #ABB2BF">;                                 </span><span style="color: #7F848E">// 保持</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">diag</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">push</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">KinFinding</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">Singularity</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">at</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">t</span><span style="color: #ABB2BF"> });</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>（3）轴限位检查</strong></p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">j</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">val</span><span style="color: #ABB2BF">) </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">enumerate</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">!</span><span style="color: #E06C75">joint</span><span style="color: #ABB2BF">[</span><span style="color: #E06C75">j</span><span style="color: #ABB2BF">].</span><span style="color: #E06C75">limit</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">contains</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">val</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">diag</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">push</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">KinFinding</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">AxisLimit</span><span style="color: #ABB2BF"> { </span><span style="color: #E06C75">joint</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">j</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">value</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">val</span><span style="color: #ABB2BF"> });</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>真实控制器会在这里报警停机；仿真器记一条 <code>KIN-00x</code> 并标 <code>Trust::Unreliable</code>。</p>
+<hr />
+<h2 id="4-cncsim-render">4. 第四步：关节值 → 动画（<code>cncsim-render</code>）</h2>
+<h3 id="41">4.1 回放时<strong>重新算</strong>，不查表</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">update_joints</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">time</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">program</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">MotionProgram</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">kin</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">Machine</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">: </span><span style="color: #C678DD">&amp;</span><span style="color: #E5C07B">mut</span><span style="color: #ABB2BF"> [</span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">]) {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">program</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">segment_at</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">time</span><span style="color: #ABB2BF">);          </span><span style="color: #7F848E">// O(log n) 二分</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">pose_at</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">seg</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">time</span><span style="color: #ABB2BF">);               </span><span style="color: #7F848E">// 与计算线程同一个函数</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">kin</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">inverse_into</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">pose</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">);                   </span><span style="color: #7F848E">// 就地写，不分配</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p><strong>必须与计算线程用同一个 <code>pose_at</code>。</strong> 否则"看到的"和"算的"不是一回事——画面在骗人。</p>
+<p>成本：每帧 1 次 IK，微秒级，可忽略。</p>
+<h3 id="42">4.2 帧率 ≠ 插补周期</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>周期</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>仿真采样</td>
+<td>1 ms</td>
+</tr>
+<tr>
+<td>显示刷新</td>
+<td>16.7 ms（60 fps）</td>
+</tr>
+</tbody>
+</table></div>
+<p>回放时<strong>直接求 t 时刻的位姿</strong>，不需要"在采样点之间插值"——因为 <code>pose_at</code> 本身就是连续的。这比"存采样点再插值"更准，也更省内存。</p>
+<h3 id="43">4.3 只更新变化的关节</h3>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">val</span><span style="color: #ABB2BF">) </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">iter</span><span style="color: #ABB2BF">().</span><span style="color: #E06C75">enumerate</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">if</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">val</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">prev_q</span><span style="color: #ABB2BF">[</span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">]).</span><span style="color: #E06C75">abs</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-9</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">joint_entity</span><span style="color: #ABB2BF">[</span><span style="color: #E06C75">i</span><span style="color: #ABB2BF">].</span><span style="color: #E06C75">transform</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">rotation</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">..</span><span style="color: #ABB2BF">.;   </span><span style="color: #7F848E">// 只改变了的</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>五个关节里通常只有 1–2 个在动，全量更新会让 Bevy 的变更检测失效（所有子实体都标记脏）。</p>
+<hr />
+<h2 id="5">5. 一个完整算例（带数字）</h2>
+<p>摇篮机，<code>L = 180</code>，插补周期 1 ms。</p>
+<p><strong>块</strong>：<code>G1 X0 Y0 Z-5 A0 C0 → X50 Y0 Z-5 A30 C0 F1000</code>（RTCP 开）</p>
+<h3 id="51">5.1 第一步：段</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>刀尖段长 = 50 mm
+时长     = 50 / (1000/60) = 3.0 s
+子步数   = 25（弦高容差 0.01 mm、摆 30°）
+</code></pre></div>
+
+<h3 id="52-rtcp">5.2 第二步：采样（RTCP 开 → 位姿插补）</h3>
+<p>起点位姿：<code>tip=(0,0,-5)</code>，<code>axis=(0,0,1)</code>（A=0）
+终点位姿：<code>tip=(50,0,-5)</code>，<code>axis=(0, 0.5, 0.866)</code>（A=30）</p>
+<p>中点 <code>t=1.5s</code>（<code>s=0.5</code>）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>tip  = (25, 0, -5)
+axis = slerp((0,0,1),(0,0.5,0.866),0.5) = (0, sin15°, cos15°) = (0, 0.2588, 0.9659)
+     → A = 15°, C = 0
+</code></pre></div>
+
+<h3 id="53">5.3 第三步：逆解</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>z + L = -5 + 180 = 175
+u = 25, v = 0
+
+X = 25
+Y = 0 − 175·sin15° = −45.29
+Z = 0 + 175·cos15° = 169.03
+</code></pre></div>
+
+<p>三个关键时刻的关节值：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>t</th>
+<th>X</th>
+<th>Y</th>
+<th>Z</th>
+<th>A</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+<td>175.00</td>
+<td>0°</td>
+</tr>
+<tr>
+<td>1.5</td>
+<td>25</td>
+<td>−45.29</td>
+<td>169.03</td>
+<td>15°</td>
+</tr>
+<tr>
+<td>3.0</td>
+<td>50</td>
+<td>−87.50</td>
+<td>151.55</td>
+<td>30°</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Y 和 Z 都在走曲线</strong>——这就是 RTCP 补偿：刀尖走直线，机床轴走弧线。</p>
+<h3 id="54-rtcp">5.4 对照：如果 RTCP 关（关节空间插补）</h3>
+<p>把上面三行的关节值<strong>线性插值</strong>，中点得到：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>q(1.5) = (25, −43.75, 163.28, 15°, 0)
+</code></pre></div>
+
+<p>用 FK 算刀尖（<code>tip = (X, Y·cosA + Z·sinA, −Y·sinA + Z·cosA − L)</code>）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>y = −43.75×0.9659 + 163.28×0.2588 = −42.26 + 42.26 = 0     ✓
+z = 43.75×0.2588 + 163.28×0.9659 − 180 = 11.32 + 157.71 − 180 = −10.97
+</code></pre></div>
+
+<p><strong>刀尖在 <code>(25, 0, −10.97)</code>，而应该在 <code>(25, 0, −5)</code>——偏了 5.963 mm。</strong></p>
+<p>这就是为什么五轴必须开 RTCP：<strong>同样的程序，不开 RTCP 会过切近 6 mm。</strong></p>
+<hr />
+<h2 id="6">6. 非线性误差的公式（从算例里提炼）</h2>
+<p>上面那个 5.963 mm 不是巧合。一般地：</p>
+<blockquote>
+<p><strong>非线性误差 ≈ R · (1 − cos(Δθ/2))</strong></p>
+</blockquote>
+<p>其中 <code>R</code> = 刀尖到回转中心的距离，<code>Δθ</code> = 这一段里转过的角度。</p>
+<p>推导：关节空间插补时，刀尖沿<strong>圆弧</strong>走（半径 R，张角 Δθ），而意图是<strong>弦</strong>。弧与弦的最大距离就是拱高 <code>R(1−cos(Δθ/2))</code>。</p>
+<p>验证算例：<code>R = 175</code>，<code>Δθ = 30°</code> → <code>175 × (1 − cos15°) = 175 × 0.03407 = 5.963 mm</code> ✓</p>
+<h3 id="61">6.1 这个公式直接给出"后处理要多密"</h3>
+<p>要求非线性误差 &lt; <code>ε</code>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>Δθ_max = 2 · acos(1 − ε/R)
+</code></pre></div>
+
+<p><code>R = 175 mm</code> 时：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>目标误差 ε</th>
+<th>每段最大摆角 Δθ</th>
+<th>摆长 175 上每段弧长</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.1 mm</td>
+<td>3.9°</td>
+<td>11.9 mm</td>
+</tr>
+<tr>
+<td><strong>0.01 mm</strong></td>
+<td><strong>1.22°</strong></td>
+<td><strong>3.7 mm</strong></td>
+</tr>
+<tr>
+<td>0.001 mm</td>
+<td>0.39°</td>
+<td>1.2 mm</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>这就是后处理"点位密度"的硬指标</strong>：摆长 175 的摇篮机，要把非线性误差控制在 10 µm，每段摆角不能超过 1.2°（弧长 3.7 mm）。</p>
+<p>后处理给的密，误差就小；给的稀，误差就大——<strong>而这个误差在仿真里必须能报出来</strong>，否则用户不知道自己的后处理有问题。</p>
+<h3 id="62">6.2 这就是"非线性误差"在链路里的位置</h3>
+<p>它<strong>不是</strong>一个后处理的分析步骤，而是<strong>第 ② 步选错插补空间的直接后果</strong>。所以仿真器要：</p>
+<ol>
+<li>按程序的 RTCP 状态选插补空间（诚实模拟）</li>
+<li>同时算"理想直线"与"实际轨迹"的偏差</li>
+<li>逐段报出最大偏差与位置（主方案 §4.6）</li>
+</ol>
+<hr />
+<h2 id="7">7. 三个必须决定的点</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>问题</th>
+<th>建议</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong>插补空间</strong>由什么决定？</td>
+<td>由程序的 <code>G43.4</code> 状态<strong>自动</strong>决定，不设开关</td>
+<td>用错就仿真的不是同一个程序</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>采样密度</strong>固定还是自适应？</td>
+<td><strong>按弦高容差自适应</strong>（<code>Δθ_max = 2·acos(1−ε/R)</code>）</td>
+<td>固定 1 ms 会多算 120 倍（§2.3），而控制器行为可用闭式公式表达</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>采样点存不存</strong>？</td>
+<td><strong>不存</strong>，计算流式消费、回放按需重算</td>
+<td>250 万点 260 MB，且改参数全作废</td>
+</tr>
+</tbody>
+</table></div>
+<p>第 2 点的取舍要展开一句：<strong>"模拟控制器行为"和"几何精度"是两件事</strong>。控制器行为（非线性误差、轴速降额）有闭式公式，用端点就能算；几何精度（扫掠体细分）由弦高容差定。<strong>两者都不需要固定周期采样。</strong></p>
+<p>第 3 点是架构上最重要的一条——它把"内存爆炸"变成"每帧一次 IK"。</p>
+<hr />
+<h2 id="8-crate">8. 与 crate 的对应</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>步骤</th>
+<th>crate</th>
+<th>产物</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>① 块 → 段</td>
+<td><code>gcode</code>（解析）+ <code>sim</code>（算时长）</td>
+<td><code>Vec&lt;Segment&gt;</code></td>
+</tr>
+<tr>
+<td>② 段 → 采样</td>
+<td><code>sim</code>（<code>pose_at</code>）</td>
+<td>流式 <code>Pose</code></td>
+</tr>
+<tr>
+<td>③ 位姿 → 关节</td>
+<td><code>kin</code>（<code>inverse</code>）</td>
+<td><code>[f64; 5]</code> + <code>KinFinding</code></td>
+</tr>
+<tr>
+<td>④ 关节 → 画面</td>
+<td><code>render</code></td>
+<td><code>Transform</code></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong><code>pose_at</code> 住在 <code>sim</code> 里，<code>gcode</code> 与 <code>render</code> 都能用</strong>——这是保证"看到的 = 算的"的关键。<code>render</code> 依赖 <code>sim</code> 正是为此。</p>
+<hr />
+<h2 id="9">9. 测试</h2>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">pose_at_endpoints_matches_segment</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// t=0 与 t=dur 必须精确等于段端点（不能有插值漂移）</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">slerp_is_uniform_angular</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 相邻采样的夹角必须相等（lerp+归一化不满足）</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">angles</span><span style="color: #ABB2BF">: </span><span style="color: #E5C07B">Vec</span><span style="color: #56B6C2">&lt;</span><span style="color: #E5C07B">f64</span><span style="color: #56B6C2">&gt;</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> (</span><span style="color: #D19A66">0</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">10</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">map</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">|</span><span style="color: #E06C75">i</span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">angle_between</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">slerp</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">,</span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">,</span><span style="color: #E06C75">i</span><span style="color: #56B6C2">/</span><span style="color: #D19A66">10.</span><span style="color: #ABB2BF">), </span><span style="color: #E06C75">slerp</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">,</span><span style="color: #E06C75">b</span><span style="color: #ABB2BF">,(</span><span style="color: #E06C75">i</span><span style="color: #56B6C2">+</span><span style="color: #D19A66">1</span><span style="color: #ABB2BF">)</span><span style="color: #56B6C2">/</span><span style="color: #D19A66">10.</span><span style="color: #ABB2BF">))).</span><span style="color: #E06C75">collect</span><span style="color: #ABB2BF">();</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">angles</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">windows</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">2</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">all</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">|</span><span style="color: #E06C75">w</span><span style="color: #56B6C2">|</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">w</span><span style="color: #ABB2BF">[</span><span style="color: #D19A66">0</span><span style="color: #ABB2BF">]</span><span style="color: #56B6C2">-</span><span style="color: #E06C75">w</span><span style="color: #ABB2BF">[</span><span style="color: #D19A66">1</span><span style="color: #ABB2BF">]).</span><span style="color: #E06C75">abs</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-12</span><span style="color: #ABB2BF">));</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">joint_interp_reproduces_known_nonlinear_error</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// §5.4 的算例：关节空间插补，中点 Z 偏差必须是 5.963 mm</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">err</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">simulate_joint_interp</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">block</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">((</span><span style="color: #E06C75">err</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">5.963</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">abs</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0.01</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"非线性误差 {}"</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">err</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">rtcp_mode_keeps_tip_straight</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// RTCP 开时，25 个子步的刀尖必须共线（偏差 &lt; 1e-9）</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">render_and_sim_use_same_pose_at</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// 同一时刻，回放算出的 q 与计算线程算出的 q 必须完全相同</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>最后一条防的是最隐蔽的 bug：<strong>动画和仿真用了不同的插值函数，画面在骗人</strong>。</p>
+<hr />
+<h2 id="10">10. 一句话</h2>
+<p><strong>G 代码到轴运动，本质是一个"时间参数化 + 逐周期逆解"的过程。</strong> 唯一容易做错的是插补空间——RTCP 开在位姿空间插补、关在关节空间插补，这一条错了，误差是毫米级（算例：5.963 mm），而画面看起来完全正常。</p>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+[package]
+name = "cncsim-render"
+description = "Bevy 插件：场景 / 毛坯网格 / 剖切"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-motion.workspace = true
+cncsim-tool.workspace = true
+cncsim-voxel.workspace = true
+cncsim-sim.workspace = true
+cncsim-hmi.workspace = true
+cncsim-ui.workspace = true
+
+# 窗口层（`window` feature）：默认关闭。`cargo run --features window` 才编 Bevy。
+[dependencies.bevy]
+workspace = true
+optional = true
+# 0.20 把相机控制器拆成独立 feature（默认关）：开 pan_orbit 才有轨道相机
+features = ["bevy_camera_controller", "pan_orbit_camera", "bevy_picking"]
+
+[dependencies.bevy_egui]
+workspace = true
+optional = true
+
+[features]
+# 打开 = 编译 Bevy 窗口外壳（render::shell）。默认构建零 Bevy。
+window = ["dep:bevy", "dep:bevy_egui"]

@@ -1,0 +1,16 @@
+[package]
+name = "cncsim-sim"
+description = "编排：状态机 / 回放缓冲 / 报告"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-motion.workspace = true
+cncsim-tool.workspace = true
+cncsim-kin.workspace = true
+cncsim-gcode.workspace = true
+cncsim-voxel.workspace = true
+cncsim-collide.workspace = true

@@ -1,0 +1,69 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "local"
+
+[workspace.dependencies]
+# ── 内部 crate（依赖关系由 tools/check_deps.py 守卫） ──
+cncsim-math    = { path = "crates/math" }
+cncsim-motion  = { path = "crates/motion" }
+cncsim-tool    = { path = "crates/tool" }
+cncsim-kin     = { path = "crates/kin" }
+cncsim-gcode   = { path = "crates/gcode" }
+cncsim-voxel   = { path = "crates/voxel" }
+cncsim-collide = { path = "crates/collide" }
+cncsim-sim     = { path = "crates/sim" }
+cncsim-hmi     = { path = "crates/hmi" }
+cncsim-render  = { path = "crates/render" }
+cncsim-ui      = { path = "crates/ui" }
+cncsim-app     = { path = "crates/app" }
+cncsim-config  = { path = "crates/config" }
+
+# ── 外部依赖 ──
+# 策略：**只用精确的最新稳定版**，不用 `^` 区间。
+# 由 `tools/check_versions.py` 对照 crates.io 校验，落后即 CI 失败。
+# 加新依赖时先跑 `check_versions.py --show <crate>` 查最新版，再填到这里。
+#
+# 查询时间：2026-10-28
+
+[workspace.dependencies.serde]
+version = "=1.0.229"
+features = ["derive"]
+
+[workspace.dependencies.ron]
+version = "=0.12.3"
+
+# 并行：**唯一进入 L2 领域 crate 的外部依赖**，理由见 ADR-009 §1.1。
+# 要的是常驻线程池（每次 fork-join 491 µs → ~5 µs），不是 par_iter 语法糖。
+[workspace.dependencies.rayon]
+version = "=1.12.0"
+
+# 窗口层：**只在 `window` feature 下编译**（ADR-011）——默认构建不背 Bevy 的
+# 编译税。允许出现它的 crate 见 tools/check_deps.py 的 BEVY_ALLOWED。
+[workspace.dependencies.bevy]
+version = "=0.20.1"
+
+[workspace.dependencies.bevy_egui]
+version = "=0.43.1"
+
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# 行号信息：给 VTune / perf 这类剖析器用。只影响产物体积，不影响优化。
+debug = 1
+
+# 开发时别把自研的数值内核优化掉：需要真实的浮点行为与性能
+[profile.dev]
+opt-level = 1
+[profile.dev.package."cncsim-math"]
+opt-level = 3
+[profile.dev.package."cncsim-kin"]
+opt-level = 3

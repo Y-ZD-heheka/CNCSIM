@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>计算精度分析</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 结论</a></li>
+<li><a href="#1-f32">1. f32 绝对精度速查</a></li>
+<li><a href="#2-i8">2. 真正的瓶颈：i8 量化</a><ul>
+<li><a href="#21">2.1 数字</a></li>
+<li><a href="#22">2.2 两项误差，不是一项</a></li>
+<li><a href="#23">2.3 由此得到一条设计规则</a></li>
+<li><a href="#24">2.4 想提精度该花在哪</a></li>
+</ul>
+</li>
+<li><a href="#3">3. 三档方案</a><ul>
+<li><a href="#31">3.1 逐模块判定</a></li>
+</ul>
+</li>
+<li><a href="#4-f64">4. 为什么标量路径该用 f64</a></li>
+<li><a href="#5-f32">5. 如果坚持全 f32，会失去什么</a></li>
+<li><a href="#6-float">6. 一个容易忽略的坑：不要用 float 当索引</a></li>
+<li><a href="#7">7. 验收口径（修正）</a></li>
+<li><a href="#8">8. 一句话</a></li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="float">计算精度：float 够不够</h1>
+<blockquote>
+<p>日期：2026-10-28
+结论：<strong>分三档用，不是一刀切。而且真正的精度瓶颈不是 float 宽度。</strong>
+连带修正 ADR-004 §2.5 的检出下限</p>
+</blockquote>
+<hr />
+<h2 id="0">0. 结论</h2>
+<p>四句话：</p>
+<ol>
+<li><strong>f32 在 1000 mm 量级的绝对精度约 0.06 µm</strong>——对加工（公差 10 µm）绰绰有余。</li>
+<li><strong>但精度瓶颈不在 float，在 SDF 的 <code>i8</code> 量化：3.15 µm/档</strong>。换 f64 一点用没有。</li>
+<li><strong>推荐三档</strong>：标量路径 f64（免费）、SIMD 热路径 f32（快 2×）、体素索引用整数（本来就精确）。</li>
+<li><strong>想真正提高精度，该花在 <code>i16</code> 上，不是 f64 上</strong>——内存翻倍换 65 倍精度。</li>
+</ol>
+<p><strong>顺带修正一个错误</strong>：ADR-004 说碰撞检出下限 0.17 µm，那是<strong>采样密度</strong>的限制。实际被 <code>i8</code> 量化卡在 <strong>1.6 µm</strong>。采样密度那 0.17 µm 根本达不到。</p>
+<hr />
+<h2 id="1-f32">1. f32 绝对精度速查</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>量级</th>
+<th>典型场景</th>
+<th>f32 ULP</th>
+<th>f64 ULP</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1 mm</td>
+<td>刀具半径细节</td>
+<td>0.12 nm</td>
+<td>0.2 fm</td>
+</tr>
+<tr>
+<td>30 mm</td>
+<td>刀柄半径</td>
+<td>1.9 nm</td>
+<td>3.6 fm</td>
+</tr>
+<tr>
+<td>200 mm</td>
+<td>毛坯尺寸</td>
+<td><strong>0.015 µm</strong></td>
+<td>28 fm</td>
+</tr>
+<tr>
+<td>1000 mm</td>
+<td>机床行程</td>
+<td><strong>0.061 µm</strong></td>
+<td>0.11 pm</td>
+</tr>
+<tr>
+<td>2000 mm</td>
+<td>大龙门</td>
+<td>0.12 µm</td>
+<td>0.23 pm</td>
+</tr>
+<tr>
+<td><strong>7200 s</strong></td>
+<td><strong>2 小时程序时间</strong></td>
+<td><strong>0.49 ms</strong></td>
+<td>0.9 ps</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>两个值得注意的点</strong>：</p>
+<ul>
+<li>1000 mm 处 f32 的 ULP 是 0.061 µm——<strong>比加工公差小 160 倍</strong>，位置精度完全够。</li>
+<li><strong>时间到了 0.49 ms</strong>，接近一个插补周期（1 ms）。2 小时以上的程序，f32 时间会开始丢精度。</li>
+</ul>
+<hr />
+<h2 id="2-i8">2. 真正的瓶颈：<code>i8</code> 量化</h2>
+<p>这是本次分析最重要的发现。</p>
+<h3 id="21">2.1 数字</h3>
+<p>窄带 SDF 用 <code>i8</code> 存距离，<code>band = 4</code> 体素、<code>h = 0.1 mm</code>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>表示范围  ±4 × 0.1 = ±0.4 mm
+分档      ±127
+每档      0.8 / 254 = 3.15 µm
+舍入误差  半档 = 1.58 µm
+</code></pre></div>
+
+<h3 id="22">2.2 两项误差，不是一项</h3>
+<p><strong>量化只是一项。</strong> 判定 <code>sdf_stock(p) &lt; 0</code> 要在体素之间插值，所以还有一项<strong>三线性重建误差</strong>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>误差源</th>
+<th>h=0.1 时</th>
+<th>与 h 的关系</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>i8</code> 量化（半档）</td>
+<td><strong>1.58 µm</strong></td>
+<td>∝ h</td>
+<td>值存进去的那一刻就产生了</td>
+</tr>
+<tr>
+<td>三线性重建</td>
+<td><code>h²/(8·R_c)</code></td>
+<td>∝ h²</td>
+<td>平面上<strong>精确</strong>；曲面上按曲率增长</td>
+</tr>
+<tr>
+<td><strong>合计（最坏，两项同号）</strong></td>
+<td><strong>2.0 µm</strong>（R_c=3）</td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>曲面曲率半径 R_c</th>
+<th>重建误差</th>
+<th>合计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>平面（∞）</td>
+<td>0</td>
+<td><strong>1.6 µm</strong></td>
+</tr>
+<tr>
+<td>10 mm</td>
+<td>0.13 µm</td>
+<td>1.7 µm</td>
+</tr>
+<tr>
+<td><strong>3 mm</strong>（φ6 球刀）</td>
+<td><strong>0.42 µm</strong></td>
+<td><strong>2.0 µm</strong></td>
+</tr>
+<tr>
+<td>1 mm</td>
+<td>1.25 µm</td>
+<td>2.8 µm</td>
+</tr>
+<tr>
+<td>0.5 mm</td>
+<td>2.50 µm</td>
+<td>4.1 µm</td>
+</tr>
+<tr>
+<td><strong>0.25 mm</strong>（φ0.5 球刀）</td>
+<td><strong>5.00 µm</strong></td>
+<td><strong>6.6 µm</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>所以"1.6 µm 必定检出"只对平面成立。</strong> 完整口径：</p>
+<ul>
+<li><strong>平面 → 1.6 µm</strong></li>
+<li><strong>曲面 R_c ≥ 0.8 mm → 2.0 µm</strong>（h=0.1 时插值项恰好不超过量化项的临界曲率是 0.79 mm）</li>
+<li><strong>R_c &lt; 0.8 mm → 1.6 + h²/(8R_c)</strong>，例如 φ0.5 球刀精加工面是 <strong>6.6 µm</strong></li>
+</ul>
+<p><strong>这条比"1.6 µm"重要得多</strong>：小刀具精加工出来的曲面，量化根本不是瓶颈，<strong>网格太粗才是</strong>。拿"1.6 µm"去承诺 φ0.5 球刀的加工面是错的，差了 4 倍。</p>
+<h3 id="23">2.3 由此得到一条设计规则</h3>
+<p>要插值项不超过量化项（即总误差不超过 2 倍量化）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>h ≤ √(8 · R_c · 1.575e-3) ≈ 0.11 · √R_c        （h、R_c 单位 mm）
+</code></pre></div>
+
+<p>R_c=3 → h ≤ 0.19；R_c=1 → h ≤ 0.11；R_c=0.25 → h ≤ 0.056。</p>
+<p>反解"总误差 ≤ ε"的 h 上界，取两项约束的<strong>较小者</strong>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>h ≤ min( 254·ε / band_voxels ,  √(8·R_c·ε) )
+</code></pre></div>
+
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>目标 ε</th>
+<th>量化限</th>
+<th>R_c=3 插值限</th>
+<th>取哪个</th>
+<th>h=0.1 够吗</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2 µm</td>
+<td>0.127</td>
+<td>0.219</td>
+<td>0.127</td>
+<td>✅ 够</td>
+</tr>
+<tr>
+<td>1 µm</td>
+<td>0.064</td>
+<td>0.155</td>
+<td>0.064</td>
+<td>❌ 要降到 0.05</td>
+</tr>
+</tbody>
+</table></div>
+<blockquote>
+<p><strong>这就是"h 一个旋钮控四件事"里最容易漏的第五件</strong>：它不只控内存/耗时/采样密度，还通过 <code>h²/(8R_c)</code> 直接控<strong>曲面精度</strong>。所以"我要验 1 µm 的过切"不能只回答"换 i16"，先看 h 够不够。</p>
+</blockquote>
+<h3 id="24">2.4 想提精度该花在哪</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>每档精度</th>
+<th>内存（h=0.1）</th>
+<th>相对 i8</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>i8, band=4（现状）</strong></td>
+<td><strong>3.15 µm</strong></td>
+<td><strong>206 MB</strong></td>
+<td>1×</td>
+</tr>
+<tr>
+<td>i8, band=2</td>
+<td>1.57 µm</td>
+<td>206 MB</td>
+<td>1×（但窄带太薄，MC 插值不够）</td>
+</tr>
+<tr>
+<td><strong>i16, band=4</strong></td>
+<td><strong>12.2 nm</strong></td>
+<td><strong>412 MB</strong></td>
+<td>2× 内存换 <strong>258×</strong> 精度</td>
+</tr>
+<tr>
+<td>f16, band=4</td>
+<td>~0.2 µm</td>
+<td>412 MB</td>
+<td>2× 换 8×</td>
+</tr>
+<tr>
+<td>f32, band=4</td>
+<td>48 nm</td>
+<td>824 MB</td>
+<td>4× 换 65×（不如 i16）</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>结论：要精度就换 <code>i16</code>，不要换 f64。</strong> 换 f64 对 SDF 精度<strong>零收益</strong>——因为存的是 i8，算的时候转成 float 再转回去，量化误差在存的那一刻就产生了。</p>
+<blockquote>
+<p><code>i16</code> 做成 <code>GridConfig</code> 的一个选项（<code>value_type: I8 | I16</code>），默认 <code>I8</code>。需要 µm 级验证时切 <code>I16</code>。</p>
+</blockquote>
+<hr />
+<h2 id="3">3. 三档方案</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>层</th>
+<th>类型</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>体素索引</strong></td>
+<td><code>i32</code></td>
+<td>整数本来就精确，<strong>不要用 float 当索引</strong></td>
+</tr>
+<tr>
+<td><strong>标量路径</strong>（kin / collide / 时间 / 配置）</td>
+<td><strong>f64</strong></td>
+<td>标量 f64 在 x86-64 上<strong>几乎免费</strong>（见 §4），且要跟 oracle 对拍</td>
+</tr>
+<tr>
+<td><strong>SIMD 热路径</strong>（<code>sd_profile</code> 内层）</td>
+<td><strong>f32</strong></td>
+<td>精度已被 i8 限死，f32 快 2×</td>
+</tr>
+<tr>
+<td><strong>渲染边界</strong></td>
+<td>f32</td>
+<td>Bevy 的要求</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="31">3.1 逐模块判定</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>模块</th>
+<th>量级</th>
+<th>f32 够吗</th>
+<th>选什么</th>
+<th>依据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FK / IK / RTCP</td>
+<td>0–2000 mm</td>
+<td>⚠️ 勉强</td>
+<td><strong>f64</strong></td>
+<td>迭代收敛 + oracle 对拍 1e-6</td>
+</tr>
+<tr>
+<td>奇异点判定</td>
+<td>无量纲</td>
+<td>✅</td>
+<td>f64（跟随）</td>
+<td><code>sinA &lt; 1e-3</code> 需要稳定</td>
+</tr>
+<tr>
+<td>轴速校核</td>
+<td>0–1000 mm/s</td>
+<td>✅</td>
+<td>f64</td>
+<td>除法累积</td>
+</tr>
+<tr>
+<td>GJK 距离</td>
+<td>0–1000 mm</td>
+<td>⚠️ 勉强</td>
+<td><strong>f64</strong></td>
+<td>保守推进用距离下界，误差会放大</td>
+</tr>
+<tr>
+<td><code>sd_profile</code> 求值</td>
+<td>0–30 mm</td>
+<td>✅ <strong>充裕</strong></td>
+<td><strong>f32（SIMD）</strong></td>
+<td>ULP 1.9 nm ≪ i8 的 3.15 µm</td>
+</tr>
+<tr>
+<td>三线性插值</td>
+<td>0–200 mm</td>
+<td>✅</td>
+<td>f32</td>
+<td>ULP 0.015 µm ≪ 3.15 µm</td>
+</tr>
+<tr>
+<td>时间戳 / 时长</td>
+<td>0–7200 s</td>
+<td>❌ <strong>不够</strong></td>
+<td><strong>f64</strong></td>
+<td>ULP 0.49 ms ≈ 半个插补周期</td>
+</tr>
+<tr>
+<td>渲染 Transform</td>
+<td>0–2000 mm</td>
+<td>✅</td>
+<td>f32</td>
+<td>视觉</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="4-f64">4. 为什么标量路径该用 f64</h2>
+<p><strong>因为它在 x86-64 上几乎免费。</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>操作</th>
+<th>f32 吞吐</th>
+<th>f64 吞吐</th>
+<th>差异</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>标量加/乘（SSE2）</td>
+<td>1–2 /cycle</td>
+<td>1–2 /cycle</td>
+<td><strong>无</strong></td>
+</tr>
+<tr>
+<td>AVX2 SIMD</td>
+<td>8 通道</td>
+<td>4 通道</td>
+<td><strong>2×</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>标量 double 和 float 在现代 CPU 上同速</strong>——因为 x87 时代早就过去了，SSE2 的标量 double 就是一条指令。f64 的代价只在<strong>内存占用</strong>和<strong>SIMD 宽度</strong>上。</p>
+<p>所以：</p>
+<ul>
+<li><strong>运动学、碰撞</strong>：每次调用算几百次浮点运算，量小、精度关键 → <strong>f64 免费且更稳</strong></li>
+<li><strong>SDF 内层</strong>：每次调用算几十万次 → <strong>SIMD 宽度值 2×，且精度被 i8 限死 → f32</strong></li>
+</ul>
+<p>这个分法不是"折中"，是<strong>两边的成本收益都算清后的结果</strong>。</p>
+<hr />
+<h2 id="5-f32">5. 如果坚持全 f32，会失去什么</h2>
+<p>诚实地列一下代价：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>f64</th>
+<th>全 f32</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RTCP 不变量测试容差</td>
+<td>1e-6 mm</td>
+<td>需放宽到 <strong>1e-4 mm</strong>（100 nm）</td>
+</tr>
+<tr>
+<td>与 LinuxCNC oracle 对拍</td>
+<td>1e-6</td>
+<td><strong>做不到</strong>（oracle 是 double）</td>
+</tr>
+<tr>
+<td>golden 基准精度</td>
+<td>1e-12</td>
+<td>1e-5</td>
+</tr>
+<tr>
+<td>2 小时程序的时间精度</td>
+<td>1e-9 s</td>
+<td><strong>0.49 ms</strong>（半个插补周期）</td>
+</tr>
+<tr>
+<td>迭代收敛判据</td>
+<td>1e-12</td>
+<td>卡在 1e-5，<strong>分不清"收敛"与"停滞"</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>最要命的是第二条</strong>：ADR-003 §8.9 用 LinuxCNC 当 oracle 对拍关节值，容差 1e-6。LinuxCNC 内部是 <code>double</code>，我们若用 f32 就永远对不上——<strong>这个最有价值的验证手段直接废掉</strong>。</p>
+<p>所以：<strong>标量路径不要省 f64。</strong></p>
+<hr />
+<h2 id="6-float">6. 一个容易忽略的坑：不要用 float 当索引</h2>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">// ❌ 错</span>
+<span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">idx</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">) </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f32</span><span style="color: #ABB2BF">;</span>
+<span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">i</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">idx</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">usize</span><span style="color: #ABB2BF">;          </span><span style="color: #7F848E">// 0.1 的累积误差会让 idx 差 1</span>
+
+<span style="color: #7F848E">// ✅ 对</span>
+<span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">i</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> ((</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">origin</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">/</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">h</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">round</span><span style="color: #ABB2BF">() </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">i32</span><span style="color: #ABB2BF">;   </span><span style="color: #7F848E">// 显式取整，且用 f64 算除法</span>
+</code></pre></div>
+
+<p>体素索引必须是<strong>整数</strong>，且从世界坐标转换时用 f64 做除法再取整。用 f32 在 2000 mm 处 ULP 0.12 µm，若 <code>h = 0.1 mm</code>，<code>x/h</code> 到 20000——f32 在 20000 的 ULP 是 0.0024，取整后可能错 1 格。</p>
+<p><strong>错一格就是 0.1 mm 的位置误差</strong>，而且只在边界处偶发。</p>
+<hr />
+<h2 id="7">7. 验收口径（修正）</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>指标</th>
+<th>原口径</th>
+<th>修正后</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>碰撞检出下限</td>
+<td>0.17 µm</td>
+<td><strong>1.6 µm（平面）／2.0 µm（R_c≥0.8 mm）／6.6 µm（φ0.5 球刀面）</strong></td>
+<td>i8 量化 + 三线性重建</td>
+</tr>
+<tr>
+<td>RTCP 不变量</td>
+<td>&lt; 1e-6 mm</td>
+<td>不变</td>
+<td>f64 保持</td>
+</tr>
+<tr>
+<td>FK∘IK 往返</td>
+<td>&lt; 1e-9 mm</td>
+<td>不变</td>
+<td>f64 保持</td>
+</tr>
+<tr>
+<td>与 LinuxCNC 对拍</td>
+<td>&lt; 1e-6</td>
+<td>不变</td>
+<td>f64 保持</td>
+</tr>
+<tr>
+<td>时间精度</td>
+<td>—</td>
+<td><strong>&lt; 1 µs</strong></td>
+<td>时间用 f64</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong><code>i8</code> → <code>i16</code> 的切换点</strong>：<strong>只有量化项是主导项时换 i16 才有意义。</strong> 换 i16 后量化降到 12 nm，但插值项不动——
+h=0.1、R_c=3 时总误差从 2.0 µm 降到 <strong>0.42 µm</strong>（插值项接管），平面则降到 0.01 µm。
+<strong>再往下必须降 h</strong>（插值项 ∝ h²）：要 0.1 µm 级保证，得 h ≈ 0.05 <strong>且</strong> i16，缺一不可。
+默认 <code>i8</code> + h=0.1 覆盖的是"平面 1.6 µm / 常规曲面 2.0 µm"这一档，够铣削验证用。</p>
+<hr />
+<h2 id="8">8. 一句话</h2>
+<p><strong>float 够用，但问题问错了方向</strong>：精度瓶颈在 <code>i8</code> 量化（3.15 µm/档）与三线性重建（<code>h²/(8R_c)</code>），都不在 float 宽度。换 f64 对 SDF 精度零收益；要提精度先降 h（插值项 ∝h²、量化 ∝h），再考虑换 <code>i16</code>（2× 内存换 258× 量化精度）。而标量路径用 f64 是<strong>免费</strong>的——因为标量 double 和 float 在 x86-64 上同速。</p>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

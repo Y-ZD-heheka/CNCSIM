@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>机床建模-AC双转台</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">AC 双转台<br>数学建模</div>
+  <div class="toc">
+<ul>
+<li><a href="#0">0. 先说结果</a></li>
+<li><a href="#1">1. 为什么选这个构型</a></li>
+<li><a href="#2">2. 坐标系与唯一的几何参数</a></li>
+<li><a href="#3">3. 齐次变换链</a><ul>
+<li><a href="#31">3.1 工件 → 刀具</a></li>
+<li><a href="#32">3.2 正解</a></li>
+<li><a href="#33-rtcp">3.3 逆解 / RTCP</a></li>
+</ul>
+</li>
+<li><a href="#4">4. 数值锚点（实测，用于测试）</a></li>
+<li><a href="#5">5. 奇异点</a></li>
+<li><a href="#6">6. 摇篮式特有：摆动吃掉行程与速度</a><ul>
+<li><a href="#61">6.1 行程耦合（实测）</a></li>
+<li><a href="#62">6.2 速度耦合（更严重）</a></li>
+</ul>
+</li>
+<li><a href="#7">7. 参数表</a></li>
+<li><a href="#8">8. 验证测试（三条）</a></li>
+<li><a href="#9-machineron">9. .machine.ron</a></li>
+<li><a href="#10">10. 与摆头式的对照</a></li>
+<li><a href="#11">11. 本次修正的两个错误（留档）</a></li>
+<li><a href="#12">12. 加工包络（轴行程 ≠ 加工范围）</a><ul>
+<li><a href="#121">12.1 轴行程（原始参数）</a></li>
+<li><a href="#122">12.2 实际可用高度（算出来的）</a></li>
+<li><a href="#123">12.3 三条必须说清的限制</a></li>
+<li><a href="#124">12.4 与摆头式对比</a></li>
+<li><a href="#125">12.5 怎么在软件里呈现</a></li>
+<li><a href="#126-toolsenvelopepy">12.6 计算工具：tools/envelope.py</a></li>
+<li><a href="#127-tip_w">12.7 一个容易搞错的约定：tip_w 是链乘积的平移部分</a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="ac">五轴机床数学建模：AC 双转台（摇篮式立式加工中心）</h1><div class="meta"><span class="chip hi">L=180</span><span class="chip hi">加工包络 Φ400×340</span><span class="chip">envelope.py 已收敛</span><span class="chip">2026-10-28</span></div>
+<blockquote>
+<p>日期：2026-10-28
+用途：给 <code>cncsim-kin</code> 提供一台<strong>参数完整、数值可验证</strong>的参考机床
+配套：<code>assets/machines/ac_trunnion.machine.ron</code>、<code>tools/verify_trunnion.py</code></p>
+</blockquote>
+<hr />
+<h2 id="0">0. 先说结果</h2>
+<p>全部公式与锚点已用 <code>tools/verify_trunnion.py</code> 数值验证：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>验证项</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RTCP ↔ FK 互逆（500 组随机位姿）</td>
+<td>最大偏差 <strong>7.7×10⁻¹⁴</strong></td>
+</tr>
+<tr>
+<td>RTCP 不变量（A 从 −60 摆到 +60，刀尖固定）</td>
+<td>最大漂移 <strong>3.2×10⁻¹⁴</strong></td>
+</tr>
+<tr>
+<td>刀轴解析式 vs 齐次变换</td>
+<td>一致</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>过程中改正了两个错误</strong>，都写在第 11 节——一个是 RTCP 里 <code>(z+L)</code> 写成了 <code>(z−L)</code>，一个是刀轴方向 Y 分量符号反了。手算锚点也因此全部重算。</p>
+<hr />
+<h2 id="1">1. 为什么选这个构型</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>构型</th>
+<th>叫法</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>AC 双转台</strong></td>
+<td><strong>摇篮式</strong></td>
+<td>工件转、刀具不转；刚性好；<strong>国产五轴加工中心主流</strong></td>
+</tr>
+<tr>
+<td>AC 摆头</td>
+<td>摆头式</td>
+<td>刀具转、工件不转；适合大件</td>
+</tr>
+<tr>
+<td>摆头+转台</td>
+<td>复合式</td>
+<td>两者都转；最灵活、最复杂</td>
+</tr>
+</tbody>
+</table></div>
+<p>选摇篮式：它的运动学与摆头式<strong>镜像</strong>（工件坐标系在动，不是刀具坐标系在动）——主方案 §4 与附录 A 推的都是摆头式，这里补上另一半。而且它有一个摆头式没有的现象：<strong>摆动会吃掉直线轴行程和速度</strong>（§6），直接影响节拍。</p>
+<hr />
+<h2 id="2">2. 坐标系与唯一的几何参数</h2>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>机床坐标系 M：Z=0 取在 A 轴（摇篮轴）中心高度，X/Y=0 在 C 轴轴线上
+工件坐标系 W：原点在 C 转台台面中心，随转台一起转（即 G54）
+</code></pre></div>
+
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>符号</th>
+<th>含义</th>
+<th>取值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>L</code></strong></td>
+<td><strong>A 轴中心 → C 转台台面的距离</strong></td>
+<td><strong>180 mm</strong></td>
+</tr>
+<tr>
+<td><code>D</code></td>
+<td>工作台直径</td>
+<td>400 mm</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>关键结论：摇篮式的运动学只有一个几何参数 <code>L</code>。</strong></p>
+<p>常被误当成参数的是"机床 Z 参考面到 A 轴中心的距离 H"——它只影响机床的绝对高度和行程范围，<strong>不影响刀尖相对工件的位姿</strong>。把 Z=0 定在 A 轴中心，<code>H</code> 就被基准选择吸收了。这一点值得记住：<strong>少一个参数就少一个错的地方</strong>。</p>
+<p>装配关系（全部几何的来源）：</p>
+<ul>
+<li>C 转台台面在 A 轴中心<strong>上方 <code>L</code></strong>，台面朝向 +Z（A=0 时）</li>
+<li>C 绕自身法线（A=0 时即 +Z）旋转</li>
+<li>A 绕 X 轴旋转，枢轴就是机床原点</li>
+</ul>
+<hr />
+<h2 id="3">3. 齐次变换链</h2>
+<h3 id="31">3.1 工件 → 刀具</h3>
+<p>我们的 <code>MachineTopology.chain</code> 是「工件 → 刀具」的连乘，每项为 <code>Translate(offset) · Rotate(q)</code>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>T_WT = Rz(−C) · T(0,0,−L) · Rx(−A) · T(X,Y,Z)
+</code></pre></div>
+
+<p>从右往左读：</p>
+<ol>
+<li><code>T(X,Y,Z)</code>：直线轴把主轴移到机床坐标（在机床系里）</li>
+<li><code>Rx(−A)</code>：<strong>反向</strong>转回摇篮（工件转了 +A，工具在工件系里就转 −A）</li>
+<li><code>T(0,0,−L)</code>：从台面中心退到 A 轴中心</li>
+<li><code>Rz(−C)</code>：<strong>反向</strong>转回 C 转台</li>
+</ol>
+<p><strong>两个 <code>sign = −1</code> 是推导出来的，不是猜的</strong>：工件转了 +A，要表达"刀尖在工件坐标系里在哪"，就必须用逆变换 −A。这正是 <code>Joint::sign</code> 字段的用途。</p>
+<h3 id="32">3.2 正解</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>刀尖在工件系：  p_W = T_WT · (0,0,0)
+刀轴在工件系：  n_W = R_WT · ẑ            （n 由刀尖指向主轴，A=0 时为 +Z）
+</code></pre></div>
+
+<h3 id="33-rtcp">3.3 逆解 / RTCP</h3>
+<p>RTCP 模式（G43.4）下，程序给的 <code>X/Y/Z</code> 是<strong>工件坐标系里的刀尖位置</strong>，控制器反算机床直线轴：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>u = x·cosC − y·sinC
+v = x·sinC + y·cosC
+
+X = u
+Y = v·cosA − (z + L)·sinA
+Z = v·sinA + (z + L)·cosA
+</code></pre></div>
+
+<p><strong>注意是 <code>(z + L)</code> 不是 <code>(z − L)</code></strong>：刀尖到 A 轴中心的轴向距离是 <code>z + L</code>（工件原点在 A 轴中心上方 L，刀尖在 z 处）。</p>
+<p>这个式子可以一句话概括：</p>
+<blockquote>
+<p><strong>（Y, Z）就是把 (v, z+L) 绕 X 轴转 −A。</strong></p>
+</blockquote>
+<hr />
+<h2 id="4">4. 数值锚点（实测，用于测试）</h2>
+<p><code>L = 180</code></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>机床 (X,Y,Z,A,C)</th>
+<th>p_W</th>
+<th>n_W</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>(0, 0, 0, 0, 0)</td>
+<td>(0, 0, <strong>−180</strong>)</td>
+<td>(0, 0, 1)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>(0, 0, −50, 90, 0)</td>
+<td>(0, <strong>−50</strong>, −180)</td>
+<td>(0, <strong>1</strong>, 0)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>(100, 50, −20, 30, 45)</td>
+<td>(94.258232, −47.163124, −222.320508)</td>
+<td>(0.353553, 0.353553, 0.866025)</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>读法</strong>：</p>
+<ul>
+<li>锚点 1：机床在原点时刀尖在工件原点下方 L 处（因为 Z=0 是 A 轴中心，台面在 Z=+180）。刀轴竖直向上 ✓</li>
+<li>锚点 2：台面翻 90°，刀尖在机床系里下沉 50，在工件系里表现为 Y=−50 ✓；刀轴变成 +Y ✓</li>
+<li>锚点 3：非平凡位姿，<code>|p_W| = 246.0394</code>，<code>|n_W| = 1</code></li>
+</ul>
+<blockquote>
+<p>这三组数是从<strong>独立于实现的</strong>齐次变换算出来的，已写进 <code>testdata/golden/ac_trunnion_anchors.csv</code>（3 个锚点 + 540 个网格点，共 543 行）。<strong>这是防止"FK 和 IK 一起错但自洽"的唯一手段。</strong></p>
+</blockquote>
+<p><strong>golden 文件的两个用途要分清</strong>：</p>
+<ul>
+<li><strong>前 3 行（锚点）是真 oracle</strong>——手推 + 独立矩阵连乘双重确认，实现错了它会红。</li>
+<li><strong>后 540 行（网格）只是回归锁</strong>——由当前实现生成，改动实现时数值一变就会报，但它不独立证明正确。</li>
+</ul>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>python<span style="color: #ABB2BF"> </span>tools/verify_trunnion.py<span style="color: #ABB2BF"> </span>--write<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 重新生成（仅在确认改动正确后）</span>
+python<span style="color: #ABB2BF"> </span>tools/verify_trunnion.py<span style="color: #ABB2BF">           </span><span style="color: #7F848E"># 校验，漂移 &gt; 1e-9 则退出码 1</span>
+</code></pre></div>
+
+<hr />
+<h2 id="5">5. 奇异点</h2>
+<p>展开 <code>n_W = Rz(−C)·Rx(−A)·ẑ</code>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>n_W = ( sinA·sinC,  sinA·cosC,  cosA )
+</code></pre></div>
+
+<ul>
+<li><code>A = 0</code> → <code>n_W = (0,0,1)</code>：刀轴与 C 轴平行</li>
+<li>此时 C 变化<strong>不改变刀轴姿态</strong>，只让工件绕刀轴自转 → <strong>C 对刀轴无影响，逆解不唯一</strong></li>
+</ul>
+<p><strong>摇篮式的这个奇异点比摆头式温和</strong>：摆头式在 A=0 时 C 失控会让刀轴突跳；摇篮式只是"工件绕刀轴自转"，加工本身仍然正确（相当于车削）。</p>
+<p>真正的麻烦在近奇异区的速度耦合，见 §6.2。</p>
+<hr />
+<h2 id="6">6. 摇篮式特有：摆动吃掉行程与速度</h2>
+<h3 id="61">6.1 行程耦合（实测）</h3>
+<p>刀尖在台面中心（<code>p_W = (0,0,0)</code>）时，RTCP 求出的直线轴位置：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>A</th>
+<th>X</th>
+<th>Y</th>
+<th>Z</th>
+<th>ΔY</th>
+<th>ΔZ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0°</td>
+<td>0</td>
+<td>0</td>
+<td>180.0</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>30°</td>
+<td>0</td>
+<td>−90.0</td>
+<td>155.9</td>
+<td>−90.0</td>
+<td>−24.1</td>
+</tr>
+<tr>
+<td>60°</td>
+<td>0</td>
+<td>−155.9</td>
+<td>90.0</td>
+<td>−155.9</td>
+<td>−90.0</td>
+</tr>
+<tr>
+<td>90°</td>
+<td>0</td>
+<td>−180.0</td>
+<td>0.0</td>
+<td>−180.0</td>
+<td>−180.0</td>
+</tr>
+<tr>
+<td><strong>110°</strong></td>
+<td>0</td>
+<td><strong>−169.1</strong></td>
+<td><strong>−61.6</strong></td>
+<td><strong>−169.1</strong></td>
+<td><strong>−241.6</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>含义</strong>：A 摆到 ±110° 时，Y 要额外走 169 mm、Z 要额外下沉 242 mm。<strong>这部分行程纯补偿，不产生任何切削</strong>。</p>
+<p>设计机床时行程必须包含它，否则会出现"标称行程够、实际摆不到位"。仿真器应当直接检查这一条——这是用户最容易忽略的撞机原因之一。</p>
+<h3 id="62">6.2 速度耦合（更严重）</h3>
+<p><code>Y = v·cosA − (z+L)·sinA</code> 对时间求导（<code>v</code>、<code>z</code> 固定）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>dY/dt = −(z+L)·cosA · dA/dt
+</code></pre></div>
+
+<p>刀尖在台面（<code>z = −L</code>，故 <code>z+L = 0</code>）时该项为零——<strong>贴着台面转不消耗 Y 轴速度</strong>。</p>
+<p>但刀尖抬高 50 mm（<code>z+L = 50</code>）、A 轴 25 rpm：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>|dY/dt| = 50 × 2.618 = 131 mm/s = 7.9 m/min
+</code></pre></div>
+
+<p>刀尖抬高 180 mm 时：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>|dY/dt| = 180 × 2.618 = 471 mm/s = 28.3 m/min
+</code></pre></div>
+
+<p><strong>这个数是摇篮机的固有短板</strong>：A 在 0 附近摆动时 Y/Z 补偿速度最大，已经接近很多机床的快移速度（30 m/min），控制器被迫降速，实际进给远低于程序值。</p>
+<p>仿真器应报出："第 N 段要求 Y 轴 28.3 m/min，达机床上限的 94%，实际进给降至 88%"——这正是主方案 §4.7「轴速超限」要输出的东西。</p>
+<hr />
+<h2 id="7">7. 参数表</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>值</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>构型</td>
+<td>XYZAC 双转台（摇篮）</td>
+<td>工件转、刀具不转</td>
+</tr>
+<tr>
+<td><strong>L</strong></td>
+<td><strong>180 mm</strong></td>
+<td>A 轴中心 → 台面（唯一运动学参数）</td>
+</tr>
+<tr>
+<td>X 行程</td>
+<td>−400 … +400</td>
+<td></td>
+</tr>
+<tr>
+<td>Y 行程</td>
+<td>−300 … +300</td>
+<td>含 169 mm 摆动补偿余量</td>
+</tr>
+<tr>
+<td>Z 行程</td>
+<td>−120 … +520</td>
+<td><strong>Z=0 是 A 轴中心高度</strong>；台面在 Z=+180</td>
+</tr>
+<tr>
+<td>A 行程</td>
+<td>−110 … +110 °</td>
+<td></td>
+</tr>
+<tr>
+<td>C 行程</td>
+<td>连续</td>
+<td></td>
+</tr>
+<tr>
+<td>直线快移</td>
+<td>30 m/min</td>
+<td></td>
+</tr>
+<tr>
+<td>A 轴转速</td>
+<td>25 rpm</td>
+<td></td>
+</tr>
+<tr>
+<td>C 轴转速</td>
+<td>40 rpm</td>
+<td></td>
+</tr>
+<tr>
+<td>直线加速度</td>
+<td>2940 mm/s²</td>
+<td>0.3 g</td>
+</tr>
+<tr>
+<td>插补周期</td>
+<td>1 ms</td>
+<td>与 LinuxCNC 参考机一致</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="8">8. 验证测试（三条）</h2>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">fk_matches_verified_anchors</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">// §4 的三组数，容差 1e-9</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">n</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">forward</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">m</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">assert_vec3</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">180.0</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">assert_vec3</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">n</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF">]);</span>
+
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">n</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">forward</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">m</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">50.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">90.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">assert_vec3</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">50.0</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">180.0</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">assert_vec3</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">n</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">1.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">]);</span>
+
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">n</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">forward</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">m</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">100.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">50.0</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">20.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">30.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">45.0</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">assert_vec3</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">94.258232</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">47.163124</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">222.320508</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #E06C75">assert_vec3</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">n</span><span style="color: #ABB2BF">, [</span><span style="color: #D19A66">0.353553</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.353553</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.866025</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #E06C75">proptest</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #7F848E">#[test]</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">ik_fk_roundtrip</span><span style="color: #ABB2BF">(</span><span style="color: #E06C75">a</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">110.0</span><span style="color: #C678DD">f64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">110.0</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">180.0</span><span style="color: #C678DD">f64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">180.0</span><span style="color: #ABB2BF">,</span>
+<span style="color: #ABB2BF">                       </span><span style="color: #E06C75">x</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">300.0</span><span style="color: #C678DD">f64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">300.0</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">y</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">200.0</span><span style="color: #C678DD">f64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">200.0</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">z</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">300.0</span><span style="color: #C678DD">f64</span><span style="color: #56B6C2">..</span><span style="color: #D19A66">100.0</span><span style="color: #ABB2BF">) {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">p0</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">n0</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">forward</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">m</span><span style="color: #ABB2BF">, [</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">y</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">z</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">q</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">inverse</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">m</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">p0</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">n0</span><span style="color: #ABB2BF">, [</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">y</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">z</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">c</span><span style="color: #ABB2BF">]).</span><span style="color: #E06C75">unwrap</span><span style="color: #ABB2BF">();</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">p1</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">n1</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">forward</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">m</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">q</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">prop_assert</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">((</span><span style="color: #E06C75">p1</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">p0</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">length</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-9</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">        </span><span style="color: #E06C75">prop_assert</span><span style="color: #56B6C2">!</span><span style="color: #ABB2BF">((</span><span style="color: #E06C75">n1</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">n0</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">length</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-9</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+
+<span style="color: #7F848E">#[test]</span>
+<span style="color: #C678DD">fn</span><span style="color: #ABB2BF"> </span><span style="color: #61AFEF; font-weight: bold">rtcp_keeps_tip_fixed_in_workpiece_frame</span><span style="color: #ABB2BF">() {</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">p_w</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">DVec3</span><span style="color: #ABB2BF">::</span><span style="color: #E06C75">new</span><span style="color: #ABB2BF">(</span><span style="color: #D19A66">30.0</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">20.0</span><span style="color: #ABB2BF">, </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">5.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">    </span><span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">i</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">0</span><span style="color: #56B6C2">..=</span><span style="color: #D19A66">40</span><span style="color: #ABB2BF"> {</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #D19A66">60.0</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">+</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">3.0</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">*</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">i</span><span style="color: #ABB2BF"> </span><span style="color: #C678DD">as</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">f64</span><span style="color: #ABB2BF">;</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">y</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">z</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">rtcp_inverse</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">m</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">p_w</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">);</span>
+<span style="color: #ABB2BF">        </span><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> (</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">_</span><span style="color: #ABB2BF">) </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">forward</span><span style="color: #ABB2BF">(</span><span style="color: #56B6C2">&amp;</span><span style="color: #E06C75">m</span><span style="color: #ABB2BF">, [</span><span style="color: #E06C75">x</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">y</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">z</span><span style="color: #ABB2BF">, </span><span style="color: #E06C75">a</span><span style="color: #ABB2BF">, </span><span style="color: #D19A66">0.0</span><span style="color: #ABB2BF">]);</span>
+<span style="color: #ABB2BF">        </span><span style="color: #56B6C2; font-weight: bold">assert!</span><span style="color: #ABB2BF">((</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">p_w</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">length</span><span style="color: #ABB2BF">() </span><span style="color: #56B6C2">&lt;</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1e-6</span><span style="color: #ABB2BF">, </span><span style="color: #98C379">"A={a} 漂移 {}"</span><span style="color: #ABB2BF">, (</span><span style="color: #E06C75">p</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">-</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">p_w</span><span style="color: #ABB2BF">).</span><span style="color: #E06C75">length</span><span style="color: #ABB2BF">());</span>
+<span style="color: #ABB2BF">    }</span>
+<span style="color: #ABB2BF">}</span>
+</code></pre></div>
+
+<p>第二条（RTCP 不变量）最有价值：它同时验证 §3.3 的化简和 §3.1 的连乘是否一致。<strong>符号写反时它会红得很具体——漂移量随 A 变化</strong>，而不是一个常数偏差。</p>
+<hr />
+<h2 id="9-machineron">9. <code>.machine.ron</code></h2>
+<div class="codehilite" data-lang="ron"><pre style="line-height: 125%;"><span></span><code>(
+  name: "AC 双转台摇篮（L=180）",
+  chain: [
+    // 工件端：两个旋转轴，sign = −1 是因为要表达"工具在工件系"
+    (name:"C", kind:Rotary(Z), offset:(0,0,0),    pivot:(0,0,0), sign:-1.0, limit:(-99999, 99999)),
+    (name:"A", kind:Rotary(X), offset:(0,0,-L),   pivot:(0,0,0), sign:-1.0, limit:(-110, 110)),
+    // 机床端：三个直线轴，在机床系里，sign = +1
+    (name:"X", kind:Linear(X), offset:(0,0,0),    pivot:(0,0,0), sign: 1.0, limit:(-400, 400)),
+    (name:"Y", kind:Linear(Y), offset:(0,0,0),    pivot:(0,0,0), sign: 1.0, limit:(-300, 300)),
+    (name:"Z", kind:Linear(Z), offset:(0,0,0),    pivot:(0,0,0), sign: 1.0, limit:(-120, 520)),
+  ],
+  tool_length: 0.0,      // 刀尖即链末端，长度由刀具表另给
+  pivot_distance: (0,0,0),
+)
+</code></pre></div>
+
+<p><strong>三个要点</strong>：</p>
+<ol>
+<li><strong>链的顺序是 C → A → X → Y → Z</strong>（旋转轴在前）——摇篮式的旋转轴在<strong>工件端</strong>，与摆头式相反。这是两种构型在配置层面的唯一区别。</li>
+<li><strong><code>A</code> 的 <code>offset</code> 是 <code>(0,0,−L)</code></strong>——从台面中心退到 A 轴中心，且必须在 A 旋转<strong>之前</strong>（我们的 FK 正是先 <code>Translate(offset)</code> 再旋转）。</li>
+<li><strong><code>sign</code> 全部由推导确定</strong>：工件端的两个旋转取 −1，机床端的直线轴取 +1。</li>
+</ol>
+<hr />
+<h2 id="10">10. 与摆头式的对照</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>AC 摆头（主方案附录 A）</th>
+<th><strong>AC 双转台（本文）</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>谁在动</td>
+<td>刀具</td>
+<td>工件</td>
+</tr>
+<tr>
+<td>链顺序</td>
+<td>X→Y→Z→C→A</td>
+<td><strong>C→A→X→Y→Z</strong></td>
+</tr>
+<tr>
+<td>刀轴 <code>n_W</code></td>
+<td><code>(sinA·sinC, −sinA·cosC, cosA)</code></td>
+<td><code>(sinA·sinC, sinA·cosC, cosA)</code></td>
+</tr>
+<tr>
+<td>奇异点后果</td>
+<td>刀轴突跳（危险）</td>
+<td>工件绕刀轴自转（温和）</td>
+</tr>
+<tr>
+<td>固有短板</td>
+<td>摆头刚度</td>
+<td><strong>摆动吃行程与速度</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>注意两个 <code>n_W</code> 的 Y 分量符号相反</strong>——这正是"抄公式最容易抄错"的地方，必须靠各自的锚点测试锁定。</p>
+<hr />
+<h2 id="11">11. 本次修正的两个错误（留档）</h2>
+<p>手算锚点与程序结果对不上，查出两处：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>错误</th>
+<th>正确</th>
+<th>后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>RTCP 里用 <code>(z − L)</code></td>
+<td><strong><code>(z + L)</code></strong></td>
+<td>摆长方向反了，Z 轴整体偏移 2L = 360 mm</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>n_W</code> 的 Y 分量写成 <code>−sinA·cosC</code></td>
+<td><strong><code>+sinA·cosC</code></strong></td>
+<td>刀轴绕 Z 镜像，C 转 90° 时方向完全错</td>
+</tr>
+</tbody>
+</table></div>
+<p>第 1 个尤其隐蔽：它只让 Z 整体偏 360 mm，而<strong>画面看起来完全正常</strong>——正是反复强调的那类 bug。<strong>如果没有数值验证，这两个错误都会直接进代码。</strong></p>
+<p>教训：<strong>手推公式之后必须用独立实现（齐次矩阵连乘）跑一遍锚点</strong>，两者一致才算数。</p>
+<hr />
+<h2 id="12">12. 加工包络（轴行程 ≠ 加工范围）</h2>
+<p>这是用户最常问、也最容易答错的问题。<strong>直接把 X/Y/Z 行程报出去是错的</strong>——摇篮式机床摆动时，直线轴要额外走补偿行程（§6.1），所以<strong>可用包络随摆角急剧变化</strong>。</p>
+<h3 id="121">12.1 轴行程（原始参数）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>轴</th>
+<th>行程</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>X</td>
+<td>−400 … +400 mm</td>
+</tr>
+<tr>
+<td>Y</td>
+<td>−300 … +300 mm</td>
+</tr>
+<tr>
+<td>Z</td>
+<td>−120 … +520 mm（<strong>Z=0 是 A 轴中心高度</strong>，台面在 Z=+180）</td>
+</tr>
+<tr>
+<td>A</td>
+<td>−110 … +110°</td>
+</tr>
+<tr>
+<td>C</td>
+<td>连续</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="122">12.2 实际可用高度（算出来的）</h3>
+<p>设工件为 Φ400（占满转台）的圆柱，求"给定摆角下能加工的最大工件高度"——即工件最不利点（半径 200 处的顶点）仍能被刀尖到达。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>摆角 A</th>
+<th>最大工件高度</th>
+<th>约束来自</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0°</td>
+<td><strong>340 mm</strong></td>
+<td>Z 上限</td>
+</tr>
+<tr>
+<td>15°</td>
+<td>399 mm</td>
+<td>Y</td>
+</tr>
+<tr>
+<td><strong>30°</strong></td>
+<td><strong>420 mm</strong>（峰值）</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>45°</td>
+<td>397 mm</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>60°</td>
+<td>281 mm</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>75°</td>
+<td>184 mm</td>
+<td>Y</td>
+</tr>
+<tr>
+<td><strong>90°</strong></td>
+<td><strong>120 mm</strong>（最紧）</td>
+<td><strong>Y</strong></td>
+</tr>
+<tr>
+<td>105°</td>
+<td>140 mm</td>
+<td>Y</td>
+</tr>
+<tr>
+<td>110°</td>
+<td>139 mm</td>
+<td>Y</td>
+</tr>
+</tbody>
+</table></div>
+<blockquote>
+<p>上表由 <a href="../tools/envelope.py"><code>tools/envelope.py</code></a> 计算，已与独立的手算结果对照。</p>
+</blockquote>
+<p><strong>两个反直觉的结论</strong>：</p>
+<ol>
+<li><strong>A=30° 时可用高度最大（420 mm），比 A=0 的 340 还高。</strong> 因为工件倾斜后，顶点向侧上方移动，反而落进了 Z 行程的富余区。</li>
+<li><strong>A=90° 时只剩 120 mm。</strong> 台面竖直后，工件沿自身轴线伸出 180 mm（= L）就已经吃掉全部 Y 行程——<strong>Y 行程成了瓶颈，不是 Z</strong>。</li>
+</ol>
+<h3 id="123">12.3 三条必须说清的限制</h3>
+<p><strong>(a) 这是"点可达"，不是"能加工"</strong></p>
+<p>上表只保证刀尖能到那个点。<strong>没算碰撞</strong>：摆到 90° 时刀柄会撞转台、撞工件侧壁。真实可用包络比表里更小。</p>
+<p><strong>(b) 没有安全余量</strong></p>
+<p>表里的数字是<strong>贴着行程极限</strong>算的。实际排工艺至少要留 10–20% 余量，否则一个编程误差就撞限位。</p>
+<p><strong>(c) 工件必须居中</strong></p>
+<p>上表假设工件轴线与 C 轴重合。如果偏置装夹（偏移 d），可用高度会明显下降——因为 <code>v</code> 的可用范围被偏置占用了一半。</p>
+<h3 id="124">12.4 与摆头式对比</h3>
+<p>同规模下摆头式的包络更"方"：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>AC 双转台（本机）</th>
+<th>LinuxCNC XYZBC 摆头（<code>refs/linuxcnc/</code>）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>行程</td>
+<td>X±400 Y±300 Z−120…520</td>
+<td>X±500 Y±500 Z−500…100</td>
+</tr>
+<tr>
+<td>摆角</td>
+<td>A±110°</td>
+<td>B±120°</td>
+</tr>
+<tr>
+<td><strong>摆动是否吃行程</strong></td>
+<td><strong>是（Y/Z 被吃掉）</strong></td>
+<td>否（刀具转，工件不动）</td>
+</tr>
+<tr>
+<td>包络形状</td>
+<td>随摆角剧烈变化</td>
+<td>基本是长方体</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>这就是摇篮机与摆头机的本质区别</strong>：摇篮机的"加工范围"不是一个盒子，而是<strong>一组随姿态变化的盒子</strong>。报价/排工艺时必须按实际摆角查表，不能用标称行程。</p>
+<h3 id="125">12.5 怎么在软件里呈现</h3>
+<p>仿真器应该把这个包络<strong>画出来</strong>：</p>
+<ul>
+<li>3D 视图里叠一层半透明的"可达包络"网格</li>
+<li>拖动 A 轴时包络实时变化</li>
+<li>工件超出包络时高亮报警（<code>KIN-00x</code> 轴限位）</li>
+</ul>
+<p>这比让用户去查表直观得多，也避免了"标称行程够、实际摆不到位"这类撞机。</p>
+<h3 id="126-toolsenvelopepy">12.6 计算工具：<code>tools/envelope.py</code></h3>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>python<span style="color: #ABB2BF"> </span>tools/envelope.py<span style="color: #ABB2BF">                                    </span><span style="color: #7F848E"># 默认读 ac_trunnion 配置</span>
+python<span style="color: #ABB2BF"> </span>tools/envelope.py<span style="color: #ABB2BF"> </span>--radius<span style="color: #ABB2BF"> </span><span style="color: #D19A66">150</span><span style="color: #ABB2BF"> </span>--angles<span style="color: #ABB2BF"> </span><span style="color: #D19A66">0</span>,45,90<span style="color: #ABB2BF">      </span><span style="color: #7F848E"># 换工件半径与角度</span>
+python<span style="color: #ABB2BF"> </span>tools/envelope.py<span style="color: #ABB2BF"> </span>--csv<span style="color: #ABB2BF"> </span>envelope.csv<span style="color: #ABB2BF">                 </span><span style="color: #7F848E"># 导出供画图</span>
+</code></pre></div>
+
+<p><strong>原理：只用正解，不需要逆解。</strong></p>
+<p>对固定的旋转角 <code>(A, C)</code>，直线轴 <code>X/Y/Z</code> 在限位内的可达集合，在工件坐标系里是<strong>一个仿射映射后的长方体</strong>（8 个角点即可确定）。于是每个 <code>(A, C)</code> 对应一个平行六面体，<strong>包络 = 它们的并集</strong>。</p>
+<p>判据：工件（半径 R、高 h 的圆柱）可加工 ⟺ 其表面每个点都落在某个平行六面体内。</p>
+<p><strong>离散化的方向是安全的</strong>：<code>C</code> 采样 72 档时结果已收敛（<code>C=36</code> 会把 A=30° 从 420 低估到 410）。<strong>低估 = 不会过度承诺</strong>，这比高估安全。</p>
+<h3 id="127-tip_w">12.7 一个容易搞错的约定：<code>tip_w</code> 是链乘积的平移部分</h3>
+<p>写这个工具时踩了一个坑，值得记下来。</p>
+<p>直觉上"刀尖在工件系的位置"应该是 <code>T⁻¹ · 0 = −Rᵀt</code>。<strong>但那是错的。</strong></p>
+<p>因为 RON 里旋转轴的 <code>sign = −1</code>，链乘积实际是<strong>「刀具 → 工件」</strong>的变换（不是「工件 → 刀具」）。所以：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>tip_w = T 的平移部分 t          ← 正确
+tip_w = −Rᵀ·t                   ← 错，会在 A=90° 时把 Y 的符号搞反
+</code></pre></div>
+
+<p>这与 <code>tools/verify_trunnion.py</code> 的 <code>tip = t[:3,3]</code> 一致，且已被 §4 的三个锚点确认。</p>
+<p><strong>教训</strong>：<code>MachineTopology.chain</code> 的文档写"工件 → 刀具"是描述<strong>物理装配顺序</strong>，而矩阵乘积的方向相反（由 <code>sign = −1</code> 实现）。这个不一致必须在 <code>kin</code> 的实现注释里写清，否则很容易在写第二个消费者（包络、碰撞、渲染）时搞反。</p>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

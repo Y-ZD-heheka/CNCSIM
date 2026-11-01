@@ -1,0 +1,12 @@
+[package]
+name = "cncsim-gcode"
+description = "G 代码解释器：词法 / 模态机 / 方言"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-motion.workspace = true
+cncsim-tool.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "cncsim-ui"
+description = "bevy_egui 面板"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-hmi.workspace = true
+
+[dev-dependencies]
+cncsim-sim.workspace = true

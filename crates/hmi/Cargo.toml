@@ -1,0 +1,11 @@
+[package]
+name = "cncsim-hmi"
+description = "人机控制：状态机 / 急停 / 倍率 / 报警"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-sim.workspace = true

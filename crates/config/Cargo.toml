@@ -1,0 +1,13 @@
+[package]
+name = "cncsim-config"
+description = "机床配置：RON 文件 → MachineTopology"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-kin.workspace = true
+serde.workspace = true
+ron.workspace = true
