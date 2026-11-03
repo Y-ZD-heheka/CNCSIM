@@ -2,7 +2,7 @@
 
 > 给 AI agent / 新接手者的入口。**先读这一页，再读 `docs/项目记忆.md`。**
 >
-> 最后更新：2026-11-01 · 13 crate / **431 测试全绿** / 3 个外部依赖全最新
+> 最后更新：2026-11-02 · 13 crate / **469 测试全绿** / 3 个外部依赖全最新
 > （`cargo clippy` 有 8 条历史遗留告警，见 §2 注）
 
 ---
@@ -39,6 +39,8 @@ cargo run --release --features window -- --window      # 开 Bevy 窗口（首�
 cargo run -- --machine assets/machines/ac_trunnion.machine.ron   # 换机床，不重编译
 cargo run -- --design part.stl                         # 设计模型从 STL 加载，算过切/残留
 cargo run -- --demo pocket                             # 换回旧演示（面铣 + G41 方槽 + G83 孔）
+cargo run --release -- --demo dome --export out/dome.html  # 50×50×100 铣 R15 半球凸台：T1 粗 + T2 锥度球头精（换刀端到端）
+python tools/check_mesh.py out/dome.html --ref-sphere 25,25,84,15   # 网格体检：几何/拓扑/法线/颜色（连通分量按**位置**判，不受拆顶点副本干扰）
 ```
 
 **截图检查**（无显示器时唯一能看画面的手段）：
@@ -112,11 +114,11 @@ testdata/         golden CSV + design_box.stl
 
 | crate | 测试 | crate | 测试 |
 |---|---|---|---|
-| `gcode` | 117 | `sim` | 55 |
-| `voxel` | 117 | `collide` | 34 |
+| `voxel` | 149 | `gcode` | 117 |
+| `sim` | 71 | `collide` | 34 |
 | `kin` | 28 | `render` | 16 |
-| `math` / `motion` / `config` | 9 / 9 / 9 | `ui` | 6 |
-| `tool` | 4 | `hmi` | 3 |
+| `tool` | 10 | `math` / `motion` / `config` | 9 / 9 / 9 |
+| `ui` | 6 | `hmi` | 3 |
 
 ---
 
@@ -158,8 +160,9 @@ testdata/         golden CSV + design_box.stl
 | 碰撞 | ✅ 保守推进 + GJK + EPA + episode 聚类 + 毛坯双向接线 |
 | 仿真编排 | ✅ 端到端主循环 + 设计比对（过切/残留）+ 后台任务 + 回放 + HMI ingest |
 | 显示层 | ✅ GPU 缓冲 + 分块增量重建（11×）+ 自包含 HTML 预览 + Bevy 窗口外壳（顶点色材质 / 刀具旋转体 + 刀刃刀柄分色 / `--screenshot`） |
-| 切割面着色 | ✅ 溯源粒度**可配**（每叶 / 2³ / 4³ / 每体素，默认 4³ = 64 B/叶，最坏溢出 0.1 mm）+ 有序渐变调色板；**刀刃颜色与切面颜色同源**（同一个 `creator_of_cut`、同一张 `PALETTE`）；粒度 = **一刀**（只数 `G1/G2/G3`），`--export` 打切面颜色分布表 |
+| 切割面着色 | ✅ 色号 = **刀具号 × 10 段 + 进度段**（粗加工 1..10、精加工 11..20，20 色定性板：粗暗饱 / 精亮饱，段间色相 36°），硬边色块；溯源粒度默认 **每叶 1 B**（0.5 MB，可调 2³/4³/每体素）；**刀刃与切面同源**（同一个 `creator_of_tool_segment`、同一张 `PALETTE`）；`--export` 打切面颜色分布表 |
 | 面板 | ✅ 数据层（横幅/色调/报警行，纯函数可测） |
+| 刀具 / 换刀 | ✅ 锥度球头刀（母线相切于球头，不是折角）/ `ToolTable` 按**刀号**查（不是下标）/ **一份程序内换刀**：切、碰撞、着色、回放、活毛坯逐段按刀号取母线；`DesignModel::Boss`（盒∪球，半球凸台） |
 
 ### 性能锚点（24 线程 release，i7-13700K = 8P+8E）
 
@@ -185,6 +188,8 @@ testdata/         golden CSV + design_box.stl
 3. **`TileCache` 增量上传进窗口**（`render` 侧 11× 已实测，差 Bevy 那一步）。
 4. **`SimJob` 进度条**（事件层已备，面板接一下）。
 5. 自适应 LOD / `k=2` 按 level-1 分块 / 块索引第一遍并行 / `G95` 时间口径。
+6. **小刀切削成本**：R0.5 锥度球头逐刀 3.4 ms（φ6 只要 0.24 ms）——小刀的 AABB
+   小但 sd_profile 的固定成本占比高，值得给"球头/锥度"加一条解析快路径。
 
 **不要做的**：通用网格碰撞、BVH、STEP（B-rep）解析、`cncsim-core`、共享 `Diagnostic` 枚举。
 
@@ -201,6 +206,8 @@ testdata/         golden CSV + design_box.stl
 | G 代码语义 | `docs/G代码解释器设计.md`、`refs/linuxcnc/overview.adoc`（**权威清单在这里，别凭记忆**） |
 | 运动学 / 机床参数 | `docs/机床建模-AC双转台.md`、`docs/ADR-007-机床模型表示.md` |
 | 着色 / 溯源 | `docs/ADR-005-切割面着色与溯源.md` |
+| 刀具形状 / 换刀 / 半球场景 | `docs/项目记忆.md` §21（母线切点、螺旋解析式、锥颈干涉） |
+| 渲染缺陷体检 / 颜色麻点 | `docs/项目记忆.md` §22（四类检查、四个根因、法线细步长为什么失败） |
 | 显示层 / 窗口 | `docs/ADR-011-显示层与预览导出.md` |
 | HMI / 报错 | `docs/HMI与控制语义.md` |
 | 精度问题 | `docs/计算精度分析.md` |

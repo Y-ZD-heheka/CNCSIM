@@ -238,7 +238,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <div class="layout">
 <aside>
   <div class="brand">Technical Design</div>
-  <div class="brand-title">ADR-005<br>切割面着色与溯源</div>
+  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
   <div class="toc">
 <ul>
 <li><a href="#0">0. 结论</a></li>
@@ -266,12 +266,16 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#7">7. 边界与降级</a></li>
 <li><a href="#8">8. 工作量</a></li>
 <li><a href="#9">9. 测试</a></li>
+<li><a href="#_1">修订记录</a><ul>
+<li><a href="#2026-11-02-10">2026-11-02：色号从「每刀」改成「每工序内进度 10 档」</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
 </aside>
 <main>
-<h1 id="adr-005">ADR-005 切割面着色与溯源</h1><div class="meta"><span class="chip hi">调色板索引</span><span class="chip hi">每 brick 候选表</span><span class="chip">6 人日</span><span class="chip">2026-10-28</span></div>
+<h1 id="adr-005">ADR-005 切割面着色与溯源</h1>
 <blockquote>
 <p>状态：<strong>设计</strong>
 日期：2026-10-28
@@ -613,6 +617,22 @@ G 代码：N1240 - N1380
 </code></pre></div>
 
 <p><strong>要能证伪</strong>：不能只断言"颜色不是默认值"，要断言<strong>具体的 sweep id</strong>。<code>second_tool_overwrites_first</code> 是最关键的一条——它锁住"取最晚"这个语义，写反了（取最早）颜色看起来也对，但语义是错的。</p>
+<hr />
+<h2 id="_1">修订记录</h2>
+<h3 id="2026-11-02-10">2026-11-02：色号从「每刀」改成「每工序内进度 10 档」</h3>
+<p>原文的"索引 = 第几刀（12 色往返，周期 22）"在刀数上千的场景失效：
+半球凸台精加工 3008 条 <code>G1</code>，每 1.2 mm 换一次色，12 色装不下，
+面上是一片无规律彩虹，刀刃每秒闪好几次。</p>
+<p>改成 <code>creator_of_progress(done, total)</code>：</p>
+<ul>
+<li>粗加工、精加工<strong>各自</strong> 0→100%，每 10% 换一档，索引 1..=10。</li>
+<li>整段加工只换 <strong>9 次</strong>色；换刀处从第 10 档跳回第 1 档，工序分界反而更醒目。</li>
+<li>相邻两刀多半同色——<strong>这是设计，不是退化</strong>：颜色表达"阶段"，不表达"刀号"。</li>
+<li>只数切削块（<code>G1/G2/G3</code>），快移/停延/换刀不让进度虚涨。</li>
+<li>刀刃颜色仍与切面同一个函数，构造保证一致。</li>
+</ul>
+<p>代价：不能再靠颜色反查"第几刀"。如果将来需要，可以加"点选面 → 反查 creator"
+（原 ADR §交互 已列），颜色只做粗粒度阶段提示。</p>
 </main>
 </div>
 <script>

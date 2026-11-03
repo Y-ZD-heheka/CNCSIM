@@ -37,13 +37,12 @@ pub struct ShellScene {
     /// 没有这个开关时，`--window` 只能"跑起来不崩"，看不出画面对不对——
     /// 而"画面对不对"恰恰是渲染层唯一要验证的东西。
     pub screenshot: Option<std::path::PathBuf>,
-    /// 刀具**切削部分的母线**（`ToolDef::cutter`）。画成旋转体。
-    pub cutter: cncsim_tool::Profile,
-    /// 刀杆 + 刀柄的母线（`ToolDef::shank`），从刃长顶部往上。
+    /// **刀库**。每把刀画成"刀刃 + 刀杆"两段旋转体，回放按当前块的刀号
+    /// 只显示一把——粗加工和精加工换刀时画面上真的换刀。
     ///
-    /// 分开画是为了**区分刀刃与刀柄**：两者材质不同色，而且碰撞检测只测
+    /// 刀刃与刀杆分开画是为了**区分两者**：材质不同色，而且碰撞检测只测
     /// 刃长以上那一段——画出来才对得上"报告说撞了"的位置。
-    pub shank: cncsim_tool::Profile,
+    pub tools: Vec<cncsim_tool::ToolDef>,
 }
 
 /// MiSans（小米，个人/商用免费）：egui 自带字体**没有 CJK 字形**，不装它
@@ -104,9 +103,14 @@ pub struct LiveCut {
     config: cncsim_voxel::GridConfig,
     origin: cncsim_math::DVec3,
     size: [i32; 3],
-    cutter: cncsim_tool::Profile,
-    /// 每一刀：`(起始时刻, 起点位姿, 终点位姿)`，按起始时刻升序
-    cuts: Vec<(f64, cncsim_motion::Pose, cncsim_motion::Pose)>,
+    /// 刀库：刀号 → 切削部分母线。**按刀号查而不是按顺序取**——程序里
+    /// `T1` 打完 `T2` 再回 `T1` 是合法的，按下标就会切错刀。
+    cutters: Vec<(u16, cncsim_tool::Profile)>,
+    /// 每一刀：`(起始时刻, 起点位姿, 终点位姿, 刀号)`，按起始时刻升序
+    cuts: Vec<(f64, cncsim_motion::Pose, cncsim_motion::Pose, u16)>,
+    /// 每一刀的 `(刀号, 工序内序号, 工序内总数)` —— 进度着色用。
+    /// **在 `new` 里一次算好**：回放时每帧都要取，现算会和仿真侧算出不同的段。
+    phase: Vec<(u16, u32, u32)>,
     /// 已经应用了几刀
     pub applied: usize,
     /// 分块网格缓存
@@ -123,27 +127,76 @@ impl LiveCut {
     /// 只能靠**消灭第二个来源**来防，不能靠记性。
     pub fn new(
         cfg: &cncsim_sim::run::RunConfig,
-        cutter: cncsim_tool::Profile,
-        mut cuts: Vec<(f64, cncsim_motion::Pose, cncsim_motion::Pose)>,
+        cutters: Vec<(u16, cncsim_tool::Profile)>,
+        mut cuts: Vec<(f64, cncsim_motion::Pose, cncsim_motion::Pose, u16)>,
         tile_mm: f64,
         k: u32,
     ) -> Self {
         let (config, origin, size, creator_sub) =
             (cfg.grid, cfg.stock_origin, cfg.stock_size, cfg.creator_sub);
+        debug_assert!(!cutters.is_empty(), "刀库不能为空");
         cuts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // 每个刀号（工序）各有多少刀：粗加工、精加工各自 0→100%
+        let mut total_by_tool: std::collections::BTreeMap<u16, u32> = Default::default();
+        for (_, _, _, tool) in &cuts {
+            *total_by_tool.entry(*tool).or_insert(0) += 1;
+        }
+        let mut done_by_tool: std::collections::BTreeMap<u16, u32> = Default::default();
+        let phase: Vec<(u16, u32, u32)> = cuts
+            .iter()
+            .map(|(_, _, _, tool)| {
+                let d = done_by_tool.entry(*tool).or_insert(0);
+                let r = (*tool, *d, total_by_tool[tool]);
+                *d += 1;
+                r
+            })
+            .collect();
         let mut grid = cncsim_voxel::SparseGrid::<i8>::new(config, origin);
         grid.set_creator_sub(creator_sub);
         grid.fill_box_exact([0, 0, 0], size, config.band_mm());
-        Self { grid, config, origin, size, cutter, cuts, applied: 0, cache: crate::TileCache::new(tile_mm, k) }
+        if std::env::var_os("CNCSIM_DBG").is_some() {
+            eprintln!("[live] cuts={} phase[0..3]={:?} phase[end-3..]={:?}",
+                cuts.len(), &phase[..3.min(phase.len())],
+                &phase[phase.len().saturating_sub(3)..]);
+            let mut by_tool: std::collections::BTreeMap<u16, usize> = Default::default();
+            for (_, _, _, t) in &cuts { *by_tool.entry(*t).or_insert(0) += 1; }
+            eprintln!("[live] 每把刀的切段数 {by_tool:?}");
+        }
+        Self {
+            grid,
+            config,
+            origin,
+            size,
+            cutters,
+            cuts,
+            phase,
+            applied: 0,
+            cache: crate::TileCache::new(tile_mm, k),
+        }
+    }
+
+    /// 刀号 → 母线下标；查不到退回 0（`run` 对缺刀号也是这个口径）。
+    fn cutter_index(&self, tool: u16) -> usize {
+        self.cutters.iter().position(|(n, _)| *n == tool).unwrap_or(0)
     }
 
     /// 时刻 `t` 应该已经切完几刀。
     pub fn target_at(&self, t: f64) -> usize {
-        self.cuts.partition_point(|(t0, _, _)| *t0 <= t)
+        self.cuts.partition_point(|(t0, ..)| *t0 <= t)
     }
 
     pub fn cut_count(&self) -> usize {
         self.cuts.len()
+    }
+
+    /// 调试用：读某个体素的 creator（对比仿真与回放的染色是否一致）。
+    pub fn creator_at(&self, p: [i32; 3]) -> u8 {
+        self.grid.creator_of_voxel(p)
+    }
+
+    /// 第 `cut` 刀的 `(刀号, 工序内序号, 工序内总数)`。着色和回放共用这一份。
+    pub fn progress_at(&self, cut: u32) -> (u16, u32, u32) {
+        self.phase.get(cut as usize).copied().unwrap_or((0, 0, 1))
     }
 
     /// 把状态推进到第 `target` 刀，返回脏区域。
@@ -164,10 +217,12 @@ impl LiveCut {
         }
         let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
         for i in from..target {
-            let (_, a, b) = &self.cuts[i];
+            let (_, a, b, tool) = &self.cuts[i];
             // 与仿真同一条索引规则：第 i 刀盖第 i 个颜色
-            self.grid.set_creator(cncsim_voxel::creator_of_cut(i as u32));
-            self.grid.cut_segment(a, b, &self.cutter);
+            let (tool_no, done, total) = self.phase[i];
+            self.grid.set_creator(cncsim_voxel::creator_of_tool_segment(tool_no, done, total));
+            let ci = self.cutter_index(*tool);
+            self.grid.cut_segment(a, b, &self.cutters[ci].1);
             for p in [a.tip, b.tip] {
                 for k in 0..3 {
                     lo[k] = lo[k].min(p.component(k));
@@ -179,8 +234,16 @@ impl LiveCut {
         if backward {
             Dirty::Full
         } else {
-            // 外扩：刀半径 + 窄带 + 1 mm 余量（圆弧离散的弦高落在里面）
-            let pad = self.cutter.max_radius() + self.config.band_mm() + 1.0;
+            // 外扩：**最粗那把刀**的半径 + 窄带 + 1 mm 余量（圆弧离散的弦高
+            // 落在里面）。取最大值而不是当前刀的：脏区变大只是多重建几块，
+            // 取小了会漏重建——那是一条看得见的残影。
+            let pad = self
+                .cutters
+                .iter()
+                .map(|(_, p)| p.max_radius())
+                .fold(0.0f64, f64::max)
+                + self.config.band_mm()
+                + 1.0;
             Dirty::Region(
                 cncsim_math::DVec3::new(lo[0] - pad, lo[1] - pad, lo[2] - pad),
                 cncsim_math::DVec3::new(hi[0] + pad, hi[1] + pad, hi[2] + pad),
@@ -208,12 +271,13 @@ impl LiveCut {
 /// 各自在局部原点建模（母线本来就是从刀尖往上量的）。这样每帧只改一个
 /// `Transform`，加第三段（夹头）也不用再动回放代码。
 #[derive(Component)]
-struct ToolRig;
+struct ToolRig(u16);
 
-/// 刀具材质句柄。刀刃的颜色**每帧跟着当前块变**，要能就地改 uniform。
+/// 刀具材质句柄（每把刀一份）。刀刃的颜色**每帧跟着当前块变**，
+/// 要能就地改 uniform。
 #[derive(Resource)]
 struct ToolMats {
-    flute: Handle<CutMaterial>,
+    flutes: Vec<(u16, Handle<CutMaterial>)>,
 }
 
 
@@ -591,38 +655,53 @@ fn setup(
     // 刀柄的母线本来就是从刃长顶部（z = flute_length）开始量的，所以两段
     // 网格共用同一个局部原点，叠在一起正好接上。
     let show_tool = !hide_tool();
-    let flute_mat = cut_mats.add(CutMaterial {
-        use_vertex: 0,
-        index: cncsim_voxel::creator_of_cut(0) as u32,
-        ..CutMaterial::default()
-    });
+    // **每把刀一份刀刃材质**：颜色是逐帧改 material 的，共用一份就没法
+    // 只给"现在这把"上色（换刀瞬间会两把同时变）。
+    let flutes: Vec<(u16, Handle<CutMaterial>)> = scene
+        .0
+        .tools
+        .iter()
+        .map(|t| {
+            let m = cut_mats.add(CutMaterial {
+                // 0 = 用材质 `index` 直接查表（刀刃和刀柄都走这条）；
+                // 1 = 用顶点色 R 通道的色号（毛坯网格）。
+                use_vertex: 0,
+                index: 1, // 第 1 把刀的第 1 段
+                ..CutMaterial::default()
+            });
+            (t.number, m)
+        })
+        .collect();
     let shank_mat = cut_mats.add(CutMaterial { use_vertex: 0, index: SHANK_INDEX, ..default() });
-    commands.insert_resource(ToolMats { flute: flute_mat.clone() });
+    commands.insert_resource(ToolMats { flutes: flutes.clone() });
 
     if show_tool {
-        let rig = commands
-            .spawn((
+        for (i, t) in scene.0.tools.iter().enumerate() {
+            // 每个刀号一个骨架；`advance_playback` 按当前块只让一个可见。
+            let rig = commands
+                .spawn((
+                    Transform::IDENTITY,
+                    if i == 0 { Visibility::Visible } else { Visibility::Hidden },
+                    ChildOf(root),
+                    ToolRig(t.number),
+                    Name::new(format!("tool T{}", t.number)),
+                ))
+                .id();
+            commands.spawn((
+                Mesh3d(meshes.add(profile_mesh(&t.cutter, 48))),
+                MeshMaterial3d(flutes[i].1.clone()),
                 Transform::IDENTITY,
-                Visibility::default(),
-                ChildOf(root),
-                ToolRig,
-                Name::new("tool"),
-            ))
-            .id();
-        commands.spawn((
-            Mesh3d(meshes.add(profile_mesh(&scene.0.cutter, 48))),
-            MeshMaterial3d(flute_mat),
-            Transform::IDENTITY,
-            ChildOf(rig),
-            Name::new("flute"),
-        ));
-        commands.spawn((
-            Mesh3d(meshes.add(profile_mesh(&scene.0.shank, 48))),
-            MeshMaterial3d(shank_mat),
-            Transform::IDENTITY,
-            ChildOf(rig),
-            Name::new("shank"),
-        ));
+                ChildOf(rig),
+                Name::new("flute"),
+            ));
+            commands.spawn((
+                Mesh3d(meshes.add(profile_mesh(&t.shank, 48))),
+                MeshMaterial3d(shank_mat.clone()),
+                Transform::IDENTITY,
+                ChildOf(rig),
+                Name::new("shank"),
+            ));
+        }
 
         // ── 工具标记：刀尖那个亮点 ──
         //
@@ -668,6 +747,13 @@ fn tile_mesh(src: &cncsim_voxel::MeshData) -> Mesh {
     let m = {
         owned = src.clone();
         owned.split_crease_normals(0.707);
+        // 拆完硬边再按**面法线面积加权**平滑：每个顶点只累加同一侧的面，
+        // 棱角不会被抹圆。提取时的法线是 SDF 粗格差分，带格子尺度的噪声
+        // （R15 球面 k=3 时 1.46°），光照放大成一圈圈波纹。
+        //
+        // 分块重建时每个 tile 各算各的：`extract_surface_lod_in` 的 region
+        // 多取了一圈 halo，边界顶点看到的是相邻 tile 的面，接缝可以忽略。
+        owned.recompute_smooth_normals();
         &owned
     };
     let n = m.positions.len();
@@ -787,7 +873,7 @@ fn advance_playback(
     mats: Res<ToolMats>,
     mut cut_mats: ResMut<Assets<CutMaterial>>,
     mut marker: Query<&mut Transform, (With<ToolMarker>, Without<ToolRig>)>,
-    mut rig: Query<&mut Transform, (With<ToolRig>, Without<ToolMarker>)>,
+    mut rig: Query<(&mut Transform, &mut Visibility, &ToolRig), Without<ToolMarker>>,
 ) {
     let total = scene.0.playback.total_time();
     if ui.playing {
@@ -804,7 +890,14 @@ fn advance_playback(
     if let Ok(mut t) = marker.single_mut() {
         t.translation = tip;
     }
-    if let Ok(mut t) = rig.single_mut() {
+    for (mut t, mut vis, tool) in &mut rig {
+        // 换刀：只显示"这一块用的那一把"。几何上不动，只切可见性——
+        // 重建网格会卡帧，而换刀本来就是一瞬间的事。
+        let active = tool.0 == frame.tool;
+        *vis = if active { Visibility::Visible } else { Visibility::Hidden };
+        if !active {
+            continue;
+        }
         t.translation = tip;
         // 局部 +Z 是"刀尖指向主轴"的方向，正是 `pose.axis` 的语义。
         // `from_rotation_arc` 给的是**最小旋转**；旋转体绕自身轴任意转都不变，
@@ -813,14 +906,20 @@ fn advance_playback(
             t.rotation = Quat::from_rotation_arc(Vec3::Z, axis);
         }
     }
-    // 刀刃颜色 = 当前这一刀的切割色。**与切面用的是同一个函数**
-    // （`cncsim_voxel::creator_of_cut`），所以刀切下去的那一刻，
+    // 刀刃颜色 = 当前进度档的色。**与切面用的是同一个函数**
+    // （`cncsim_voxel::creator_of_progress`），所以刀切下去的那一刻，
     // 刀刃和它刚切出来的面是同一个颜色。
-    let want = cncsim_voxel::creator_of_cut(frame.cut) as u32;
-    if let Some(mut m) = cut_mats.get_mut(&mats.flute)
-        && m.index != want
-    {
-        m.index = want;
+    let (tool_no, done, total) = scene.0.live.progress_at(frame.cut);
+    let want = cncsim_voxel::creator_of_tool_segment(tool_no, done, total) as u32;
+    for (n, h) in &mats.flutes {
+        if *n != frame.tool {
+            continue;
+        }
+        if let Some(mut m) = cut_mats.get_mut(h)
+            && m.index != want
+        {
+            m.index = want;
+        }
     }
 }
 
@@ -1093,7 +1192,7 @@ mod live_tests {
     #[test]
     #[ignore = "性能基准，手动跑"]
     fn live_cut_per_cut_update_cost() {
-        let cutter = cncsim_tool::flat_end_mill(6.0, 20.0);
+        let cutters = vec![(1u16, cncsim_tool::flat_end_mill(6.0, 20.0))];
         // 两条对照：① 面铣（每刀横跨整个毛坯）② 局部短槽（只动一小片）
         let full_width = std::env::var("LOCAL").is_err();
         let mut cuts = Vec::new();
@@ -1110,6 +1209,7 @@ mod live_tests {
                 i as f64,
                 Pose { tip: DVec3::new(a, y, 11.0), axis: DVec3::Z },
                 Pose { tip: DVec3::new(b, y, 11.0), axis: DVec3::Z },
+                1,
             ));
         }
         let tile_mm: f64 = std::env::var("TILE").ok().and_then(|v| v.parse().ok()).unwrap_or(8.0);
@@ -1119,7 +1219,7 @@ mod live_tests {
             creator_sub: 4,
             ..Default::default()
         };
-        let mut live = LiveCut::new(&cfg_run, cutter, cuts, tile_mm, 3);
+        let mut live = LiveCut::new(&cfg_run, cutters, cuts, tile_mm, 3);
 
         let t = std::time::Instant::now();
         let full = {

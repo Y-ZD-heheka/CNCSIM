@@ -43,7 +43,12 @@ pub fn build_html(src: &MeshData, title: &str) -> String {
     // 与窗口一致：导出页也把 90° 棱做成硬边（否则同一个零件在窗口和网页里
     // 棱上的明暗不一样）。只影响显示，见 `MeshData::split_crease_normals`。
     let mut owned = src.clone();
+    // **不要在这里做"孤立碎屑清理"**：`check_mesh.py` 早先报过 6 个 3 顶点分量，
+    // 追下去全是本函数 `split_crease_normals` 复制出来的顶点副本（位置相同、
+    // 索引不同）。按位置重算连通分量是 **1 个**，几何上一直是完好的。
     owned.split_crease_normals(0.707);
+    // 拆完硬边再平滑：每个顶点只累加同一侧的面，棱角不会被抹圆
+    owned.recompute_smooth_normals();
     let mesh = &owned;
     // 顶点压成 f32 小端、索引 u32 小端，各自 base64
     let mut pos = Vec::with_capacity(mesh.positions.len() * 12);
@@ -259,9 +264,10 @@ void main(){
   // 调色板由 Rust 侧 render::PALETTE 生成后插入，与窗口共用同一份数据。
   // 注意：这段 GLSL 在一个 JS 模板字符串里，注释中**不能出现反引号**——
   // 会提前结束模板串，报一句莫名其妙的 "Unexpected identifier 'render'"。
-  vec3 pal[16] = __PALETTE__;
-  float idx = floor(vC.r * 255.0 + 0.5);
-  vec3 base = pal[int(clamp(idx, 0.0, 15.0))];
+  vec3 pal[32] = __PALETTE__;
+  // 直接查表（硬边）：色号 = 刀具号 × 10 段 + 进度段（creator_of_tool_segment）
+  float idx = vC.r * 255.0;
+  vec3 base = pal[int(clamp(idx + 0.5, 0.0, 31.0))];
   float bias = (vC.g * 255.0 - 128.0) / 128.0;   // −1..1
   base *= 1.0 - clamp(abs(bias), 0.0, 1.0) * 0.18;
   vec3 c = base * (0.32 + d) + vec3(0.35, 0.45, 0.60) * rim;

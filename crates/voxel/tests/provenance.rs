@@ -10,7 +10,9 @@
 use cncsim_math::DVec3;
 use cncsim_motion::Pose;
 use cncsim_tool::flat_end_mill;
-use cncsim_voxel::{GridConfig, MeshData, SparseGrid, ValueType, creator_of_cut};
+use cncsim_voxel::{
+    GridConfig, MeshData, SparseGrid, ValueType, creator_of_tool_segment, tool_segment,
+};
 
 const H: f64 = 0.5;
 /// 毛坯边长（mm）。20 mm → 40 体素。
@@ -166,28 +168,47 @@ fn lod_keeps_creators() {
     assert_eq!(hit + zero, m.colors.len(), "LOD 出现了第三种索引");
 }
 
-/// 块号 → 调色板索引：恒在 1..=12，相邻两刀不同色，且是**往返**（两端连续）。
+/// 色号 = **刀具号 × 10 段 + 进度段**，1 起。
+///
+/// 用户要的是"一眼看出这块面是哪把刀、哪个阶段切的"，所以颜色是**离散分档**
+/// 而不是连续渐变：每把刀按 10% 切 10 段，每段一个调色板颜色。
+/// 第 1 把刀占 1..=10，第 2 把占 11..=20，第 3 把封顶到 21..=29
+/// （30 = MIXED，31 = SHANK）。
 #[test]
-fn creator_of_cut_walks_the_ramp_and_back() {
-    for b in 0..2000u32 {
-        let c = creator_of_cut(b);
-        assert!((1..=12).contains(&c), "第 {b} 刀的索引 {c} 超出切割色范围 1..=12");
-        if b > 0 {
-            let prev = creator_of_cut(b - 1);
-            assert_ne!(c, prev, "相邻两刀用了同一个颜色（第 {b} 刀）");
-            // 相邻块的索引只能差 1——差 2 以上说明不是渐变而是一次跳变，
-            // 面上会出现一条硬分界（正是"颜色过于混乱"的来源）
-            assert_eq!(
-                (c as i32 - prev as i32).abs(),
-                1,
-                "第 {b} 刀的索引从 {prev} 跳到 {c}，不是连续渐变"
-            );
-        }
+fn creator_encodes_tool_and_segment() {
+    // 第 1 把刀：1..=10，端点精确
+    for d in 0..4096u32 {
+        let c = creator_of_tool_segment(1, d, 4096);
+        assert!((1..=10).contains(&c), "第 1 把刀的色号应在 1..=10，实际 {c}");
     }
-    // 周期必须是 2N−2 = 22，不是 12
-    assert_eq!(creator_of_cut(22), creator_of_cut(0), "往返周期应为 22");
-    assert_eq!(creator_of_cut(11), 12, "第 11 刀应到渐变最亮端");
-    assert_eq!(creator_of_cut(10), creator_of_cut(12), "往返应以第 11 刀为轴镜像");
+    assert_eq!(creator_of_tool_segment(1, 0, 1000), 1, "0% 是第 1 段");
+    assert_eq!(creator_of_tool_segment(1, 999, 1000), 10, "100% 是第 10 段");
+
+    // 第 2 把刀：11..=20，与第 1 把**完全不重叠**（这是"按刀具换色"的核心）
+    assert_eq!(creator_of_tool_segment(2, 0, 1000), 11);
+    assert_eq!(creator_of_tool_segment(2, 999, 1000), 20);
+
+    // 第 3 把：21..=29 封顶；再多刀也停在 29（30/31 是 MIXED/SHANK）
+    assert_eq!(creator_of_tool_segment(3, 0, 1000), 21);
+    assert_eq!(creator_of_tool_segment(3, 999, 1000), 29);
+    assert_eq!(creator_of_tool_segment(9, 999, 1000), 29, "超出 3 把要封顶");
+    assert!(creator_of_tool_segment(2, 999, 1000) < cncsim_voxel::CREATOR_MIXED);
+
+    // 刀号 0（程序里没写 T 字）按第 1 把算
+    assert_eq!(creator_of_tool_segment(0, 999, 1000), 10);
+
+    // 同一把刀内段号单调不减，且最后一刀是第 10 段
+    let mut prev = 0u8;
+    for d in 0..=1000u32 {
+        let s = tool_segment(d, 1000);
+        assert!(s >= prev, "段号必须单调不减：{prev} → {s}");
+        prev = s;
+    }
+    assert_eq!(prev, 9, "最后一刀是第 10 段（0 起 9）");
+
+    // 退化输入
+    assert_eq!(tool_segment(0, 0), 0);
+    assert_eq!(creator_of_tool_segment(1, 0, 0), 1);
 }
 
 // ───────────────────────── 已知边界：颜色会溢出 ─────────────────────────

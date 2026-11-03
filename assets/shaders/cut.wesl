@@ -31,7 +31,7 @@ struct FsIn {
 // ——因为 group 2 恰好是别的存储缓冲。这个坑上一版一直潜伏着：
 // 那时的 shader 根本没引用材质，多出来的布局条目是合法的。
 struct CutMaterial {
-    palette: array<vec4<f32>, 16>,
+    palette: array<vec4<f32>, 32>,
     use_vertex: u32,
     index: u32,
 };
@@ -49,12 +49,22 @@ fn fragment(in: FsIn, @builtin(front_facing) front: bool) -> @location(0) vec4<f
 
     let d = max(dot(n, L1), 0.0) * 0.78 + max(dot(n, L2), 0.0) * 0.30;
 
-    // 索引：毛坯网格取自顶点色 R（0..255 → 0..15），刀具取自 uniform
-    var idx: u32 = material.index;
+    // 颜色：**直接查表**。
+    //
+    // `use_vertex`：1 = 顶点色（毛坯网格，R 通道是色号），0 = 材质 `index`（刀刃 / 刀柄）。
+    // 色号由 `cncsim_voxel::creator_of_tool_segment` 算：**刀具号 × 10 段 + 进度段**，
+    // 粗加工占 1..=10、精加工占 11..=20，两族色相/饱和度刻意拉开。
+    //
+    // 这里**不插值**：用户要的是"一眼看出这块面是哪把刀、哪个阶段切的"，
+    // 硬边分档比渐变直观。代价是边界沿三角形走（0.4 mm 网格），但色差大，
+    // 看起来是清晰的色块边界，不是渐变色带上的毛刺。
+    var base: vec3<f32>;
     if (material.use_vertex == 1u) {
-        idx = u32(in.color.r * 255.0 + 0.5) % 16u;
+        let idx = u32(clamp(in.color.r * 255.0 + 0.5, 0.0, 31.0));
+        base = material.palette[idx].rgb;
+    } else {
+        base = material.palette[material.index].rgb;
     }
-    var base = material.palette[idx].rgb;
     // G = 余量偏差编码（128 = 零）：偏差越大越压暗，作为"离设计面多远"的辅助提示
     let bias = (in.color.g * 255.0 - 128.0) / 128.0;
     base = base * (1.0 - clamp(abs(bias), 0.0, 1.0) * 0.18);

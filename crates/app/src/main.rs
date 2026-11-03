@@ -33,9 +33,11 @@ const DEFAULT_MACHINE: &str =
 /// | **2 mm** | 806 | **3.9 ms** | 10 ms |
 ///
 /// 取 4 mm 是折中：块再小更新更快，但实体数/绘制调用线性涨。
+#[cfg(feature = "window")]
 const TILE_MM: f64 = 4.0;
 /// 窗口网格的 LOD 因子（h_c = k·h）。
-const LOD_K: u32 = 3;
+#[cfg(feature = "window")]
+const LOD_K: u32 = 4;
 
 fn main() {
     println!("CNCSIM — 五轴联动 CNC 切割仿真");
@@ -536,11 +538,22 @@ fn export_path_from_args() -> Option<std::path::PathBuf> {
 /// 每刀一条带子、一条一个颜色——这是"切完之后逐条看颜色"的样板。
 /// `--demo pocket` 换回旧程序（面铣 + G41 方槽 + 4 个 G83 孔），
 /// 用来跑刀径补偿与固定循环的端到端路径。
-fn demo_program() -> (
-    cncsim_gcode::MotionProgram,
-    cncsim_tool::ToolDef,
-    cncsim_sim::run::RunConfig,
-) {
+struct DemoScene {
+    prog: cncsim_gcode::MotionProgram,
+    /// 刀库。面铣/型腔只有一把；半球凸台是 T1 粗 + T2 精。
+    tools: Vec<cncsim_tool::ToolDef>,
+    cfg: cncsim_sim::run::RunConfig,
+    /// 预览/窗口的 LOD 因子。**大毛坯要更大**：50×50×100 的表面是 30 mm
+    /// 毛坯的 8 倍，k=3 的 HTML 会到 18 MB，k=4 砍到 8 MB。
+    lod_k: u32,
+    title: &'static str,
+}
+
+fn demo_program() -> DemoScene {
+    // `bowl` 是旧名（半球坑那一版），留着当别名不吃亏
+    if matches!(demo_kind().as_str(), "dome" | "bowl") {
+        return dome_scene();
+    }
     let tool = cncsim_sim::demo::tool();
     let src = match demo_kind().as_str() {
         "pocket" => cncsim_sim::demo::pocket_gcode(),
@@ -655,7 +668,59 @@ fn demo_program() -> (
         design,
         ..Default::default()
     };
-    (prog, tool, cfg)
+    DemoScene {
+        prog,
+        tools: vec![tool],
+        cfg,
+        lod_k: 3,
+        title: "CNCSIM 切削预览",
+    }
+}
+
+/// `--demo dome`：50×50×100 毛坯铣出一个 R15 半球**凸台**，
+/// T1 平底刀粗加工 → T2 锥度球头精加工。
+///
+/// 这是**换刀**这条链路的端到端样件：同一份程序、一条时间轴、一把刀切完换另一把。
+/// 几何生成与不变量都在 `cncsim_sim::hemisphere`，这里只装配。
+fn dome_scene() -> DemoScene {
+    let src = cncsim_sim::hemisphere::gcode();
+    let ic = cncsim_gcode::InterpConfig {
+        // D 值按刀号取半径：T1 φ6、T2 R0.5
+        tool_radii: vec![0.0, 3.0, cncsim_sim::hemisphere::FINISH_TIP_R],
+        ..Default::default()
+    };
+    let prog = cncsim_gcode::interpret(&src, &ic);
+    println!(
+        "程序：{} 行 → {} 块（T1 粗加工 + T2 精加工）",
+        src.lines().count(),
+        prog.blocks.len()
+    );
+    let cfg = cncsim_sim::run::RunConfig {
+        stock_size: [
+            (cncsim_sim::hemisphere::STOCK_MM[0] / 0.1) as i32,
+            (cncsim_sim::hemisphere::STOCK_MM[1] / 0.1) as i32,
+            (cncsim_sim::hemisphere::STOCK_MM[2] / 0.1) as i32,
+        ],
+        design: Some(cncsim_sim::hemisphere::design()),
+        // 设计面采样：球面 + 顶面环带，0.4 mm 步距 ≈ 24k 点 × 每段 AABB 预筛
+        design_step: 0.4,
+        ..Default::default()
+    };
+    DemoScene {
+        prog,
+        tools: vec![
+            cncsim_sim::hemisphere::rough_tool(),
+            cncsim_sim::hemisphere::finish_tool(),
+        ],
+        cfg,
+        lod_k: 4,
+        title: "CNCSIM 半球凸台 R15（粗加工 + 锥度球头精加工）",
+    }
+}
+
+/// 刀库 → `ToolTable`（渲染/仿真共用的那份顺序）。
+fn tool_table(tools: &[cncsim_tool::ToolDef]) -> cncsim_tool::ToolTable {
+    cncsim_tool::ToolTable::new(tools.to_vec())
 }
 
 /// 打印切面颜色分布：**每种索引占多大一片、在哪里**。
@@ -675,11 +740,21 @@ fn print_color_bands(mesh: &cncsim_voxel::MeshData) {
         "  {:>3}  {:>7}  {:>7}  {:>9}  {:>9}  {:>16}  {:>16}  {:>5}",
         "idx", "顶点", "三角形", "面积", "其中朝上", "Z 范围", "Y 范围", "混色"
     );
+    // **一刀一色的场景不可能逐行打**：半球精加工是 2900 刀，按 22 一刀的
+    // 调色板周期循环，逐行打会刷屏。超过 16 行就只打首尾各 4 行。
+    const MAX_ROWS: usize = 16;
+    let many = bands.len() > MAX_ROWS;
     let mut cut_area = 0.0f64;
     let mut cut_up = 0.0f64;
     let mut cut_widths: Vec<f64> = Vec::new();
     let mut cut_z: Vec<f64> = Vec::new();
-    for b in &bands {
+    for (bi, b) in bands.iter().enumerate() {
+        if many && bi >= 4 && bi + 4 < bands.len() {
+            if bi == 4 {
+                println!("  …  中间 {} 个色带省略（逐刀渐变，看首尾两截即可）", bands.len() - 8);
+            }
+            continue;
+        }
         println!(
             "  {:>3}  {:>7}  {:>7}  {:>9.1}  {:>9.1}  {:>7.2}..{:<7.2}  {:>7.2}..{:<7.2}  {:>5}",
             b.index,
@@ -726,21 +801,22 @@ fn print_color_bands(mesh: &cncsim_voxel::MeshData) {
 /// 用的是**和自检完全一样的那条链**：interpret → sim::run → extract_surface_lod
 /// → render::preview。所以预览里看到的每一块材料，都是仿真真的切出来的。
 fn export_preview(out: &std::path::Path) {
-    let (prog, tool, cfg) = demo_program();
+    let scene = demo_program();
+    let tools = tool_table(&scene.tools);
     let t0 = std::time::Instant::now();
-    let run = cncsim_sim::run::run(&prog, &tool, &cfg);
+    let run = cncsim_sim::run::run_tools(&scene.prog, &tools, &scene.cfg);
     let sim_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     // LOD k=3（h_c=0.3 mm）：面数压到十万以内，肉眼几乎看不出差别。
     // k=2 是 19 万三角形、6 MB 的 HTML，浏览器打开会明显卡一下；
     // k 的上限是窄带宽度（4 体素），所以 3 还在约束内。
     let t0 = std::time::Instant::now();
-    let mesh = run.grid.extract_surface_lod(3);
+    let mesh = run.grid.extract_surface_lod(scene.lod_k);
     let ex_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     print_color_bands(&mesh);
     let tw = std::time::Instant::now();
-    let stats = match cncsim_render::preview::write_html(out, &mesh, "CNCSIM 切削预览") {
+    let stats = match cncsim_render::preview::write_html(out, &mesh, scene.title) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("写预览失败：{e}");
@@ -764,8 +840,13 @@ fn export_preview(out: &std::path::Path) {
             })
             .unwrap_or_default();
         println!(
-            "  过切 {:.1} mm³，设计面最大侵入 {:.3} mm{}",
-            run.report.gouge_volume_mm3, run.report.gouge_max_depth_mm, region
+            "  过切 {:.1} mm³，设计面最大侵入 {:.3} mm @ ({:.2}, {:.2}, {:.2}){}",
+            run.report.gouge_volume_mm3,
+            run.report.gouge_max_depth_mm,
+            run.report.gouge_at.x,
+            run.report.gouge_at.y,
+            run.report.gouge_at.z,
+            region
         );
     }
     if run.report.residual_volume_mm3 > 0.0 {
@@ -790,13 +871,44 @@ fn export_preview(out: &std::path::Path) {
         );
     }
     println!(
-        "  仿真 {sim_ms:.0} ms（比对 {:.0} ms，切削 {:.0} ms = 每刀 {:.2} ms），提取 {ex_ms:.0} ms（LOD k=3）→ {} 顶点 / {} 三角形",
+        "  仿真 {sim_ms:.0} ms（比对 {:.0} ms，切削 {:.0} ms = 每刀 {:.2} ms），提取 {ex_ms:.0} ms（LOD k={}）→ {} 顶点 / {} 三角形",
         run.stats.compare_ms,
         run.stats.cut_ms,
         run.stats.cut_ms / run.stats.cut_segments.max(1) as f64,
+        scene.lod_k,
         stats.vertices,
         stats.triangles
     );
+    println!(
+        "  溯源数组 {} MB（粒度 sub={}，每叶 {} B）",
+        run.grid.creator_bytes() / (1024 * 1024),
+        scene.cfg.creator_sub,
+        run.grid.creator_bytes() / run.grid.leaf_count().max(1)
+    );
+    if run.stats.tool_changes > 0 {
+        // 每把刀的时段——截图/回放要靠它取时刻（"粗加工结束"就是 T2 第一段的时刻）
+        for n in scene.tools.iter().map(|t| t.number) {
+            let segs: Vec<_> = run.cut_segs.iter().filter(|s| s.tool == n).collect();
+            if let (Some(a), Some(b)) = (segs.first(), segs.last()) {
+                println!(
+                    "    T{n}：{} 段切削，{:.1}–{:.1} s",
+                    segs.len(),
+                    a.t_start,
+                    b.t_start
+                );
+            }
+        }
+        println!(
+            "  换刀 {} 次：{}",
+            run.stats.tool_changes,
+            scene
+                .tools
+                .iter()
+                .map(|t| format!("T{} {:?} φ{:.2}", t.number, t.kind, t.diameter))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+    }
     println!("  已写出 {}", out.display());
     println!("  用浏览器打开即可旋转查看（单文件、无外链）");
 }
@@ -836,19 +948,22 @@ fn machine_path_from_args() -> std::path::PathBuf {
 /// `--window`：算一遍演示场景，把网格/报告/时间轴交给 Bevy 外壳。
 #[cfg(feature = "window")]
 fn run_window_demo() {
-    let (prog, tool, cfg) = demo_program();
+    let scene = demo_program();
+    let tools = tool_table(&scene.tools);
     let t0 = std::time::Instant::now();
-    let out = cncsim_sim::run::run(&prog, &tool, &cfg);
-    let mesh = out.grid.extract_surface_lod(3);
+    let out = cncsim_sim::run::run_tools(&scene.prog, &tools, &scene.cfg);
+    let mesh = out.grid.extract_surface_lod(scene.lod_k);
     print_color_bands(&mesh);
-    let playback = cncsim_sim::playback::Playback::from_program(&prog, &cfg);
+    let playback = cncsim_sim::playback::Playback::from_program(&scene.prog, &scene.cfg);
     // 窗口用**活毛坯**：从空料开始，按回放时间一刀刀切，分块增量重建。
     // 切削列表直接取仿真的 `cut_segs`——圆弧已经按同一份 `arc_sagitta` 离散过，
     // 自己再离散一次就会和刀痕/溯源色对不上。
+    // 活毛坯也带刀库：粗加工用 φ6 扫、精加工用 R0.5 扫。用错母线不是"不好看"，
+    // 是把料切坏——所以 `cut_segs` 里每一段都带着自己的刀号。
     let live = cncsim_render::shell::LiveCut::new(
-        &cfg,
-        tool.cutter.clone(),
-        out.cut_segs.iter().map(|s| (s.t_start, s.from, s.to)).collect(),
+        &scene.cfg,
+        scene.tools.iter().map(|t| (t.number, t.cutter.clone())).collect(),
+        out.cut_segs.iter().map(|s| (s.t_start, s.from, s.to, s.tool)).collect(),
         TILE_MM,
         LOD_K,
     );
@@ -871,10 +986,9 @@ fn run_window_demo() {
         hmi,
         title: "CNCSIM".into(),
         screenshot: screenshot_path(),
-        // 刀具母线：**与仿真、碰撞用的是同一份**（`ToolDef::cutter` / `shank`）。
-        // 渲染单独造一把"看起来像"的刀，就会出现"画面上没撞、报告说撞了"。
-        cutter: tool.cutter.clone(),
-        shank: tool.shank.clone(),
+        // 刀库：**与仿真、碰撞用的是同一份** `ToolDef`。渲染单独造一把
+        // "看起来像"的刀，就会出现"画面上没撞、报告说撞了"。
+        tools: scene.tools.clone(),
     });
 }
 

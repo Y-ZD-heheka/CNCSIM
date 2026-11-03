@@ -476,6 +476,18 @@ impl<S: Scalar> SparseGrid<S> {
                     .or_insert_with(|| self.sdf_cached(self.lod_corner(g, k), &mut rc));
             }
             if let Some((pos, normal)) = vertex_of(&corners, self.lod_corner(p, k), hc) {
+                // **别改成"用细步长重算梯度"。**
+                //
+                // 试过：`gradient_at(pos)` 用 0.8h 的中心差分取 `sdf_cached` 的
+                // 梯度，本意是让法线比粗格的 0.4 mm 差分更准。结果是**顶点数从
+                // 14.5 万涨到 86.8 万、HTML 从 10 MB 涨到 37 MB**：`sdf` 是
+                // 三线性插值的体素场，在格面处梯度不连续，细差分会把每个格面
+                // 的折痕都放大成 >45° 的法线跳变，`split_crease_normals(0.707)`
+                // 于是把它们全当成硬边拆开。
+                //
+                // 也就是说：粗步长差分在这里**恰好起了一个低通滤波的作用**，
+                // 它把体素场的格面噪声抹平了。要更光滑只能提高网格精度
+                // （k 更小）或换解析曲面，不能靠缩小差分步长。
                 out.push(VertexRecord {
                     cell: p,
                     pos: [pos.x as f32, pos.y as f32, pos.z as f32],
@@ -506,8 +518,34 @@ impl<S: Scalar> SparseGrid<S> {
                                 cur,
                             )
                         };
+                        // **取色：从顶点位置出发，先往外、再往里探。**
+                        //
+                        // 早先的兜底是"取不到就往 `-normal` 探一格"，理由是
+                        // "毛坯外棱：外侧是空气、内侧是料"。这一条对**台阶**成立，
+                        // 对**凸面**正好相反：球的刀在外侧，而 `-normal` 是**从没被
+                        // 切过的原始料**——那里 creator 恒 0，越探越 0。
+                        //
+                        // 实测：R15 半球凸台 12935 个球面顶点里 411 个取到 0（灰），
+                        // 全是孤立点，撒在球面上就是一层麻点。
+                        //
+                        // 偏移取 `h` 的**奇数倍**（0.5h / 1.5h / 2.5h）：顶点落在
+                        // 格面上时 `floor` 掉到哪一侧是任意的，取半格能避开那条边界；
+                        // 2.5h = 0.25 mm 仍在窄带（4h = 0.4 mm）内，一定被最近的
+                        // 那一刀盖过章。
                         let a = at(pos, &mut cur);
-                        if a != 0 { a } else { at(pos - normal * self.config.h, &mut cur) }
+                        if a != 0 {
+                            a
+                        } else {
+                            let h = self.config.h;
+                            let mut c = 0;
+                            for o in [0.5f64, -0.5, 1.5, -1.5, 2.5, -2.5] {
+                                c = at(pos + normal * (o * h), &mut cur);
+                                if c != 0 {
+                                    break;
+                                }
+                            }
+                            c
+                        }
                     },
                 });
             }

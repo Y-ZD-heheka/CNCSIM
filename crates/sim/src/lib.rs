@@ -7,6 +7,7 @@
 
 pub mod compare;
 pub mod demo;
+pub mod hemisphere;
 pub mod job;
 pub mod playback;
 pub mod run;

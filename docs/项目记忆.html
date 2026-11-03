@@ -298,6 +298,30 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 <li><a href="#19">19. 已知坑</a></li>
 <li><a href="#20">20. 待办</a></li>
+<li><a href="#21-2026-11-02">21. 刀具与换刀 · 半球凸台（2026-11-02）</a><ul>
+<li><a href="#_14">锥度球头刀的母线：切点必须相切，不能取球心高度</a></li>
+<li><a href="#tooltable-blocktool">换刀：ToolTable + Block::tool，一份程序一条时间轴</a></li>
+<li><a href="#_15">型腔与凸台是一对镜像（公式差一个符号）</a></li>
+<li><a href="#_16">平底刀的层切：只清"球周围那一圈"，外侧交给底层</a></li>
+<li><a href="#_17">球顶那一块灰斑：不是漏算，是几何够不到</a></li>
+<li><a href="#_18">三个真坑</a></li>
+<li><a href="#_19">锥颈干涉：两个场景都有，只是位置不同</a></li>
+<li><a href="#5050100r15-h01">数字（50×50×100，R15 凸台，h=0.1）</a></li>
+</ul>
+</li>
+<li><a href="#22-2026-11-02">22. 渲染缺陷体检与颜色麻点（2026-11-02）</a><ul>
+<li><a href="#buffer-visualization">自研引擎没有 Buffer Visualization，就得自己造</a></li>
+<li><a href="#_20">麻点的四个根因（都不是渲染器的问题，是着色索引）</a></li>
+<li><a href="#_21">试过但失败：细步长梯度重算法线</a></li>
+<li><a href="#5050100-r15">当前体检数字（50×50×100 / R15 凸台）</a></li>
+<li><a href="#lod">追加：法线改成"面法线平均"，LOD 反而可以退回去</a></li>
+<li><a href="#6">一个误报：6 个"碎屑"其实是顶点副本</a></li>
+<li><a href="#_22">剩下的</a></li>
+<li><a href="#_23">追加：色带边界锯齿 —— 硬分档根本上不去</a></li>
+<li><a href="#_24">代价与取舍</a></li>
+<li><a href="#10-2026-11-03">追加：按刀具 × 10 段换色（2026-11-03）</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -1837,6 +1861,16 @@ LOD 顶点就会和 <code>extract_surface</code> 对不上，而画面上只是"
 <p><strong>教训</strong>：颜色数量不是混乱的根源，<strong>相邻颜色之间有没有序</strong>才是。
 写测试时把这条钉住——<code>creator_of_block_walks_the_ramp_and_back</code> 断言
 "相邻块的索引只能差 1"，差 2 以上就是一次跳变。</p>
+<p><strong>2026-11-02 再进一步：从「一刀一色」改成「每工序 10 档」</strong></p>
+<p>有序渐变解决了"色相乱跳"，但没解决"刀数太多"。半球凸台的精加工是 3008 条
+<code>G1</code>、每条 1.2 mm：<strong>每 1.2 mm 换一次色</strong>，12 色装不下 3008 刀，球面上仍是一片
+找不出规律的彩虹，刀刃每秒闪好几次。</p>
+<p>改成按<strong>工序内进度</strong>分 10 档（<code>creator_of_progress(done, total)</code>）：粗加工 0→100%、
+精加工 0→100%，各自从第 1 档走到第 10 档。整段加工只换 9 次色，球面上是 10 条
+宽色带，"这一片是前 30% 还是后 30%"一眼可读。</p>
+<p>代价：同一档内的多刀同色，不能再靠颜色反查"第几刀"。换来的是<strong>阶段感</strong>——
+而且换刀处颜色从第 10 档跳回第 1 档，工序分界反而更醒目。</p>
+<p>测试从"相邻两刀不同色"改成"单调不减 + 整段只换 9 次"。</p>
 <hr />
 <h2 id="11-adr-007">11. 机床模型（ADR-007）</h2>
 <p><strong>机床模型是三个不同的东西，必须分开表示，但只允许一份真相源。</strong></p>
@@ -2255,6 +2289,480 @@ Start-Process -FilePath $vt -ArgumentList $argline -WorkingDirectory $root -Verb
 <li><strong>SIMD</strong>：求值已是无分支的盒公式，自动向量化收益有限（估计 &lt; 1.5×）。</li>
 </ol>
 <p><strong>网格设计要求水密</strong>：视差符号对非水密网格不可靠（距离仍精确，内外可能互换）。CAM/切片器导出的 STL 天然水密；手工网格要先补洞。STEP（B-rep）需要几何内核，不做。</p>
+<hr />
+<h2 id="21-2026-11-02">21. 刀具与换刀 · 半球凸台（2026-11-02）</h2>
+<h3 id="_14">锥度球头刀的母线：切点必须<strong>相切</strong>，不能取球心高度</h3>
+<p>规格表 <code>R0.5*30.5*D6*75 / 单边斜角 4.69°</code> 里，4.69° 是<strong>从刀尖量到刃顶的弦角</strong>
+（<code>atan(2.5/30.5) = 4.687°</code>），不是球头切点处的锥面角。球面与锥面相切的条件是
+切点 <code>(r·cos α, r(1−sin α))</code>；直接取 <code>(r, r)</code> 会在刃口留一圈 α 大小的折角
+（4.69° 的刀在 0.5 mm 球头上是一道肉眼可见的棱），仿真里就是一圈 0.5 mm 宽的假过切。
+两种口径的刃顶半径只差 0.037 mm（Ø5.926 vs Ø6），所以按表里的角度建模是忠实的。</p>
+<h3 id="tooltable-blocktool">换刀：<code>ToolTable</code> + <code>Block::tool</code>，<strong>一份程序一条时间轴</strong></h3>
+<ul>
+<li><code>ToolTable</code> 按<strong>刀号</strong>查，不是按下标——程序里 <code>T1 → T2 → T1</code> 是合法的。</li>
+<li><strong><code>T</code> 字是可选</strong>：<code>Block::tool</code> 初值 0 = "没指定" → 取第一把，<strong>不是缺刀</strong>。
+  早先按 0 查表 → <code>None</code> → 每块报一次 <code>TOOL_MISSING</code>，面铣演示满屏红字。
+  写了刀库里没有的刀号（T7）才是真错：退回第一把 + Error 级报警。</li>
+<li><code>CutSegment.tool</code> 一路带到设计比对：过切判定必须用<strong>这一段真正那把刀</strong>的母线。</li>
+<li>时间轴、溯源刀号、报警都不分段：换刀不重启仿真，<code>cut_ordinal</code> 继续往下数。</li>
+<li>窗口里每个刀号一个骨架实体，回放按当前块切可见性。</li>
+</ul>
+<h3 id="_15">型腔与凸台是一对镜像（公式差一个符号）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>型腔（盒 − 球）</th>
+<th>凸台（盒 ∪ 球）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>设计 SDF</td>
+<td><code>max(box, −sphere)</code></td>
+<td><code>min(box, sphere)</code></td>
+</tr>
+<tr>
+<td>表面采样</td>
+<td>盒面<strong>剔掉球内的</strong> + <strong>下</strong>半球</td>
+<td>盒面<strong>剔掉球内的</strong> + <strong>上</strong>半球</td>
+</tr>
+<tr>
+<td>平底刀粗加工约束</td>
+<td><code>r_c ≤ √((R−a)²−d²) − r_tool</code>（刀在球内）</td>
+<td><code>r_c ≥ r_tool + √((R+a)²−d²)</code>（刀在球外）</td>
+</tr>
+<tr>
+<td>球头刀精加工刀心</td>
+<td>落在 <code>R − r_b</code> 球面上</td>
+<td>落在 <code>R + r_b</code> 球面上</td>
+</tr>
+<tr>
+<td>刀尖</td>
+<td><code>B − (0,0,r_b)</code></td>
+<td>同</td>
+</tr>
+</tbody>
+</table></div>
+<p>凸台的精加工刀尖还有个下界：<code>z = 85 + (R+r_b)cosθ − r_b ≥ 85</code> ⟺ <code>cosθ ≥ r_b/(R+r_b)</code>。
+所以 θ 只能从 88.15° 起步，<strong>赤道根部必然留一圈 R0.5 清角残料</strong>——球头刀在
+「竖直面与水平面的内角」处本来就清不干净。</p>
+<h3 id="_16">平底刀的层切：只清"球周围那一圈"，外侧交给底层</h3>
+<p>刃长 20 &gt; 加工深度 15，所以<strong>底层（z=85）那一刀的刀身覆盖 85..105</strong>，半径 ≥ 内缘
+的部分在整个高度上被它一次清完。上层只需要补 <code>[r_in(z), 底层的刀内缘]</code> 这段环带，
+很多层（88/87/86）的环带直接是空的、可以整层跳过。路径长差 4 倍（15.5 min vs 3.9 min）。</p>
+<p><code>r_in(z) = √((R+a)² − d²)</code>，<code>d = z − 85</code>；最后一层 a 取 0.02 把底面铣平。</p>
+<h3 id="_17">球顶那一块灰斑：不是漏算，是几何够不到</h3>
+<p>球顶若与毛坯顶面<strong>平齐</strong>（球心 z=85、顶 100），球顶周围半径 <code>√(2R·a) ≈ 3.9</code> 的
+那层球冠<strong>任何刀具都够不到</strong>：要切它，刀就必须比它更靠近球顶，而一靠近就切进球。
+实测成品球顶留一块 6 mm 见方的<strong>毛坯面</strong>（色索引 0，灰的），12.8 mm³。</p>
+<p><strong>平底刀能，球头刀不能</strong>——平的刀底与球顶相切不算切球，所以修法是让球心降 1 mm
+（球顶 99 = 毛坯顶 − 1），第一刀<strong>面铣</strong>把顶面切到球顶平面。这一步是必需的，
+不是"顺带光一刀"。</p>
+<h3 id="_18">三个真坑</h3>
+<ol>
+<li><strong>同心圆只走到边 = 四角全留</strong>。方块对角 <code>√2·25 = 35.4</code> 比边长 41%。第一版把
+   最大半径取 26，四个角留下 3169 mm³、<code>残留最厚 15.000 mm</code>（报在 (1.1,1.1,100)）。
+   改 36 之后残留掉到 12.8 mm³。<strong>判据要写成测试</strong>：四个角点必须被某一段刀具覆盖。</li>
+<li><strong>整圆 <code>G2 I-</code> 的 <code>I</code> 是相对起点的</strong>。连着写 <code>G2 I-r</code> 时，第二圈的圆心落在
+   「上一圈终点 − r」上（实测偏到 21 而不是 25）：圆的大小对、位置全错，看起来像
+   "刀路莫名其妙歪了"。每个整圆前必须 <code>G1 X{cx+r} Y{cy}</code> 先把刀移到该圈起点。</li>
+<li><strong><code>Cavity</code>/<code>Boss</code> 的盒面采样容差必须是 0</strong>。给"半个采样步"会把球口内侧的
+   空气点当成设计面，精加工球扫过去就报假过切（实测 1.2 mm³ / 0.25 mm）。</li>
+</ol>
+<h3 id="_19">锥颈干涉：两个场景都有，只是位置不同</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>干涉位置</th>
+<th>最深</th>
+<th>根因</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>型腔（半球坑）</td>
+<td>坑口那一圈顶面</td>
+<td>0.050 mm</td>
+<td>坑口壁竖直 + 锥颈张开 4.69°</td>
+</tr>
+<tr>
+<td>凸台（半球）</td>
+<td>赤道那一圈球面</td>
+<td>0.030 mm</td>
+<td>赤道球面竖直 + 锥颈张开 4.69°</td>
+</tr>
+</tbody>
+</table></div>
+<p>都是<strong>刀具几何的固有限制</strong>，3 轴无论怎么排都会蹭。要么换直柄球头刀，要么摆斜
+（五轴），要么让 CAM 在这圈往外让 0.03（拿残留换过切）。仿真器的选择：如实报 <code>GOUGE</code>。</p>
+<h3 id="5050100r15-h01">数字（50×50×100，R15 凸台，h=0.1）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>程序</td>
+<td>3100 块（T1 4990 段 / T2 3008 段），换刀 1 次，620.6 s</td>
+</tr>
+<tr>
+<td>去料</td>
+<td>32926.9 mm³（面铣 2500 + 球台 30431，99.99%）</td>
+</tr>
+<tr>
+<td>过切</td>
+<td>3.42 mm³ / 0.030 mm（赤道一圈，锥颈）</td>
+</tr>
+<tr>
+<td>残留</td>
+<td>12.81 mm³ / 0.094 mm（球面刀痕，0.01 mm 量级）</td>
+</tr>
+<tr>
+<td>面铣</td>
+<td>4 圈（刀心 3→15），把顶面切到球顶 z=99</td>
+</tr>
+<tr>
+<td>粗加工</td>
+<td>14 层 × 环带，4.3 min；<strong>四角全覆盖</strong></td>
+</tr>
+<tr>
+<td>精加工</td>
+<td>58 圈螺旋（θ 88.15°→0°），行距 0.4，6 min</td>
+</tr>
+<tr>
+<td>切削成本</td>
+<td>7998 段 / 15.8 s（1.97 ms 一刀）</td>
+</tr>
+<tr>
+<td>预览</td>
+<td>LOD k=4 → 29 万三角形 / 10.1 MB 单文件</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="22-2026-11-02">22. 渲染缺陷体检与颜色麻点（2026-11-02）</h2>
+<h3 id="buffer-visualization">自研引擎没有 Buffer Visualization，就得自己造</h3>
+<p>Unity/Unreal 那套调试视图（法线、深度、面朝向、overdraw）能看出"哪里不对"，
+但看不出"错多少"。我们的着色是自写的（<code>CutMaterial</code> 按 creator 索引查调色板），
+所以把检查下沉到<strong>数据层</strong>：<code>tools/check_mesh.py</code> 直接解析导出页里的顶点缓冲。</p>
+<p>用法：</p>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>python<span style="color: #ABB2BF"> </span>tools/check_mesh.py<span style="color: #ABB2BF"> </span>out/dome.html<span style="color: #ABB2BF"> </span>--ref-sphere<span style="color: #ABB2BF"> </span><span style="color: #D19A66">25</span>,25,84,15
+</code></pre></div>
+
+<p>四类检查，对应四种失败方式：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>类别</th>
+<th>查什么</th>
+<th>失败意味着</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>几何</td>
+<td>NaN / 索引越界 / 退化三角形</td>
+<td>顶点缓冲写坏，GPU 画噪点或整片消失</td>
+</tr>
+<tr>
+<td>拓扑</td>
+<td>边界边 / 非流形边 / 连通分量</td>
+<td>破面、LOD 分块裂缝、悬空碎屑</td>
+</tr>
+<tr>
+<td>法线</td>
+<td>几何法线 vs 顶点法线 / 参考曲面偏差</td>
+<td>翻面发黑、曲面"波纹"</td>
+</tr>
+<tr>
+<td>颜色</td>
+<td>三角形内色号不一致 / 孤立色块</td>
+<td>溯源索引错位——麻点</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>--ref-sphere</code> 是<strong>解析参考</strong>：给一个球，直接算每个球面顶点的法线与理想法线的
+夹角、径向误差。这是把"看起来有波纹"变成"1.94°"的办法。</p>
+<h3 id="_20">麻点的四个根因（都不是渲染器的问题，是着色索引）</h3>
+<ol>
+<li><strong>取色兜底方向反了</strong>。<code>lod_vertex_batch</code> 里"取不到就往 <code>-normal</code> 探一格"，
+   理由是"毛坯外棱外侧是空气、内侧是料"。这条对台阶成立，对<strong>凸台</strong>相反：
+   <code>-normal</code> 是<strong>从没被切过的原始料</strong>，creator 恒 0，越探越 0。
+   实测 12935 个球面顶点里 <strong>411 个取到 0（灰点）</strong>。改成"先往外、再往里"，
+   偏移取 <code>h</code> 的奇数倍（0.5/1.5/2.5）避开格面。</li>
+<li><strong>染色只盖一格</strong>。<code>changed_mask</code> 只给 <code>|sd| &lt; h</code> 的子块盖章。顶点是从粗格
+   （k=4）插值来的，位置带 0.1–0.3 mm 误差，一偏出那一格就取到上一个工序的旧色。
+   放宽到 <code>band</code>（4h），颜色带覆盖窄带全宽。</li>
+<li><strong>球顶螺旋 <code>n = 1</code></strong>。<code>2ρ ≤ 弦长 → 一段就够</code> 把"直径"当成了最大弦长，
+   而一圈的周长是 <code>2πρ</code>：θ&lt;2.2° 那几圈变成"一段直线跨过整圈"，中间整片漏切。
+   下限改 3；真正的判据是<strong>圈间间隙</strong> <code>gap = 行距 + ρ(1−cos(π/n)) &lt; 刀半径</code>，
+   ρ&lt;2 时弦长收到 0.45（n=8）。测试 <code>finish_rings_never_leave_a_gap_wider_than_the_tool</code>。</li>
+<li><strong>值不变但擦面不盖章</strong>。球顶正好是面铣层的切点，两次切削的等距面重合 →
+   场值不需要改 → <code>n == 0</code> → 不盖章 → 永远保留面铣的 creator=1。
+   改成"值没变但 <code>|旧值| &lt; h</code> 也盖章"。</li>
+</ol>
+<p><strong>结果</strong>：球面 creator=0 从 411 → <strong>0</strong>，球冠全部是最后一档，孤立色点 456 → 12。</p>
+<h3 id="_21">试过但失败：细步长梯度重算法线</h3>
+<p>想法：<code>vertex_of</code> 用 8 个粗格角点的中心差分（步长 <code>k·h</code> = 0.4），SDF 本身是精确场，
+梯度不该跟着降采样。改成 0.8h 的 <code>sdf_cached</code> 差分后：</p>
+<ul>
+<li>球面法线偏差确实降了，但</li>
+<li><strong>顶点数 145214 → 867699，HTML 10 MB → 37 MB</strong></li>
+</ul>
+<p>原因：<code>sdf</code> 是三线性插值的体素场，<strong>格面处梯度不连续</strong>。细差分把每个格面的折痕
+都放大成 &gt;45° 的法线跳变，<code>split_crease_normals(0.707)</code> 把它们全当硬边拆开。
+粗步长差分在这里<strong>恰好是低通滤波</strong>。要更光滑只能提高网格精度（k=2，文件 4 倍）。</p>
+<h3 id="5050100-r15">当前体检数字（50×50×100 / R15 凸台）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>值</th>
+<th>判断</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NaN / 索引越界</td>
+<td>0 / 0</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>退化三角形</td>
+<td>4 / 290424</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>非流形边</td>
+<td>0</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>连通分量</td>
+<td>7（6 个 3 顶点碎屑 @ 底面边缘 z≈84）</td>
+<td>⚠ 视觉无影响</td>
+</tr>
+<tr>
+<td>翻面</td>
+<td>0</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>球面法线 vs 解析</td>
+<td>中位 1.94° / p99 7.33°</td>
+<td>⚠ 波纹</td>
+</tr>
+<tr>
+<td>球面径向误差</td>
+<td>±0.039，最大 +0.300（残料点）</td>
+<td>⚠</td>
+</tr>
+<tr>
+<td>孤立色点</td>
+<td>88（整个网格，含地面刀路）</td>
+<td>✓ 0.06%</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="lod">追加：法线改成"面法线平均"，LOD 反而可以退回去</h3>
+<p>球面那层「同心波纹」的来源不是 LOD 本身，是<strong>顶点法线</strong>：提取时用的是 SDF
+的粗格中心差分（步长 <code>k·h</code>），带格子尺度的噪声。</p>
+<p>新方法 <code>MeshData::recompute_smooth_normals</code>：<strong>面积加权的面法线平均</strong>。未归一化的
+叉积长度 = 2×面积，所以"直接累加不归一化"天然是面积权重。必须在
+<code>split_crease_normals</code> <strong>之后</strong>调——硬边已经按夹角拆成独立顶点，每个顶点只累加
+同一侧的面，平均不会把棱角抹圆。</p>
+<p><strong>反直觉的地方</strong>：加了平均之后，<strong>LOD 越粗反而越准</strong>。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>LOD</th>
+<th>球面法线偏差（中位）</th>
+<th>文件</th>
+<th>三角形</th>
+<th>提取</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>k=4 + 面平均</td>
+<td><strong>0.78°</strong></td>
+<td>9.6 MB</td>
+<td>29 万</td>
+<td>31 ms</td>
+</tr>
+<tr>
+<td>k=3 + 面平均</td>
+<td>1.05°</td>
+<td>17.1 MB</td>
+<td>52 万</td>
+<td>55 ms</td>
+</tr>
+<tr>
+<td>k=4 + SDF 差分（旧）</td>
+<td>1.94°</td>
+<td>9.6 MB</td>
+<td>29 万</td>
+<td>29 ms</td>
+</tr>
+<tr>
+<td>k=3 + SDF 差分（旧）</td>
+<td>1.46°</td>
+<td>17.1 MB</td>
+<td>52 万</td>
+<td>55 ms</td>
+</tr>
+</tbody>
+</table></div>
+<p>原因：粗格的三角形<strong>更大、更规整</strong>，面法线的统计样本少但方向干净；细格三角形
+多而碎，平均之后反而把细碎的锯齿带进来了。所以<strong>不是"越密越好"</strong>——加密只在
+位置上更准（径向误差 std 0.039 → 0.030），法线反而变差。</p>
+<p><strong>结论：k=4 + 面法线平均。</strong> 文件 9.6 MB、29 万三角形、0.78°，三个指标同时最好。</p>
+<h3 id="6">一个<strong>误报</strong>：6 个"碎屑"其实是顶点副本</h3>
+<p><code>check_mesh.py</code> 早先按<strong>索引</strong>算连通分量，报出 6 个 3 顶点悬空块。追下去：
+<code>split_crease_normals</code> 为硬边复制顶点（位置相同、索引不同），按索引看就是
+"孤立三角形"。<strong>按位置量化（1e-4 mm）重算，连通分量是 1 个</strong>——网格一直完好。</p>
+<p>改了体检工具（先按位置去重再 union），并删掉了为此写的 <code>drop_small_islands</code>：
+它按三角形 union 顶点、在 split 之前调用，永远删不到东西（dropped=0）。
+<strong>教训</strong>：加工链里"看起来孤立"的东西，先确认判据用的是几何还是索引。</p>
+<h3 id="_22">剩下的</h3>
+<p>球面色带边界（10 档之间）沿三角形走，放大能看到锯齿。要再光滑得把 creator 从
+<code>u8</code> 改成 <code>f32 进度</code>、shader 里插值——那是"每 10% 一色"这个需求的另一面，
+没做。</p>
+<h3 id="_23">追加：色带边界锯齿 —— 硬分档根本上不去</h3>
+<p><strong>现象</strong>：两种颜色交界处全是台阶，放大是 8 px 的锯齿。</p>
+<p><strong>量出来的根因</strong>（不是着色器写错）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>指标</th>
+<th>10 档时</th>
+<th>254 级时</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>球面边的两端编码差 = 0</td>
+<td>86.6%</td>
+<td>56.9%</td>
+</tr>
+<tr>
+<td>差 ≥ 3</td>
+<td>0%</td>
+<td><strong>37.6%</strong></td>
+</tr>
+<tr>
+<td>差 p90 / p99</td>
+<td>—</td>
+<td><strong>12 / 27 级</strong></td>
+</tr>
+<tr>
+<td>三顶点同色的三角形</td>
+<td>79.9%</td>
+<td>—</td>
+</tr>
+</tbody>
+</table></div>
+<p>球面顶点间距 0.4 mm（LOD k=4），而<strong>加工进度在这个间距内就跳 4–12 级</strong>——因为
+相邻体素的"最后一刀"在螺旋上隔了几十刀。所以：</p>
+<ul>
+<li><strong>10 档</strong>：量化把噪声压平了（86.6% 同色），但边界只能沿三角形走 → 8 px 台阶。</li>
+<li><strong>254 级 + 硬边</strong>：噪声全暴露，边界密布，更糟。</li>
+<li><strong>254 级 + 连续插值</strong>：颜色在 10 个色相节点之间渐变，<strong>锯齿消失</strong>。</li>
+</ul>
+<p><strong>结论</strong>：这个场的空间分辨率（0.4 mm）比"档位"粗得多，任何硬边都会沿三角形折。
+只能用连续插值。</p>
+<h3 id="_24">代价与取舍</h3>
+<ul>
+<li><strong>失去</strong>"每 10 % 一色"的硬分档：现在是 10 个色相节点之间的连续渐变。</li>
+<li><strong>换来</strong>没有锯齿，以及——因为不再需要锐利的索引——<code>creator_sub</code> 可以从 <strong>4 降到 1</strong>：</li>
+</ul>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>sub</th>
+<th>内存（50×50×100）</th>
+<th>每叶</th>
+<th>视觉</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4</td>
+<td><strong>31 MB</strong></td>
+<td>64 B</td>
+<td>有硬边时"边界准 0.1 mm"</td>
+</tr>
+<tr>
+<td>1</td>
+<td><strong>0.5 MB</strong></td>
+<td>1 B</td>
+<td>渐变下看不出差别</td>
+</tr>
+</tbody>
+</table></div>
+<p>省 30.5 MB，切削时间基本不变（15.9 s）。溯源仍可反查"大致哪一刀"，
+精度 0.8 mm（一个叶），需要更精确时把 <code>RunConfig::creator_sub</code> 调回 4。</p>
+<h3 id="10-2026-11-03">追加：按刀具 × 10 段换色（2026-11-03）</h3>
+<p>需求变了：不再要"连续渐变"，要<strong>一眼看出某块面是哪把刀、哪个阶段切的</strong>。</p>
+<p><strong>编码</strong>：<code>creator_of_tool_segment(tool, done, total)</code> = <code>1 + (tool−1)·10 + 段号</code></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>色号</th>
+<th>归属</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>毛坯面</td>
+</tr>
+<tr>
+<td>1..10</td>
+<td>第 1 把刀（粗加工），每 10% 一段</td>
+</tr>
+<tr>
+<td>11..20</td>
+<td>第 2 把刀（精加工），每 10% 一段</td>
+</tr>
+<tr>
+<td>21..29</td>
+<td>第 3 把刀起（封顶）</td>
+</tr>
+<tr>
+<td>30 / 31</td>
+<td>MIXED / 刀柄</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>PALETTE_LEN</code> 16 → <strong>32</strong>，<code>CREATOR_MIXED</code> 13 → 30，<code>CREATOR_SHANK</code> 14 → 31。</p>
+<p><strong>色板</strong>（HSL 生成，写死在 <code>render::PALETTE</code>）：</p>
+<ul>
+<li>T1：明度 <strong>0.50</strong>、饱和 0.78 —— 暗而艳</li>
+<li>T2：明度 <strong>0.65</strong>、饱和 0.75 —— 更亮</li>
+<li>段内色相 <strong>36°</strong> 递进，两族错开 18°</li>
+</ul>
+<p>分族靠<strong>明度</strong>（暗=粗、亮=精），段内靠色相。20 色都不同。</p>
+<p><strong>着色器回到硬边直接查表</strong>（<code>floor</code> 不插值）——用户要的是"色块边界清晰"，
+不是渐变。<code>use_vertex</code> 恢复两态：1 = 顶点色，0 = 材质 <code>index</code>（刀刃 / 刀柄）。</p>
+<p><strong>一个必须记的教训</strong>：改完之后我从<strong>俯视图</strong>看，觉得颜色不对（只有蓝/青/品红），
+追了三小时 <code>set_creator</code> → <code>stamp_leaf</code> → <code>creator_sub</code> → uniform 布局。
+最后用侧视图一看——<strong>颜色一直是对的</strong>：俯视时球的赤道被压缩成一圈极窄的环，
+橙/黄/绿那几段只占几个像素，加上掠射角光照暗，根本看不出来。</p>
+<p><strong>判断竖直方向的分层，要用侧视或 3/4 视角，不能看俯视图。</strong></p>
+<p><strong>顺带修的一处</strong>：<code>creator_sub = 1</code> 时走的是整叶一个标记的分支，那条路径没有
+"值不变也盖章"的逻辑（<code>sub = 4</code> 的 Dense 分支有）。球顶是面铣层与精加工的切点，
+两次切削的等距面重合，<strong>值一个都不变</strong> → <code>n == 0</code> → 块被丢弃 → 球顶永远保留
+面铣的颜色。补了 <code>any_value_near_surface</code>（看几何位置，不看变化），并把
+<code>n == 0</code> 的跳过条件改成 <code>n == 0 &amp;&amp; mask_off == u32::MAX</code>。</p>
+<p><strong>代价</strong>：<code>n == 0</code> 的叶要做 512 次 <code>to_distance</code>，R15 半球从 17 s 涨到 25 s。
+加了一条"整叶同值只算一次"的快速路径之后回到 <strong>16 s</strong>（绝大多数 <code>n == 0</code>
+的叶是"刀从空气里穿过"，整叶都是 <code>+band</code>）。</p>
 </main>
 </div>
 <script>

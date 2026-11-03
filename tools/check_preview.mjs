@@ -153,10 +153,16 @@ if (!html.includes('discard')) fail('片元着色器缺 discard（剖切没实�
 // 注释里的某个标识符，跟"着色器写错了"看起来毫无关系）——那一类由上面的
 // "JS 执行抛异常"兜住，这里只查数据本身有没有插进去、项数对不对。
 if (html.includes('__PALETTE__')) fail('调色板占位符没被替换（Rust 侧没走到替换？）');
-const palMatch = html.match(/vec3 pal\[16\] = vec3\[16\]\((.*?)\);/s);
-if (!palMatch) fail('没找到 vec3 pal[16] 的数组构造');
-const palCount = (palMatch[1].match(/vec3\(/g) ?? []).length;
-if (palCount !== 16) fail(`调色板应有 16 项，实际 ${palCount} 项`);
+// 项数必须与 Rust 的 `cncsim_voxel::PALETTE_LEN` 一致（现在是 32：
+// 0 毛坯 + 每把刀 10 段 × 最多 3 把 + MIXED + SHANK）
+const PALETTE_LEN = 32;
+const palMatch = html.match(/vec3 pal\[(\d+)\] = vec3\[\d+\]\((.*?)\);/s);
+if (!palMatch) fail('没找到 vec3 pal[N] 的数组构造');
+const palDeclared = Number(palMatch[1]);
+const palCount = (palMatch[2].match(/vec3\(/g) ?? []).length;
+if (palDeclared !== PALETTE_LEN || palCount !== PALETTE_LEN) {
+  fail(`调色板应有 ${PALETTE_LEN} 项，实际声明 ${palDeclared} / 初始化 ${palCount} 项`);
+}
 
 // 画一帧
 try {

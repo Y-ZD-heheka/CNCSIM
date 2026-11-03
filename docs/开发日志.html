@@ -324,7 +324,16 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#agentsmd202">根目录 AGENTS.md（202 行）</a></li>
 </ul>
 </li>
-<li><a href="#_77">数字演进一览</a></li>
+<li><a href="#2026-11-02-432-461">2026-11-02 —— 锥度球头刀 + 换刀 + 半球型腔（432 → 461 测试）</a><ul>
+<li><a href="#_77">做了什么</a></li>
+<li><a href="#md-21">三个坑（都写进 项目记忆.md §21）</a></li>
+<li><a href="#24-release">实测（24 线程 release）</a></li>
+<li><a href="#_78">当天追加：样板件从「半球坑」改成「半球凸台」</a></li>
+<li><a href="#_79">再追加：球顶那块灰斑</a></li>
+<li><a href="#10">再追加：色号改成「每工序内 10 档」</a></li>
+</ul>
+</li>
+<li><a href="#_80">数字演进一览</a></li>
 </ul>
 </div>
 
@@ -2536,7 +2545,124 @@ Surface Nets 一格一个顶点，地板和立面共用一个顶点，法向只�
 实测 <code>cargo test --release -p cncsim-voxel --test lod -- --ignored --nocapture</code>
 输出 252 ms / 200 万面 / 52 MB，与文档里写的数字一致。</p>
 <hr />
-<h2 id="_77">数字演进一览</h2>
+<h2 id="2026-11-02-432-461">2026-11-02 —— 锥度球头刀 + 换刀 + 半球型腔（432 → 461 测试）</h2>
+<p><strong>目标</strong>：把"粗加工 → 换刀 → 精加工"这条链路打通。样板件是 50×50×100 毛坯挖
+R15 半球坑，T1 φ6 平底粗加工、T2 <code>R0.5*30.5*D6*75 单边斜角 4.69°</code> 锥度球头精加工。</p>
+<h3 id="_77">做了什么</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>层</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tool</code></td>
+<td><code>tapered_ball_end_mill</code>（球面与锥面<strong>相切</strong>，切点 <code>(r cos α, r(1−sin α))</code>）+ <code>taper_half_angle_deg</code> + <code>CutterKind::TaperedBall</code> + <code>ToolTable</code></td>
+</tr>
+<tr>
+<td><code>sim/run</code></td>
+<td><code>run_tools</code> / <code>run_tools_observed</code>：按 <code>Block::tool</code> 查表换刀；刀杆采样点按刀库预生成；缺刀号 → 报警 + 退回第一把</td>
+</tr>
+<tr>
+<td><code>sim/compare</code></td>
+<td><code>CutSegment.tool</code> + 按段取母线；<code>DesignModel::Cavity</code>（盒 − 球，解析 SDF + 球面采样）；解析过切的<strong>全局包围盒预筛</strong>（侧壁采样点一次 O(1) 就跳掉）</td>
+</tr>
+<tr>
+<td><code>sim/playback</code></td>
+<td><code>BlockSpan.tool</code> / <code>Frame.tool</code></td>
+</tr>
+<tr>
+<td><code>sim/hemisphere</code></td>
+<td>新模块：粗加工 Z 层清整盘、精加工等弧长螺旋、设计模型、7 个不变量测试</td>
+</tr>
+<tr>
+<td><code>render</code></td>
+<td><code>LiveCut</code> 按刀号取母线（粗/精两把刀不能混）；<code>ShellScene.tools</code> + 每刀号一个骨架实体，回放切可见性</td>
+</tr>
+<tr>
+<td><code>app</code></td>
+<td><code>DemoScene</code> 结构体；<code>--demo bowl</code>；色带表超过 16 行只打首尾</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="md-21">三个坑（都写进 <code>项目记忆.md</code> §21）</h3>
+<ol>
+<li><strong>切点取 <code>(r, r)</code> 是错的</strong>。规格表里的 4.69° 是"刀尖到刃顶"的弦角，不是切点处的
+   锥面角；按 <code>(r, r)</code> 接锥面会在刃口留一圈 4.69° 的折角——几何上是棱，仿真里是
+   <strong>假过切</strong>。测试用"最后一段弧的方向 vs 锥面段的方向"夹角 &lt; 1.5° 锁住。</li>
+<li><strong>设计面采样的容差必须是 0</strong>。<code>Cavity</code> 的坑口用"半个采样步"当容差，把坑口内侧
+   0.2 mm 的空气点当成设计面，精加工球扫过去 → 报 1.2 mm³ / 0.25 mm 假过切。</li>
+<li><strong>锥颈在坑口压顶面 0.05 mm 是固有限制</strong>，不是 bug：坑壁在坑口竖直、锥颈张开
+   4.69°，刀尖一落到顶面以下必然压过去。换 8° 锥角干涉涨到 0.15（已实测证伪）。</li>
+</ol>
+<h3 id="24-release">实测（24 线程 release）</h3>
+<ul>
+<li>程序 2987 块（T1 60 + T2 2900），<strong>换刀 1 次</strong>，去料 <strong>7045.7 mm³</strong>（理论 7069）</li>
+<li>切削 <strong>20 s</strong>（5864 段 / 3.4 ms 一刀）——R0.5 小刀的固定成本占比高，见待办 §6</li>
+<li>过切 1.2 mm³ / 0.050 mm（坑口，见坑 3）；残留 28.2 mm³ / 0.104 mm（体素 h/2 量级）</li>
+<li>预览 LOD k=4：33 万三角形 / 11.5 MB 单文件（k=3 会到 18 MB，50 mm 毛坯的表面积是
+  30 mm 的 8 倍）</li>
+</ul>
+<h3 id="_78">当天追加：样板件从「半球坑」改成「半球凸台」</h3>
+<p>用户要的是<strong>凸出来</strong>的半球。几何重做：球心放到 z=85（顶面下 15），上半球顶到
+z=100，赤道就是底面平面；设计模型加 <code>DesignModel::Boss</code>（盒 ∪ 球，<code>max</code>→<code>min</code>），
+和 <code>Cavity</code> 成一对镜像。刀路整套反过来：</p>
+<ul>
+<li>粗加工：平底刀在球<strong>外</strong>，<code>r_c ≥ r_tool + √((R+a)²−d²)</code>；每层只清
+  <code>[r_in(z), 底层刀内缘]</code> 这条环带——刃长 20 &gt; 切深 15，<strong>外侧全靠底层那一刀</strong>，
+  路径从 15.5 min 压到 3.9 min。</li>
+<li>精加工：刀心在 <code>R + r_b = 15.5</code> 球面<strong>外侧</strong>，θ 从 88.15° 起（再往下刀尖就低于底面），
+  58 圈螺旋扫到球顶。</li>
+</ul>
+<p><strong>当天新踩的两个坑</strong>（都进了 <code>项目记忆.md</code> §21）：</p>
+<ol>
+<li><strong>同心圆只走到边，四角全留</strong>：对角 35.4 比边 25 远 41%，第一版最大半径取 26，
+   四角留下 3169 mm³ / <code>残留最厚 15.000 mm</code>（(1.1,1.1,100)）。改 36 → 12.8 mm³。
+   顺带发现判据本身得写成测试：四个角点必须被某一段刀具覆盖。</li>
+<li><strong>整圆 <code>G2 I-</code> 的 I 相对起点</strong>：连着写会让第二圈圆心落在"上一圈终点 − r"上
+   （实测偏到 21 而非 25），圆的大小对、位置全错。每个整圆前必须先 <code>G1</code> 到该圈起点。</li>
+</ol>
+<p><strong>凸台也不是零过切</strong>：赤道那一段球面同样竖直，锥颈 4.69° 仍会蹭进去
+<strong>0.030 mm / 3.4 mm³</strong>（型腔版是压顶面 0.05）。同一个根因，位置镜像。</p>
+<p><strong>实测</strong>：3090 块 / 去料 <strong>30426.9 mm³</strong>（理论 30431）/ 595.7 s /
+过切 0.030 / 残留 0.094 / 切削 15.4 s（7416 段）。</p>
+<h3 id="_79">再追加：球顶那块灰斑</h3>
+<p>俯视图上球顶正中有一块 6 mm 见方的<strong>灰色</strong>（色索引 0 = 毛坯面）。不是渲染问题，
+是<strong>几何够不到</strong>：球顶与毛坯顶面平齐时，球顶周围半径 <code>√(2R·a)≈3.9</code> 的一层球冠，
+任何半径 0.5 的刀要切它就得比它更靠近球顶，一靠近就切进球。残留 12.81 mm³
+正好等于那个球冠的体积（12.1 mm³），位置 (24.75, 22.05, 99.75) 也对得上。</p>
+<p><strong>修法</strong>：球心从 z=85 降到 <strong>84</strong>（球顶 99 = 毛坯顶 − 1），第一刀<strong>面铣</strong>把顶面
+切到 99。平底刀的刀底是平的，与球顶相切不算切球；球头刀做不到这件事——这是
+"为什么必须先面铣一刀"的真正理由。</p>
+<p><strong>改后实测</strong>：3100 块 / 去料 <strong>32926.9 mm³</strong>（面铣多切 2500 = 50×50×1）/
+620.6 s / 过切 0.030（赤道，仍是锥颈）/ 残留 0.094（球面刀痕量级）。
+俯视图确认球顶已被刀纹覆盖。测试 <strong>467</strong> 绿，新增 <code>face_mill_clears_the_top_face_around_the_apex</code>。</p>
+<h3 id="10">再追加：色号改成「每工序内 10 档」</h3>
+<p>用户的观感是"渲染颜色一直在变"。查下来是原设计：色号 = 第几刀，12 色往返
+（周期 22 刀）。粗加工 4990 刀 + 精加工 3008 刀，精加工每条 <code>G1</code> 只有 1.2 mm
+→ <strong>每 1.2 mm 换一次色</strong>，加上刀刃跟着每刀换 → 看起来一直在闪。</p>
+<p>改成 <code>creator_of_progress(done, total)</code>：<strong>每个工序内</strong> 0→100%，每 10% 一档，
+索引 1..=10。粗加工、精加工各自从第 1 档走到第 10 档——用全局进度的话粗加工
+62% 的刀数会吃掉前 6 档，球面只剩 4 档，而球面恰恰是最想看渐变的地方。</p>
+<ul>
+<li>切面与刀刃仍用同一个函数，构造保证一致（这条没变）。</li>
+<li><code>LiveCut</code> 在 <code>new</code> 里一次算好每刀的 <code>(工序内序号, 总数)</code>，回放每帧只查表——
+  现算容易和仿真侧算出不同的档。</li>
+<li>测试从"相邻两刀不同色"改成"单调不减 + 整段只换 9 次"；
+  run 侧的 <code>cut_surface_colors_follow_the_progress</code> 改判"进度色不倒退"。</li>
+</ul>
+<p><strong>实测</strong>：切割色 <strong>10 种</strong>（原来 12 种跑满），球面 10 条宽色带，
+去料/过切/残留数字一字未变（着色不影响几何）。</p>
+<p><strong>红绿过程</strong>：<code>tapered_ball_end_mill</code> 先 <code>unimplemented!()</code>，5 个测试全红（正确原因），
+实现后 2 个仍红——① 我自己把 <code>sd_profile</code> 的入参写成了 <code>(0.3, 0.2, 0)</code>（它要的是
+<code>(x, y, z)</code>，ρ=hypot(x,y)），② 刃顶 Ø5.926 与柄径 6 的差 0.074 超过我拍的 0.05 容差。
+两条都改的是<strong>测试</strong>（断言写错/容差拍太紧），不是代码。<code>hemisphere</code> 的 6 个测试同样
+先红：粗加工那条把不等式方向写反（应是"刀在等距面<strong>内</strong>"），精加工那条是 G 代码
+3 位小数圆整把相切误差抬到 1e-3（改 4 位 + 容差 2e-4）。</p>
+<hr />
+<h2 id="_80">数字演进一览</h2>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -2685,6 +2811,26 @@ Surface Nets 一格一个顶点，地板和立面共用一个顶点，法向只�
 <td><strong>11-01 顶点色进材质</strong></td>
 <td><strong>432</strong></td>
 <td><strong>自定义 <code>CutMaterial</code> + WESL；踩 4 个坑</strong></td>
+</tr>
+<tr>
+<td><strong>11-02 锥度球头刀</strong></td>
+<td><strong>461</strong></td>
+<td><strong>换刀端到端：2987 块 / 去料 7045.7 mm³ / 切削 20 s</strong></td>
+</tr>
+<tr>
+<td><strong>11-02 凸台改版</strong></td>
+<td><strong>466</strong></td>
+<td><strong>半球凸台：去料 30426.9 mm³ / 595.7 s / 四角不漏</strong></td>
+</tr>
+<tr>
+<td><strong>11-02 球顶面铣</strong></td>
+<td><strong>467</strong></td>
+<td><strong>球心降 1 mm + 面铣：灰斑消除，去料 32926.9 mm³</strong></td>
+</tr>
+<tr>
+<td><strong>11-02 进度着色</strong></td>
+<td><strong>467</strong></td>
+<td><strong>颜色改每工序 10 档：整段只换 9 次，球面 10 条宽色带</strong></td>
 </tr>
 </tbody>
 </table></div>

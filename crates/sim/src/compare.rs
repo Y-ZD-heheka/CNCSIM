@@ -29,7 +29,7 @@
 
 use cncsim_math::DVec3;
 use cncsim_motion::Pose;
-use cncsim_tool::Profile;
+use cncsim_tool::{Profile, ToolTable};
 use cncsim_voxel::{SparseGrid, sd_sweep, sweep_aabb};
 
 /// 过切判定阈值（mm）。小于它的"过切"与扫掠黄金分割的迭代噪声不可区分
@@ -54,6 +54,28 @@ pub enum DesignModel {
         sdf: SparseGrid<i8>,
         surface: Vec<DVec3>,
     },
+    /// **盒 − 球**（球面型腔 / 半球坑）。解析式，无体素化代价。
+    ///
+    /// `sdf = max(box_sdf, −sphere_sdf)`：盒内挖掉一个球。球心落在盒的顶面上
+    /// 时，被挖掉的正好是**下半球**——那就是一个 R=radius 的球面型腔。
+    /// 球心在盒内偏上也没问题，只要球顶超出盒顶，多出来的部分本来就在空气里。
+    Cavity {
+        min: DVec3,
+        max: DVec3,
+        center: DVec3,
+        radius: f64,
+    },
+    /// **盒 ∪ 球**（半球凸台）。`sdf = min(box_sdf, sphere_sdf)`。
+    ///
+    /// 球心落在盒的顶面上时，凸出来的正好是**上半球**——底面是一圈环形平面，
+    /// 中间鼓出一个 R 的球冠。和 [`Cavity`](Self::Cavity) 是一对：一个是挖进去，
+    /// 一个是凸出来，两者共用同一套球面采样（方向相反）。
+    Boss {
+        min: DVec3,
+        max: DVec3,
+        center: DVec3,
+        radius: f64,
+    },
 }
 
 impl DesignModel {
@@ -65,6 +87,7 @@ impl DesignModel {
     pub fn distance_cap(&self) -> Option<f64> {
         match self {
             DesignModel::Box { .. } => None,
+            DesignModel::Cavity { .. } | DesignModel::Boss { .. } => None,
             DesignModel::Field { sdf, .. } => Some(sdf.config.band_mm()),
         }
     }
@@ -77,15 +100,29 @@ impl DesignModel {
     /// 场体用三线性插值（带外钳制 ±band）。
     pub fn sdf(&self, p: DVec3) -> f64 {
         match self {
-            DesignModel::Box { min, max } => {
-                let dx = (min.x - p.x).max(p.x - max.x);
-                let dy = (min.y - p.y).max(p.y - max.y);
-                let dz = (min.z - p.z).max(p.z - max.z);
-                dx.max(dy).max(dz)
+            DesignModel::Box { min, max } => box_sdf(p, *min, *max),
+            DesignModel::Cavity { min, max, center, radius } => {
+                // 盒 ∩ 球外：两块实体的**并集**，SDF 取 max；球内是气区，所以取 −球
+                box_sdf(p, *min, *max).max(*radius - (p - *center).length())
+            }
+            DesignModel::Boss { min, max, center, radius } => {
+                // 盒 ∪ 球：并集取 min，球是实体
+                box_sdf(p, *min, *max).min((p - *center).length() - *radius)
             }
             DesignModel::Field { sdf, .. } => sdf.sdf(p),
         }
     }
+}
+
+/// 轴对齐盒的有符号距离：负 = 盒内，正 = 盒外。
+///
+/// 只在"面区"是精确欧氏距离，角/棱阴影区会低估——但**符号恒正确**，
+/// 体积/深度判定不受影响。
+fn box_sdf(p: DVec3, min: DVec3, max: DVec3) -> f64 {
+    let dx = (min.x - p.x).max(p.x - max.x);
+    let dy = (min.y - p.y).max(p.y - max.y);
+    let dz = (min.z - p.z).max(p.z - max.z);
+    dx.max(dy).max(dz)
 }
 
 /// 从三角形网格装配场设计（STL 解析后的产物）。
@@ -114,6 +151,9 @@ pub struct CutSegment {
     pub line: u32,
     /// 段开始时的仿真时间（秒）
     pub t_start: f64,
+    /// 这一段的**刀号**：过切判定必须用**这一段真正用的那把刀**的母线。
+    /// 粗加工 φ6 和精加工 R0.5 的扫掠体差着数量级，混用会把过切算成 0。
+    pub tool: u16,
 }
 
 /// 比对结果。所有位置字段是世界坐标。
@@ -169,7 +209,7 @@ pub fn compare_with_design(
     grid: &SparseGrid<i8>,
     domain: [i32; 3],
     segments: &[CutSegment],
-    cutter: &Profile,
+    tools: &ToolTable,
     design: &DesignModel,
     step: f64,
     tol: f64,
@@ -187,7 +227,7 @@ pub fn compare_with_design(
 
     let t1 = std::time::Instant::now();
     let (gouge_max_depth, gouge_at, gouge_block, gouge_line, gouge_t, design_points) =
-        analytic_gouge(segments, cutter, design, step, tol);
+        analytic_gouge(segments, tools, design, step, tol);
     if std::env::var_os("CNCSIM_PROF").is_some() {
         println!(
             "  [cmp] 体素积分 {t_vox:.1} ms | 解析过切 {:.1} ms（{} 段 / {} 设计点）",
@@ -332,20 +372,39 @@ fn voxel_compare(
 #[allow(clippy::type_complexity)]
 fn analytic_gouge(
     segments: &[CutSegment],
-    cutter: &Profile,
+    tools: &ToolTable,
     design: &DesignModel,
     step: f64,
     tol: f64,
 ) -> (f64, DVec3, u32, u32, f64, usize) {
-    // 段 AABB 预先算一遍（每点每段重算是 78k×110 次纯浪费）
+    // 段 AABB 预先算一遍（每点每段重算是 78k×110 次纯浪费）。**每段用自己那把刀**
+    // 的母线：粗加工的 φ6 和精加工的 R0.5 扫掠体差着数量级。
+    let cutters: Vec<&Profile> = segments
+        .iter()
+        .map(|s| &tools.by_number(s.tool).unwrap_or_else(|| tools.first()).cutter)
+        .collect();
     let boxes: Vec<(DVec3, DVec3)> = segments
         .iter()
-        .map(|s| {
+        .zip(&cutters)
+        .map(|(s, cutter)| {
             let (lo, hi) = sweep_aabb(&s.from, &s.to, cutter);
             let t = DVec3::new(tol, tol, tol);
             (lo - t, hi + t)
         })
         .collect();
+
+    // 全体段的合并包围盒：设计面上在外面一圈的点**不可能被任何一段碰到**，
+    // 每个点先做一次 O(1) 判断就能跳掉。50×50×100 的毛坯有 4 个 50×100 的侧面，
+    // 它们的采样点占绝大多数，而刀从来不去那里。
+    let whole = boxes.iter().fold(None::<(DVec3, DVec3)>, |acc, (lo, hi)| {
+        Some(match acc {
+            None => (*lo, *hi),
+            Some((alo, ahi)) => (
+                DVec3::new(alo.x.min(lo.x), alo.y.min(lo.y), alo.z.min(lo.z)),
+                DVec3::new(ahi.x.max(hi.x), ahi.y.max(hi.y), ahi.z.max(hi.z)),
+            ),
+        })
+    });
 
     let mut max_depth = 0.0f64;
     let mut at = DVec3::ZERO;
@@ -356,18 +415,29 @@ fn analytic_gouge(
 
     for p in design_surface_points(design, step) {
         points += 1;
+        if let Some((lo, hi)) = whole
+            && (p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z)
+        {
+            continue;
+        }
         for (si, s) in segments.iter().enumerate() {
             let (lo, hi) = boxes[si];
             if p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z {
                 continue;
             }
-            let sd = sd_sweep(p, &s.from, &s.to, cutter);
+            let sd = sd_sweep(p, &s.from, &s.to, cutters[si]);
             if sd < -tol && -sd > max_depth {
                 max_depth = -sd;
                 at = p;
                 block = s.block;
                 line = s.line;
                 t_seg = s.t_start;
+                if std::env::var_os("CNCSIM_PROF").is_some() {
+                    println!(
+                        "  [gouge] {:.3} @ ({:.3},{:.3},{:.3}) 段 {si} tool T{} 第 {} 行 from {:?} to {:?}",
+                        max_depth, p.x, p.y, p.z, s.tool, s.line, s.from.tip, s.to.tip
+                    );
+                }
             }
         }
     }
@@ -384,44 +454,106 @@ fn design_surface_points(
 ) -> Box<dyn Iterator<Item = DVec3> + '_> {
     let step = step.max(1e-6);
     match design {
-        DesignModel::Box { min, max } => {
-            let size = *max - *min;
-            // 每个面：两个张成轴 + 一个固定轴
-            let nx = ((size.x / step).ceil() as usize).max(1);
-            let ny = ((size.y / step).ceil() as usize).max(1);
-            let nz = ((size.z / step).ceil() as usize).max(1);
-            let sx = size.x / nx as f64;
-            let sy = size.y / ny as f64;
-            let sz = size.z / nz as f64;
-
-            // 6 个面 = (张成轴对, 固定轴取值) 的组合
-            let faces: Vec<Box<dyn Iterator<Item = DVec3>>> = vec![
-                // ±Z 面（x-y 张成）
-                Box::new((0..ny).flat_map(move |j| {
-                    (0..nx).map(move |i| DVec3::new(min.x + (i as f64 + 0.5) * sx, min.y + (j as f64 + 0.5) * sy, min.z))
-                })),
-                Box::new((0..ny).flat_map(move |j| {
-                    (0..nx).map(move |i| DVec3::new(min.x + (i as f64 + 0.5) * sx, min.y + (j as f64 + 0.5) * sy, max.z))
-                })),
-                // ±Y 面（x-z 张成）
-                Box::new((0..nz).flat_map(move |k| {
-                    (0..nx).map(move |i| DVec3::new(min.x + (i as f64 + 0.5) * sx, min.y, min.z + (k as f64 + 0.5) * sz))
-                })),
-                Box::new((0..nz).flat_map(move |k| {
-                    (0..nx).map(move |i| DVec3::new(min.x + (i as f64 + 0.5) * sx, max.y, min.z + (k as f64 + 0.5) * sz))
-                })),
-                // ±X 面（y-z 张成）
-                Box::new((0..nz).flat_map(move |k| {
-                    (0..ny).map(move |j| DVec3::new(min.x, min.y + (j as f64 + 0.5) * sy, min.z + (k as f64 + 0.5) * sz))
-                })),
-                Box::new((0..nz).flat_map(move |k| {
-                    (0..ny).map(move |j| DVec3::new(max.x, min.y + (j as f64 + 0.5) * sy, min.z + (k as f64 + 0.5) * sz))
-                })),
-            ];
-            Box::new(faces.into_iter().flatten())
+        DesignModel::Box { min, max } => box_faces(*min, *max, step),
+        DesignModel::Cavity { min, max, center, radius } => {
+            // 盒面里**被球挖掉的那块不是设计面**（它是空气），必须剔掉——
+            // 否则坑口那一圈点会被当成"设计要料"判成过切。
+            //
+            // 容差必须**是 0**：早先用"半个采样步"（0.2 mm）当容差，结果把
+            // 坑口内侧 0.2 mm 的空气点当成了设计面，精加工球正好扫过它们，
+            // 报出 1.2 mm³ / 0.25 mm 的**假过切**。半径上的判定没有"差不多"，
+            // 球口就是 r = R 那一个圆。
+            let (c, r) = (*center, *radius);
+            Box::new(
+                box_faces(*min, *max, step)
+                    .filter(move |p| (*p - c).length() >= r)
+                    .chain(hemisphere_points(c, r, step, false)),
+            )
+        }
+        DesignModel::Boss { min, max, center, radius } => {
+            // 反过来：**球内的盒面**（底面中间那一块）是内部，不是表面；
+            // 球面只取上半球。
+            let (c, r) = (*center, *radius);
+            Box::new(
+                box_faces(*min, *max, step)
+                    .filter(move |p| (*p - c).length() >= r)
+                    .chain(hemisphere_points(c, r, step, true)),
+            )
         }
         DesignModel::Field { surface, .. } => Box::new(surface.iter().copied()),
     }
+}
+
+/// 盒体 6 个面的采样点（面片中心）。**不收集成 Vec**——30 mm 盒 @0.2 步距
+/// 有 7.8 万个点，装成 Vec 只是白占内存。
+fn box_faces(min: DVec3, max: DVec3, step: f64) -> Box<dyn Iterator<Item = DVec3>> {
+    let size = max - min;
+    // 每个面：两个张成轴 + 一个固定轴
+    let nx = ((size.x / step).ceil() as usize).max(1);
+    let ny = ((size.y / step).ceil() as usize).max(1);
+    let nz = ((size.z / step).ceil() as usize).max(1);
+    let sx = size.x / nx as f64;
+    let sy = size.y / ny as f64;
+    let sz = size.z / nz as f64;
+
+    // 6 个面 = (张成轴对, 固定轴取值) 的组合
+    let faces: Vec<Box<dyn Iterator<Item = DVec3>>> = vec![
+        // ±Z 面（x-y 张成）
+        Box::new((0..ny).flat_map(move |j| {
+            (0..nx).map(move |i| DVec3::new(min.x + (i as f64 + 0.5) * sx, min.y + (j as f64 + 0.5) * sy, min.z))
+        })),
+        Box::new((0..ny).flat_map(move |j| {
+            (0..nx).map(move |i| DVec3::new(min.x + (i as f64 + 0.5) * sx, min.y + (j as f64 + 0.5) * sy, max.z))
+        })),
+        // ±Y 面（x-z 张成）
+        Box::new((0..nz).flat_map(move |k| {
+            (0..nx).map(move |i| DVec3::new(min.x + (i as f64 + 0.5) * sx, min.y, min.z + (k as f64 + 0.5) * sz))
+        })),
+        Box::new((0..nz).flat_map(move |k| {
+            (0..nx).map(move |i| DVec3::new(min.x + (i as f64 + 0.5) * sx, max.y, min.z + (k as f64 + 0.5) * sz))
+        })),
+        // ±X 面（y-z 张成）
+        Box::new((0..nz).flat_map(move |k| {
+            (0..ny).map(move |j| DVec3::new(min.x, min.y + (j as f64 + 0.5) * sy, min.z + (k as f64 + 0.5) * sz))
+        })),
+        Box::new((0..nz).flat_map(move |k| {
+            (0..ny).map(move |j| DVec3::new(max.x, min.y + (j as f64 + 0.5) * sy, min.z + (k as f64 + 0.5) * sz))
+        })),
+    ];
+    Box::new(faces.into_iter().flatten())
+}
+
+/// **半球**面采样点（弧长约 `step`）。`upper` 决定取上半球还是下半球。
+///
+/// 经线按 `Δθ = step/R` 走，每条纬线上按 `Δφ = step/(R sinθ)` 铺 ——
+/// 纬线圈越靠近极点越短，用固定 φ 步长的话极点附近会挤成一堆、赤道附近又稀疏。
+fn hemisphere_points(
+    center: DVec3,
+    radius: f64,
+    step: f64,
+    upper: bool,
+) -> std::vec::IntoIter<DVec3> {
+    use std::f64::consts::TAU;
+    let step = step.max(1e-3);
+    let r = radius.max(1e-6);
+    let n_theta = ((std::f64::consts::FRAC_PI_2 * r / step).ceil() as usize).max(2);
+    let mut out = Vec::new();
+    for k in 0..=n_theta {
+        let th = std::f64::consts::FRAC_PI_2 * (k as f64 / n_theta as f64);
+        let ring = r * th.sin();
+        // upper = true 取上半球（凸台），false 取下半球（型腔）
+        let z = if upper { center.z + r * th.cos() } else { center.z - r * th.cos() };
+        let n_phi = ((TAU * ring / step).ceil() as usize).max(6);
+        for j in 0..n_phi {
+            let phi = TAU * (j as f64) / n_phi as f64;
+            out.push(DVec3::new(
+                center.x + ring * phi.cos(),
+                center.y + ring * phi.sin(),
+                z,
+            ));
+        }
+    }
+    out.into_iter()
 }
 
 #[cfg(test)]
@@ -436,6 +568,20 @@ mod tests {
         }
     }
 
+    /// 单刀刀库：把母线包成 `T1`。解析过切按段查刀号，测试里只有一把。
+    fn single_tool(cutter: &cncsim_tool::Profile) -> ToolTable {
+        ToolTable::single(cncsim_tool::ToolDef {
+            number: 1,
+            kind: cncsim_tool::CutterKind::Flat,
+            diameter: 2.0 * cutter.max_radius(),
+            corner_radius: 0.0,
+            flute_length: cutter.height(),
+            shank: cutter.clone(),
+            length_offset: cutter.height(),
+            cutter: cutter.clone(),
+        })
+    }
+
     #[test]
     fn box_sdf_signs_and_exact_surface() {
         let d = box_design((0.0, 0.0, 0.0), (10.0, 10.0, 5.0));
@@ -446,12 +592,77 @@ mod tests {
         assert_eq!(d.sdf(DVec3::new(12.0, 5.0, 7.0)), 2.0, "角区：各轴距离的最大值");
     }
 
+    /// 盒 ∪ 球：**球心落在盒顶面上** ⇒ 凸出来的是上半球。
+    #[test]
+    fn boss_sdf_is_union_of_box_and_sphere() {
+        let d = DesignModel::Boss {
+            min: DVec3::new(0.0, 0.0, 0.0),
+            max: DVec3::new(50.0, 50.0, 85.0),
+            center: DVec3::new(25.0, 25.0, 85.0),
+            radius: 15.0,
+        };
+        // 半球内部（比球顶低 1）：材料
+        assert_eq!(d.sdf(DVec3::new(25.0, 25.0, 99.0)), -1.0, "球内 → 负，距离 = R − |p−c|");
+        // 球顶正上方 1 mm：空气
+        assert_eq!(d.sdf(DVec3::new(25.0, 25.0, 101.0)), 1.0);
+        // 球外、盒顶上方 1 mm（半径 20）：空气
+        assert_eq!(d.sdf(DVec3::new(45.0, 25.0, 86.0)), 1.0);
+        // 盒顶平面上的环带（半径 20，z=85）：表面
+        assert_eq!(d.sdf(DVec3::new(45.0, 25.0, 85.0)), 0.0);
+        // 盒体深处：材料
+        assert!(d.sdf(DVec3::new(25.0, 25.0, 40.0)) < 0.0);
+        // 下半球那一块也是材料（并被盒盖住）——取并集才会这样
+        assert!(d.sdf(DVec3::new(25.0, 25.0, 71.0)) < 0.0, "球心下方 14 仍在盒内");
+    }
+
+    /// 凸台的表面采样：**上半球 + 被球切开的那部分盒面**，下半球不许出现。
+    #[test]
+    fn boss_surface_points_are_the_dome_and_the_floor() {
+        use std::f64::consts::FRAC_PI_2;
+        let c = DVec3::new(25.0, 25.0, 85.0);
+        let d = DesignModel::Boss {
+            min: DVec3::ZERO,
+            max: DVec3::new(50.0, 50.0, 85.0),
+            center: c,
+            radius: 15.0,
+        };
+        let pts: Vec<DVec3> = design_surface_points(&d, 0.5).collect();
+        assert!(pts.len() > 1000, "采样点太少：{}", pts.len());
+        for &p in &pts {
+            let sd = d.sdf(p);
+            assert!(sd.abs() < 1e-9, "采样点必须在设计面上：{p:?} sd={sd}");
+        }
+        // 球面上必须有点，且**全部在上半球**（下半球被盒吃掉，不是表面）
+        let on_dome: Vec<DVec3> = pts
+            .iter()
+            .copied()
+            .filter(|p| ((*p - c).length() - 15.0).abs() < 1e-9)
+            .collect();
+        assert!(on_dome.len() > 500, "球面点 {} 个", on_dome.len());
+        assert!(
+            on_dome.iter().all(|p| p.z >= c.z - 1e-9),
+            "出现了下半球的采样点——那里在盒体内，不是表面"
+        );
+        // 顶点必须被采到（θ 从赤道走到极点）
+        assert!(
+            on_dome.iter().any(|p| (p.z - (c.z + 15.0)).abs() < 1e-6),
+            "球顶没有采样点：最大 z = {}",
+            on_dome.iter().map(|p| p.z).fold(f64::MIN, f64::max)
+        );
+        let _ = FRAC_PI_2;
+        // 底面环带也要有（半径 ≥ R 的 z=85 平面）
+        assert!(
+            pts.iter().any(|p| (p.z - 85.0).abs() < 1e-9 && (p.x - 25.0).hypot(p.y - 25.0) > 16.0),
+            "盒顶环带没被采样——精加工/过切都靠它"
+        );
+    }
+
     #[test]
     fn design_surface_points_cover_all_six_faces() {
         let d = box_design((0.0, 0.0, 0.0), (2.0, 2.0, 1.0));
         let pts: Vec<DVec3> = design_surface_points(&d, 1.0).collect();
         // 2+2 面各 4 点、4 个侧面各 2 点
-        assert_eq!(pts.len(), 2 * (2 * 2) + 4 * (2 * 1));
+        assert_eq!(pts.len(), 2 * (2 * 2) + 4 * 2);
         // 全部落在盒面上
         for &p in &pts {
             let sd = d.sdf(p);
@@ -492,9 +703,8 @@ mod tests {
                     let a = box_d.sdf(pt);
                     let b = field_d.sdf(pt);
                     // 符号必须一致
-                    assert_eq!(
+                    assert!(
                         a.signum() == b.signum() || a == 0.0 || b == 0.0,
-                        true,
                         "({i},{j},{k}) 符号不一致：box {a} vs field {b}"
                     );
                     // 带内距离差 ≤ 一个量化档 + 三线性误差。
@@ -527,16 +737,18 @@ mod tests {
         // 设计顶 z=5，刀（Ø6 平底）在 z=4.6 从 x=0 走到 x=10：
         // 顶面点在扫掠体内 0.4 mm——除了刀没经过的地方。
         let cutter = flat_end_mill(6.0, 20.0);
+        let tools = single_tool(&cutter);
         let segments = vec![CutSegment {
             from: Pose { tip: DVec3::new(0.0, 5.0, 4.6), axis: DVec3::Z },
             to: Pose { tip: DVec3::new(10.0, 5.0, 4.6), axis: DVec3::Z },
             block: 3,
             line: 7,
             t_start: 1.25,
+            tool: 1,
         }];
         let design = box_design((0.0, 0.0, 0.0), (10.0, 10.0, 5.0));
         let (depth, at, block, line, _t, n) =
-            analytic_gouge(&segments, &cutter, &design, 0.5, 0.005);
+            analytic_gouge(&segments, &tools, &design, 0.5, 0.005);
 
         assert!(n > 100, "设计面应有大量采样点：{n}");
         assert!((depth - 0.4).abs() < 0.002, "过切深度应为 0.4：{depth}");
@@ -552,16 +764,18 @@ mod tests {
     fn analytic_gouge_ignores_tangent_passes() {
         // 刀底平面恰好在设计顶面上（完美的面铣）→ sd_sweep = 0，不是过切。
         let cutter = flat_end_mill(6.0, 20.0);
+        let tools = single_tool(&cutter);
         let segments = vec![CutSegment {
             from: Pose { tip: DVec3::new(0.0, 5.0, 5.0), axis: DVec3::Z },
             to: Pose { tip: DVec3::new(10.0, 5.0, 5.0), axis: DVec3::Z },
             block: 0,
             line: 0,
             t_start: 0.0,
+            tool: 1,
         }];
         let design = box_design((0.0, 0.0, 0.0), (10.0, 10.0, 5.0));
         let (depth, _at, _b, _l, _t, _n) =
-            analytic_gouge(&segments, &cutter, &design, 0.5, 0.005);
+            analytic_gouge(&segments, &tools, &design, 0.5, 0.005);
         assert_eq!(depth, 0.0, "恰好切到设计面不算过切");
     }
 

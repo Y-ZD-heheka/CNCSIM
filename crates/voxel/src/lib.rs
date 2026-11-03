@@ -54,45 +54,56 @@ pub use tree::{
 ///
 /// **索引与颜色分开**：网格里只存这个 `u8` 索引，颜色表在 `cncsim_render`。
 /// 换配色、按刀隔离、单色模式都只改颜色表，**不重算仿真、不重传网格**。
-pub const PALETTE_LEN: usize = 16;
+pub const PALETTE_LEN: usize = 32;
 
-/// 可用切割色数（索引 1..=12）。
-pub const CUT_COLORS: u32 = 12;
+/// 可用切割色数（索引 1..=29）。
+pub const CUT_COLORS: u32 = 29;
 
 /// 调色板索引 `MIXED`：一片叶被 8 把以上的刀切过（叶级溯源只留最后一把，
 /// 所以实际不会产生这个值；保留它是为了与 ADR-005 的编码对齐）。
-pub const CREATOR_MIXED: u8 = 13;
+pub const CREATOR_MIXED: u8 = 30;
 
 /// 调色板索引 `SHANK`：刀柄/夹头这类"非切削件"。
-pub const CREATOR_SHANK: u8 = 14;
+pub const CREATOR_SHANK: u8 = 31;
 
-/// 第 `cut` 刀（第 `cut` 个**切削块**，从 0 数）对应的切割色索引（1..=12）。
+/// 每把刀按进度切成几段色（10 段 = 每 10% 换一种颜色）。
+pub const TOOL_SEGMENTS: u8 = 10;
+
+/// **一把刀内部的进度色**：按 10% 切段，返回该刀的第几段（0..=9）。
 ///
-/// **这是"刀刃颜色"和"切面颜色"唯一的共同定义**：仿真在切这一刀之前把它盖到
-/// 叶上（`SparseGrid::set_creator`），回放在同一刀把它交给刀具材质。
-/// 两边算的是同一个函数，所以"刀刃什么颜色、切出来的面就是什么颜色"
-/// 不靠约定，靠构造。
+/// 参数 `done` / `total` 是**这一把刀内部**已切 / 总切削块数。
 ///
-/// ## 为什么按"刀"而不是按"块"
-///
-/// 一个切削块（`G1`/`G2`/`G3`）就是一"刀"；块之间的快移、换刀、停延不切削，
-/// 不该占一个颜色。按块编号的话，一刀一刀之间夹着的 `G0` 会让颜色跳号
-/// （步距变成 2 或 4），渐变就不再是"一刀一格"了。
-/// 圆弧离散成几十段仍算**一刀**——按段着色会在同一刀内部变成噪点。
-///
-/// ## 为什么是**往返**（1→12→1）而不是取模循环
-///
-/// 取模的话第 12 刀（渐变最亮端）之后紧接着第 13 刀（最暗端），面上会出现
-/// 一条突变的分界线。往返让两端都连续：`1,2,…,12,11,…,2,1,2,…`，
-/// 周期 `2N−2 = 22`。代价是两个不同时刻的刀可能同色，但着色本来就是
-/// "看梯度"不是"读编码"，这点歧义换一条连续的带子值得。
+/// 早先按 254 级连续进度插值，视觉是平滑渐变；但用户要的是"一眼看出这块面
+/// 是哪把刀、哪个阶段切的"，渐变反而不如分档直观。所以回到**离散**：
+/// 每 10% 一段，段与段之间是硬边。
 #[inline]
-pub fn creator_of_cut(cut: u32) -> u8 {
-    const N: u32 = CUT_COLORS;
-    const PERIOD: u32 = 2 * N - 2;
-    let t = cut % PERIOD;
-    1 + if t < N { t } else { PERIOD - t } as u8
+pub fn tool_segment(done: u32, total: u32) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    ((done as u64 * TOOL_SEGMENTS as u64) / total as u64).min(TOOL_SEGMENTS as u64 - 1) as u8
 }
+
+/// **调色板索引** = 刀具号 × 10 段 + 段号，从 1 起。
+///
+/// - `tool` 是 `T` 字（1 起）；0 表示"没指定"，按第 1 把算。
+/// - 第 1 把刀占 1..=10，第 2 把占 11..=20，第 3 把占 21..=29（封顶）。
+/// - 上限 29：30 是 `CREATOR_MIXED`、31 是 `CREATOR_SHANK`。
+///
+/// **按刀具分组**是有意的：粗加工和精加工各自从 0→100%，每 10% 换一个颜色，
+/// 两族的色相/饱和度刻意拉开（粗加工饱和、精加工淡），一眼能分出"这片是谁切的"。
+#[inline]
+pub fn creator_of_tool_segment(tool: u16, done: u32, total: u32) -> u8 {
+    let base = (tool.saturating_sub(1).min(2) as u8) * TOOL_SEGMENTS;
+    (1 + base + tool_segment(done, total)).min(CUT_COLORS as u8)
+}
+
+/// 兼容旧名：单刀场景（`tool = 1`）下的 [`creator_of_tool_segment`]。
+#[inline]
+pub fn creator_of_progress(done: u32, total: u32) -> u8 {
+    creator_of_tool_segment(1, done, total)
+}
+
 
 /// 体素值类型——**这是精度的真正旋钮，不是 float 宽度**。
 ///
@@ -164,6 +175,50 @@ pub struct MeshData {
 }
 
 impl MeshData {
+    /// **用面积加权的面法线平均**重算全部顶点法线。
+    ///
+    /// 提取时每个顶点的法线是 SDF 的粗格中心差分（`vertex_of` 里 8 个角点），
+    /// 它带着**格子尺度**的噪声：R15 球面 k=4 时与解析法线中位差 1.94°，
+    /// 光照把这点角度放大成一圈圈「波纹」。面法线平均低通的是**网格本身**，
+    /// 贴的是真实几何而不是体素格。
+    ///
+    /// **必须在 [`Self::split_crease_normals`] 之后调**：硬边已经按夹角拆成
+    /// 独立顶点，每个顶点只累加同一侧的面，平均不会把棱角抹圆。
+    ///
+    /// 未归一化的叉积长度就是 2×面积，所以"直接累加不归一化"天然是面积权重，
+    /// 不需要再乘一次。
+    pub fn recompute_smooth_normals(&mut self) {
+        let n = self.positions.len();
+        if n == 0 || self.indices.len() < 3 || self.normals.len() != n {
+            return;
+        }
+        let mut acc = vec![[0.0f32; 3]; n];
+        for t in self.indices.as_chunks::<3>().0 {
+            let (ia, ib, ic) = (t[0] as usize, t[1] as usize, t[2] as usize);
+            let p0 = self.positions[ia];
+            let p1 = self.positions[ib];
+            let p2 = self.positions[ic];
+            let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            let cr = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            for i in [ia, ib, ic] {
+                acc[i][0] += cr[0];
+                acc[i][1] += cr[1];
+                acc[i][2] += cr[2];
+            }
+        }
+        for (i, a) in acc.iter().enumerate() {
+            let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+            if l > 1e-20 {
+                self.normals[i] = [a[0] / l, a[1] / l, a[2] / l];
+            }
+        }
+    }
+
     /// **按折痕角拆顶点**：把接近 90° 的棱做成硬边。
     ///
     /// Surface Nets 一格一个顶点，地板与立面**共用**同一个顶点，法向只能是折中的
@@ -343,6 +398,35 @@ pub fn color_bands(mesh: &MeshData) -> Vec<ColorBand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 面法线平均：两个成 90° 的面共边，共边顶点法线应是两者的角平分线。
+    #[test]
+    fn smooth_normals_average_adjacent_faces() {
+        let mut m = MeshData {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0], // 面 +Z
+                [0.0, 0.0, 1.0], // 面 +Y
+            ],
+            // 法线故意写错（全 +X），看它会不会被重算
+            normals: vec![[1.0, 0.0, 0.0]; 4],
+            colors: vec![[1, 128, 0, 255]; 4],
+            // 两个三角形共用 0-1 这条边
+            indices: vec![0, 1, 2, 0, 3, 1],
+            ..Default::default()
+        };
+        m.recompute_smooth_normals();
+        // 顶点 0、1 同时属于两个面 → 法线应该是两个面法线的矢量和
+        for i in [0usize, 1] {
+            let n = m.normals[i];
+            assert!(n[2] > 0.5, "顶点 {i} 的法线应带 +Z 分量：{n:?}");
+            assert!(n[1].abs() > 0.5, "顶点 {i} 的法线应带 Y 分量：{n:?}");
+        }
+        // 顶点 2 只属于一个面 → 法线就是那个面的法线（±Z）
+        assert!(m.normals[2][2].abs() > 0.99, "单面顶点的法线应贴合面：{:?}", m.normals[2]);
+    }
+
 
     #[test]
     fn default_config_is_standard_preset() {

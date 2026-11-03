@@ -34,6 +34,9 @@ pub struct BlockSpan {
     /// 判定必须与 `run` 逐字相同（`Linear | Arc`），否则刀刃和刚切出的面
     /// 会差一刀——那种错看起来像"颜色对不上"，很难往回追。
     pub cut: u32,
+    /// 这一块用的**刀号**（`Block::tool`）。窗口据此换刀体、`LiveCut` 据此
+    /// 用对母线切——粗加工与精加工的刀不是一个量级，用错就是把结果切坏。
+    pub tool: u16,
 }
 
 impl BlockSpan {
@@ -49,6 +52,8 @@ pub struct Frame {
     pub line: u32,
     /// 第几刀（非切削块为"即将切的那一刀"）。刀刃颜色由它决定。
     pub cut: u32,
+    /// 当前刀号（画哪把刀的旋转体 / 用哪条母线切）
+    pub tool: u16,
     pub pose: Pose,
 }
 
@@ -119,6 +124,7 @@ impl Playback {
                 to,
                 motion: block.motion,
                 cut: cut_here,
+                tool: block.tool,
             });
             if is_cut {
                 cut_ordinal += 1;
@@ -170,7 +176,7 @@ impl Playback {
                 axis: slerp(s.from.axis, s.to.axis, u),
             },
         };
-        Some(Frame { block: s.block, line: s.line, cut: s.cut, pose })
+        Some(Frame { block: s.block, line: s.line, cut: s.cut, tool: s.tool, pose })
     }
 }
 

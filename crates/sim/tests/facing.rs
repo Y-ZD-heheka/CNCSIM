@@ -39,13 +39,20 @@ fn facing_gives_one_band_per_pass() {
         cut.len(),
         cut.iter().map(|b| b.index).collect::<Vec<_>>()
     );
-    // 索引必须是 1..=10 各一次——有重复就说明两刀撞了同一个颜色
-    let idx: Vec<u8> = cut.iter().map(|b| b.index).collect();
+    // 色号 = 刀具号 × 10 段 + 进度段。面铣没有 T 字（刀号 0 → 按第 1 把算），
+    // 所以 10 刀正好落在 1..=10，每刀一段。
+    let mut idx: Vec<u8> = cut.iter().map(|b| b.index).collect();
+    idx.sort_unstable();
+    assert_eq!(idx[0], 1, "第一刀应是第 1 段（色号 1），实际 {}", idx[0]);
     assert_eq!(
-        idx,
-        (1..=demo::FACING_PASSES as u8).collect::<Vec<_>>(),
-        "带子索引应是 1..={} 且按顺序各出现一次",
-        demo::FACING_PASSES
+        *idx.last().unwrap(),
+        10,
+        "最后一刀应是第 10 段（色号 10），实际 {}",
+        idx.last().unwrap()
+    );
+    assert!(
+        idx.windows(2).all(|w| w[0] < w[1]),
+        "每刀的编码必须严格递增（有重复说明两刀撞了同一档）：{idx:?}"
     );
 }
 

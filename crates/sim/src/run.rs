@@ -34,7 +34,7 @@ use cncsim_gcode::MotionProgram;
 use cncsim_math::DVec3;
 use cncsim_motion::arc::{DEFAULT_ARC_SAGITTA, sample_arc};
 use cncsim_motion::{MotionKind, Pose, slerp};
-use cncsim_tool::ToolDef;
+use cncsim_tool::{ToolDef, ToolTable};
 use cncsim_voxel::{GridConfig, SparseGrid};
 
 /// 跑一次仿真需要的全部输入。
@@ -69,17 +69,22 @@ pub struct RunConfig {
     pub nonlinear_samples: usize,
     /// 溯源粒度：每片叶切成 `sub³` 个子块各存一个 creator（1 / 2 / 4 / 8）。
     ///
-    /// 1 = 每叶一个（最省），8 = 每个体素一个（最锐）。默认 **4**：
-    /// 实测最坏溢出 1→0.5→**0.1**→0.025 mm（sub = 1/2/4/8），
-    /// 而内存是 1/8/64/512 B per 叶——4 是拐点，8 花 8 倍内存只换来 0.075 mm。
-    /// 见 `crates/sim/tests/creator_granularity.rs`。
+    /// 1 = 每叶一个字节（最省），8 = 每个体素一个（最锐）。
+    ///
+    /// **默认 1**：颜色现在是 **254 级连续进度 + 着色器插值**，色带边界不再靠
+    /// 索引的锐度，而是靠顶点色插值。`sub = 4` 的 64 B/叶（R15 半球 31 MB）
+    /// 只换来"边界位置准 0.1 mm"，在渐变下看不出差别。
+    ///
+    /// 实测内存：sub = 1/2/4 → **0.5 / 3.9 / 31 MB**（50×50×100 毛坯）。
+    /// 溢出量：1/0.5/0.1 mm（`crates/sim/tests/creator_granularity.rs`）。
+    /// 需要"哪一刀切的"精确反查时再调大。
     pub creator_sub: u8,
 }
 
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
-            creator_sub: 4,
+            creator_sub: 1,
             grid: GridConfig::default(),
             stock_origin: DVec3::ZERO,
             // 20×20×20 mm，h=0.1
@@ -130,6 +135,11 @@ pub struct RunStats {
     pub volume_after: f64,
     /// 有多少块的进给是"每转"，时间只能按 mm/min 估（见模块文档）
     pub per_rev_feed_blocks: usize,
+    /// 刀库里**查不到**刀号的块数。这些块退回刀库第一把继续算——
+    /// 结果仍然给出，但刀不是程序要的那把，报告里有一条 `TOOL_MISSING`。
+    pub missing_tool_blocks: usize,
+    /// 程序里实际的换刀次数（刀号发生变化的块数，含 `M6` 那一次）
+    pub tool_changes: usize,
     /// 程序在哪里停下的（M0 / M2 / M30）。`None` = 跑到底。
     pub stopped_at: Option<(u32, cncsim_gcode::StopKind)>,
     /// 带停留的块数（G4 与固定循环的孔底暂停）
@@ -168,9 +178,18 @@ pub struct RunOutput {
     pub cut_segs: Vec<CutSegment>,
 }
 
-/// 跑完整个程序。
+/// 跑完整个程序（单刀）。
 pub fn run(program: &MotionProgram, tool: &ToolDef, cfg: &RunConfig) -> RunOutput {
-    run_observed(program, tool, cfg, |_| true)
+    run_tools(program, &ToolTable::single(tool.clone()), cfg)
+}
+
+/// 跑完整个程序（**刀库**）。每块按 `Block::tool` 查表换刀。
+///
+/// 粗加工平底刀 + 精加工球头刀是标准流程，而几何内核只认 profile——
+/// 所以"换刀"在内核里就是"这一块用另一条母线扫掠"。时间轴、溯源序号、
+/// 报告全部是**一份**：不因为换了刀就断成两段程序。
+pub fn run_tools(program: &MotionProgram, tools: &ToolTable, cfg: &RunConfig) -> RunOutput {
+    run_tools_observed(program, tools, cfg, |_| true)
 }
 
 /// 与 [`run`] 相同，但每块开始前回调一次观察者。
@@ -185,6 +204,16 @@ pub fn run(program: &MotionProgram, tool: &ToolDef, cfg: &RunConfig) -> RunOutpu
 pub fn run_observed(
     program: &MotionProgram,
     tool: &ToolDef,
+    cfg: &RunConfig,
+    observer: impl FnMut(&Progress) -> bool,
+) -> RunOutput {
+    run_tools_observed(program, &ToolTable::single(tool.clone()), cfg, observer)
+}
+
+/// [`run_tools`] 的观察者版本。
+pub fn run_tools_observed(
+    program: &MotionProgram,
+    tools: &ToolTable,
     cfg: &RunConfig,
     mut observer: impl FnMut(&Progress) -> bool,
 ) -> RunOutput {
@@ -204,10 +233,16 @@ pub fn run_observed(
     grid.prune();
     stats.volume_before = grid.material_volume();
 
-    // ── 刀杆采样（碰撞用）──
-    let body = cfg
-        .collide
-        .then(|| SurfaceBody::revolve(&tool.shank, cfg.shank_gap, cfg.shank_gap));
+    // ── 刀杆采样（碰撞用）——**每把刀一份** ──
+    //
+    // 采样点只取决于刀杆母线，所以整个程序跑一遍只算一次；按刀库顺序存，
+    // 换刀时按块查下标。别在循环里现算：一个 `SurfaceBody::revolve` 是
+    // 3500 个点，逐块重算会把碰撞检查从 0.5 ms 抬到几毫秒。
+    let bodies: Vec<Option<SurfaceBody>> = tools
+        .entries()
+        .iter()
+        .map(|t| cfg.collide.then(|| SurfaceBody::revolve(&t.shank, cfg.shank_gap, cfg.shank_gap)))
+        .collect();
 
     // ── 逐块推进 ──
     let mut prev = program
@@ -234,21 +269,33 @@ pub fn run_observed(
 
     let mut stopped_at = None;
     let mut cancelled_at: Option<u32> = None;
-    // 已经开始的"第几刀"。**只数切削块**（`G1`/`G2`/`G3`），
-    // 快移、停延、换刀不占颜色索引——否则一刀一刀之间夹着的 `G0`
-    // 会让渐变跳号（见 `cncsim_voxel::creator_of_cut`）。
-    let mut cut_ordinal: u32 = 0;
+    // 着色按"**工序内**进度"分 10 档：粗加工和精加工各自 0→100%。
+    // 只数切削块（`G1`/`G2`/`G3`）——快移、停延、换刀不该让进度虚涨，
+    // 否则一次抬刀横移就能让颜色跳一档（见 `cncsim_voxel::creator_of_progress`）。
+    // 用全局进度的话，粗加工 62% 的刀数会吃掉前 6 档，球面只剩 4 档——
+    // 而球面恰恰是最想看渐变的地方。
+    let mut cuts_total: std::collections::BTreeMap<u16, u32> = Default::default();
+    for b in &program.blocks {
+        if matches!(b.motion, MotionKind::Linear | MotionKind::Arc { .. }) {
+            *cuts_total.entry(b.tool).or_insert(0) += 1;
+        }
+    }
+    let mut cuts_done: std::collections::BTreeMap<u16, u32> = Default::default();
+    // 上一块用的刀号：用来数换刀次数（同一把刀连写两行 `T1` 不算换刀）
+    let mut prev_tool: Option<u16> = None;
 
     for (bi, block) in program.blocks.iter().enumerate() {
-        // ── 溯源：这一刀切削出来的面盖上"第几刀"的调色板索引（ADR-005）──
+        // ── 溯源：这一刀切削出来的面盖上进度档位的调色板索引（ADR-005）──
         //
         // 盖在**刀**上而不是插补段上：一段圆弧会离散成几十段，按段着色会在同一刀
-        // 内部变成噪点。索引函数与渲染层取刀刃颜色用的是同一个 `creator_of_cut`，
+        // 内部变成噪点。索引函数与渲染层取刀刃颜色用的是同一个 `creator_of_progress`，
         // 所以"刀刃什么颜色、切出来的面就是什么颜色"是构造保证的。
         let is_cut = matches!(block.motion, MotionKind::Linear | MotionKind::Arc { .. });
         if is_cut {
-            grid.set_creator(cncsim_voxel::creator_of_cut(cut_ordinal));
-            cut_ordinal += 1;
+            let done = cuts_done.get(&block.tool).copied().unwrap_or(0);
+            let total = cuts_total.get(&block.tool).copied().unwrap_or(1);
+            grid.set_creator(cncsim_voxel::creator_of_tool_segment(block.tool, done, total));
+            *cuts_done.entry(block.tool).or_insert(0) += 1;
         }
 
         // ── 进度观察 + 取消检查（块边界）──
@@ -280,6 +327,30 @@ pub fn run_observed(
         let to = block.target;
         // 与上面 `is_cut` 同一判据（切削块 = 一刀）
         let cutting = is_cut;
+
+        // ── 本块用哪把刀 ──
+        //
+        // `T` 字是**可选**的：绝大多数三轴程序不写换刀，`Block::tool` 保持初值 0。
+        // 0 表示"没指定"，直接取第一把——这不是缺刀，别报错。反过来，写了 T3
+        // 而刀库里没有 T3 才是真的错：**退回第一把继续算，但记一条 Error**。
+        let (tool_idx, tool) = if block.tool == 0 {
+            (0, tools.first())
+        } else {
+            match tools.entries().iter().position(|t| t.number == block.tool) {
+                Some(i) => (i, &tools.entries()[i]),
+                None => {
+                    stats.missing_tool_blocks += 1;
+                    (0, tools.first())
+                }
+            }
+        };
+        if prev_tool != Some(block.tool) {
+            if prev_tool.is_some() {
+                stats.tool_changes += 1;
+            }
+            prev_tool = Some(block.tool);
+            // 换刀那一切的刀刃颜色不该跟着变——`cut_ordinal` 不动。
+        }
 
         // ⓪ 非线性误差（`docs/技术方案` §4.6）：这段程序若被控制器按
         // **关节空间线性插补**执行，刀尖会偏离 CAM 意图的直线多少。
@@ -339,6 +410,7 @@ pub fn run_observed(
                         block: bi as u32,
                         line: block.line_no,
                         t_start: sim_time,
+                        tool: tool.number,
                     });
                 }
                 let t0 = std::time::Instant::now();
@@ -350,7 +422,7 @@ pub fn run_observed(
             }
 
             // ② 碰撞（快移也查：真实撞机大多是 G0 撞夹具）
-            if let Some(b) = &body {
+            if let Some(b) = &bodies[tool_idx] {
                 let t0 = std::time::Instant::now();
                 if let Some(c) = check_shank(&grid, b, &tool.shank, &cur, &next) {
                     record_collision(&mut collisions, &c, sim_time, bi, block.line_no, cfg.episode_gap);
@@ -395,7 +467,7 @@ pub fn run_observed(
             &grid,
             cfg.stock_size,
             &cut_segs,
-            &tool.cutter,
+            tools,
             design,
             cfg.design_step,
             cfg.gouge_tol,
@@ -453,6 +525,20 @@ pub fn run_observed(
                 format!("程序在第 {line} 行停下（{kind:?}）"),
             )
             .with_hint("M0/M2/M30 之后的代码没有被仿真；要跑完请去掉停机指令"),
+        );
+    }
+    if stats.missing_tool_blocks > 0 {
+        report.alarms.push(
+            Alarm::new(
+                "TOOL_MISSING",
+                Severity::Error,
+                format!(
+                    "{} 个块引用了刀库里没有的刀号，已退回 T{} 继续计算",
+                    stats.missing_tool_blocks,
+                    tools.first().number
+                ),
+            )
+            .with_hint("把该刀号补进刀库（.machine.ron 或调用方），否则这一段的切削量不作数"),
         );
     }
     if stats.per_rev_feed_blocks > 0 {
@@ -691,6 +777,44 @@ mod tests {
     /// 刀尖在 z=9.5（毛坯顶面 z=10 之下 0.5 mm）走一条直线槽 → 切到料，不撞刀杆
     const SAFE: &str = "G0 X2 Y10 Z9.5\nG1 X18 F300\nM30\n";
 
+    /// 没有 `T` 字的程序（绝大多数三轴程序）**不该报缺刀**。
+    ///
+    /// `Block::tool` 的初值是 0，而刀库里的刀号通常从 1 开始。早先直接按 0 查表
+    /// → `None` → 每个块都记一次 `TOOL_MISSING`，面铣演示直接满屏红字。
+    /// 0 是「没指定」，不是「0 号刀」。
+    #[test]
+    fn t_word_is_optional() {
+        let prog = interpret(SAFE, &InterpConfig::default());
+        let out = run(&prog, &tool(), &cfg());
+        assert_eq!(out.stats.missing_tool_blocks, 0, "没写 T 不该算缺刀");
+        assert!(
+            !out.report.alarms.iter().any(|a| a.id == "TOOL_MISSING"),
+            "报警：{:?}",
+            out.report.alarms.iter().map(|a| a.id).collect::<Vec<_>>()
+        );
+        assert!(out.report.removed_volume_mm3 > 0.0);
+    }
+
+    /// 写了刀库里没有的刀号才是真错：**退回第一把继续算**，但必须报 Error。
+    #[test]
+    fn unknown_tool_number_falls_back_and_warns() {
+        let prog = interpret(
+            "T7\nG0 X2 Y10 Z9.5\nG1 X18 F300\nM30\n",
+            &InterpConfig::default(),
+        );
+        let out = run(&prog, &tool(), &cfg());
+        assert!(out.stats.missing_tool_blocks > 0, "T7 不在刀库里，应计数");
+        let a = out
+            .report
+            .alarms
+            .iter()
+            .find(|a| a.id == "TOOL_MISSING")
+            .expect("应有 TOOL_MISSING");
+        assert_eq!(a.severity, Severity::Error, "用错刀是「结果不可信」，不是提醒");
+        // 退回第一把照样切出料来——「能跑，但结果不可信」就是这一级
+        assert!(out.report.removed_volume_mm3 > 0.0);
+    }
+
     /// 刀尖压到 z=−5 → 刀杆（z≥20）还在毛坯上方，仍然安全
     const DEEP_CUT: &str = "G0 X2 Y10 Z-5\nG1 X18 F300\nM30\n";
 
@@ -704,12 +828,12 @@ mod tests {
     }
 
     /// 端到端：仿真按块盖的溯源标记，必须原样出现在提取出来的网格里，
-    /// 而且**相邻两块不同色**——这正是"每次切割变颜色"的判据。
+    /// 而且**颜色按加工进度连续编码**（1..=255，254 级）——这正是"每一刀都变一点色"的判据。
     ///
     /// 这条把 `run` → `SparseGrid::set_creator` → `extract_surface` 三段串起来；
     /// 任何一段漏了，下面看到的索引就会全 0 或者全相同。
     #[test]
-    fn cut_surface_colors_follow_the_block_index() {
+    fn cut_surface_colors_follow_the_progress() {
         // 三段直线，每段一个块 → 三个不同的切割色
         let out = run_src("G0 X2 Y5 Z9.5\nG1 X18 F300\nG1 Y10\nG1 Y15\nM30\n");
         let m = out.grid.extract_surface_lod(2);
@@ -718,21 +842,26 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for c in &m.colors {
             seen.insert(c[0]);
-            assert!(
-                c[0] == 0 || (1..=cncsim_voxel::CUT_COLORS as u8).contains(&c[0]),
-                "索引 {} 既不是毛坯面 0 也不是切割色 1..=12",
-                c[0]
-            );
+            // 0 = 没被切过的毛坯面；非 0 是进度编码（1..=255）。
+            // 早先这里是 1..=12 的调色板下标，改 254 级之后取值范围就是整个 u8，
+            // 范围断言失去意义——真正要锁的是下面"三种颜色"和"单调"。
         }
         let cut: Vec<u8> = seen.iter().copied().filter(|c| *c != 0).collect();
         assert!(
             cut.len() >= 3,
-            "三段切削应该至少留下 3 种颜色，实际只有 {cut:?}（说明溯源没按块区分）"
+            "三段切削应该至少留下 3 种编码，实际只有 {cut:?}（说明溯源没按块区分）"
         );
-        // 相邻两刀必须不同色——与 `creator_of_cut` 的往返周期一致
-        for w in cut.windows(2) {
-            assert_ne!(w[0], w[1], "相邻的切割色相同：{cut:?}");
-        }
+        // 254 级的判据：3 刀走完 254 级，相邻两刀至少差 1 级
+        assert!(
+            cut.windows(2).all(|w| w[0] < w[1]),
+            "编码必须严格递增（后切的更黄）：{cut:?}"
+        );
+        // 进度色**单调不减**（BTreeSet 已排序）：先切的面不会比后切的亮。
+        // 同一档内的多刀同色是正常的——这正是"每 10% 换一次"的含义。
+        assert!(
+            cut.windows(2).all(|w| w[0] <= w[1]),
+            "进度色不该倒退：{cut:?}"
+        );
     }
 
     #[test]
