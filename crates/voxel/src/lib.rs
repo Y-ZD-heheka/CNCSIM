@@ -24,8 +24,10 @@
 //! | [`fxhash`] | 整数键哈希（替掉 SipHash） |
 //! | [`par`] | 零依赖 fork-join（叶 / 体素 / 粗格级零共享） |
 //! | [`leafset`] | 叶坐标集合（位图 / 哈希集回退） |
+//! | [`components`] | 连通块清理（丢掉切下来还挂着的悬浮碎屑） |
 
 pub mod cellmap;
+pub mod components;
 pub mod cut;
 pub mod extract;
 pub mod fxhash;

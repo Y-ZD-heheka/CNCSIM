@@ -1,6 +1,6 @@
-//! **半球凸台场景**：50×50×100 毛坯，顶面铣掉一圈，中间留下一个 R15 的**凸**半球。
+//! **半球凸台场景**：50×50×40 毛坯，顶面铣掉一圈，中间留下一个 R15 的**凸**半球。
 //!
-//! 球心放在 `z = 85`（顶面下 15 mm）：上半球正好顶到 z=100，赤道落在 z=85 的
+//! 球心放在 `z = 24`（顶面下 16 mm）：球顶在 z=39，赤道落在 z=24 的
 //! 底面平面上。要去掉的是「顶面下面 15 mm 里、球面以外」的 ~30 000 mm³。
 //!
 //! | 工序 | 刀 | 策略 | 留量 |
@@ -30,7 +30,7 @@
 //! ```
 //!
 //! θ 从 `acos(r_b/(R+r_b)) = 88.15°` 走到 0°。**起点不是随便取的**：再往外
-//! 刀尖就低于底面 z=85 了（刀尖 z = 85 + (R+r_b)cosθ − r_b ≥ 85 ⟺ cosθ ≥ r_b/(R+r_b)）。
+//! 刀尖就低于底面 z=24 了（刀尖 z = 24 + (R+r_b)cosθ − r_b ≥ 24 ⟺ cosθ ≥ r_b/(R+r_b)）。
 //! 于是赤道根部必然留一圈 R0.5 的清角残料——球头刀在「竖直面与水平面的内角」
 //! 处本来就清不干净，报告里的残留会如实报出来。
 //!
@@ -48,21 +48,21 @@
 use cncsim_math::{DVec2, DVec3};
 use cncsim_tool::{CutterKind, Profile, ToolDef, flat_end_mill, tapered_ball_end_mill};
 
-/// 毛坯尺寸（mm）：50 × 50 × 100
-pub const STOCK_MM: [f64; 3] = [50.0, 50.0, 100.0];
+/// 毛坯尺寸（mm）：50 × 50 × 40
+pub const STOCK_MM: [f64; 3] = [50.0, 50.0, 40.0];
 
 /// 凸台球半径（mm）
 pub const DOME_R: f64 = 15.0;
-/// 球心。球顶 = `z + R = 99`，**比毛坯顶面低 1 mm**。
+/// 球心。球顶 = `z + R = 39`，**比毛坯顶面低 1 mm**。
 ///
-/// 这一毫米是刻意的：球顶若正好落在毛坯顶面（z=100）上，球顶周围半径
+/// 这一毫米是刻意的：球顶若正好落在毛坯顶面（z=40）上，球顶周围半径
 /// `√(2R·a) ≈ 3.9` 以内那层球冠**任何刀具都够不到**——要切它就得比它更靠近
 /// 球顶，而一靠近就切进球。实测那样会在成品球顶留一块 6 mm 见方的**毛坯面**
 /// （色索引 0，灰的），体积 12.8 mm³。
 ///
 /// 降 1 mm 之后，第一刀**面铣**（平底刀，刀底正好在球顶平面）能切掉这一层：
 /// 平的刀底与球顶相切不算切球，球头刀做不到这件事。
-pub const DOME_CENTER: DVec3 = DVec3::new(25.0, 25.0, 84.0);
+pub const DOME_CENTER: DVec3 = DVec3::new(25.0, 25.0, 24.0);
 
 /// 粗加工法向留量（mm）
 pub const ROUGH_ALLOW_MM: f64 = 0.5;
@@ -156,7 +156,7 @@ pub fn rough_min_center_radius(z_tip: f64) -> f64 {
 
 /// 上层的圆走到这个半径就停：**再往外的料由底层那一刀一次切掉**。
 ///
-/// 刀具刃长 20 > 加工深度 15，所以底层（z=85）那一刀的刀身覆盖 `85..105`，
+/// 刀具刃长 20 > 加工深度 15，所以底层（z=24）那一刀的刀身覆盖 `24..44`，
 /// 半径 ≥ 15.02 的部分在整个高度上都被它清了。上层只需要补"球面周围那一圈"。
 /// 少了这一条，每层都要走到 36，路径长 4 倍（15.5 分钟 vs 4.3 分钟）。
 pub fn rough_ring_cap() -> f64 {
@@ -168,8 +168,8 @@ pub const DOME_TOP: f64 = DOME_CENTER.z + DOME_R;
 
 /// 面铣层的**刀心**半径序列：刀径 6、步距 4，从中心铺到 `rough_ring_cap()`。
 ///
-/// 只铺到 `cap`（18.02）就够：再往外的 `z ∈ [DOME_TOP, 100]` 那薄薄一层由
-/// 下一层（z=98）的刀身切掉——刃长 20，刀身在 z 方向从 98 一直到 118。
+/// 只铺到 `cap`（18.02）就够：再往外的 `z ∈ [DOME_TOP, 40]` 那薄薄一层由
+/// 下一层（z=38）的刀身切掉——刃长 20，刀身在 z 方向从 38 一直到 58。
 pub fn face_mill_rings() -> Vec<f64> {
     let r_tool = rough_tool().cutter.max_radius();
     let cap = rough_ring_cap();
@@ -182,9 +182,9 @@ pub fn face_mill_rings() -> Vec<f64> {
     out
 }
 
-/// 粗加工的层深（刀尖 z），**从上往下**：98, 97, …, 85，最后一层 84（底面）。
+/// 粗加工的层深（刀尖 z），**从上往下**：38, 37, …, 25，最后一层 24（底面）。
 ///
-/// 第一层不是 99：那是**面铣层**（刀底正好在球顶平面），单独由
+/// 第一层不是 39：那是**面铣层**（刀底正好在球顶平面），单独由
 /// [`face_mill_rings`] 生成——它的内缘约束是 0，不是"离球面 allow"。
 ///
 /// 先切上面：台阶朝下，精加工从上往下扫时是顺铣；反过来会在每层台阶的
@@ -199,7 +199,7 @@ pub fn rough_levels() -> Vec<f64> {
         }
         out.push(z);
     }
-    out.push(DOME_CENTER.z); // 底面那一层：刀底正好落在 z=84
+    out.push(DOME_CENTER.z); // 底面那一层：刀底正好落在 z=24
     out
 }
 
@@ -266,16 +266,17 @@ pub fn finish_tip_path() -> Vec<DVec3> {
 pub fn gcode() -> String {
     let (cx, cy) = (DOME_CENTER.x, DOME_CENTER.y);
     let mut s = String::new();
-    s.push_str("(半球凸台 R15 / 50x50x100 · T1 粗加工 + T2 精加工)\n");
+    s.push_str("(半球凸台 R15 / 50x50x40 · T1 粗加工 + T2 精加工)\n");
     s.push_str("G21 G90 G17 G94\n");
 
-    // ── T1 面铣：把顶面切到球顶平面（z=99） ──
+    // ── T1 面铣：把顶面切到球顶平面（z=39） ──
     //
     // **这一刀是必需的**，不是"顺带"。球顶若与毛坯顶面平齐，球顶周围半径
     // `√(2R·a)≈3.9` 的那层球冠没有任何刀具够得到（球头刀一靠近就切进球），
     // 成品上会留一块 6 mm 见方的毛坯面。平底刀的刀底是平的，能和球顶相切着
     // 扫过去——这是球头刀做不到的事。
-    s.push_str("T1 M6 G0 Z105 F800\n");
+    let safe_z = STOCK_MM[2] + 15.0;
+    s.push_str(&format!("T1 M6 G0 Z{safe_z:.0} F800\n"));
     s.push_str(&format!(
         "G0 X{:.4} Y{:.4}\nG1 Z{:.4} F200\n",
         cx, cy, DOME_TOP
@@ -297,7 +298,7 @@ pub fn gcode() -> String {
             continue; // 这一层要切的环带是空的（底层已经覆盖到）
         }
         s.push_str(&format!(
-            "G0 Z105\nG0 X{:.4} Y{:.4}\nG1 Z{z:.4} F200\n",
+            "G0 Z{safe_z:.0}\nG0 X{:.4} Y{:.4}\nG1 Z{z:.4} F200\n",
             cx + r0,
             cy
         ));
@@ -315,14 +316,14 @@ pub fn gcode() -> String {
     // ── T2 精加工 ──
     let path = finish_tip_path();
     let first = path[0];
-    s.push_str("T2 M6 G0 Z105 F800\n");
+    s.push_str(&format!("T2 M6 G0 Z{safe_z:.0} F800\n"));
     // 4 位小数 = 0.1 µm：相切关系要能在这份文本里活下来（测试锁 2e-4）
-    s.push_str(&format!("G0 X{:.4} Y{:.4} Z102\n", first.x, first.y));
+    s.push_str(&format!("G0 X{:.4} Y{:.4} Z{:.0}\n", first.x, first.y, safe_z - 3.0));
     s.push_str(&format!("G1 Z{:.4} F300\n", first.z));
     for p in &path[1..] {
         s.push_str(&format!("G1 X{:.4} Y{:.4} Z{:.4} F600\n", p.x, p.y, p.z));
     }
-    s.push_str("G0 Z105\nM30\n");
+    s.push_str(&format!("G0 Z{safe_z:.0}\nM30\n"));
     s
 }
 
@@ -417,7 +418,7 @@ mod tests {
 
     /// **四个角必须削到**：方形毛坯的对角（35.4）比边（25）远 41%。同心圆只走到边，
     /// 会在四角留下一根 15 mm 高的料柱——第一版实测残留 3169 mm³ / 最厚 15.000 mm，
-    /// 报的位置就是 (1.1, 1.1, 100)。
+    /// 报的位置就是 (1.1, 1.1, 40)。
     #[test]
     fn roughing_clears_the_four_corners() {
         let r_tool = rough_tool().cutter.max_radius();
@@ -470,7 +471,7 @@ mod tests {
     #[test]
     fn roughing_finishes_the_floor() {
         let levels = rough_levels();
-        assert_eq!(*levels.last().unwrap(), DOME_CENTER.z, "最后一层应落在底面 z=84");
+        assert_eq!(*levels.last().unwrap(), DOME_CENTER.z, "最后一层应落在底面 z=24");
         assert!(levels.windows(2).all(|w| w[0] > w[1]), "层序必须从上往下：{levels:?}");
         let r0 = rough_min_center_radius(DOME_CENTER.z);
         let inner = r0 - rough_tool().cutter.max_radius();
@@ -511,11 +512,11 @@ mod tests {
         assert!((first.z - DOME_CENTER.z).abs() < 1e-9, "起点刀尖应正好在底面上：{}", first.z);
         assert!(
             (last.z - (DOME_CENTER.z + DOME_R)).abs() < 1e-9,
-            "终点应在球顶 z=100：{}",
+            "终点应在球顶 z=39：{}",
             last.z
         );
         assert!((last.x - 25.0).powi(2) + (last.y - 25.0).powi(2) < 1e-18, "终点应在轴上");
-        // 全程不得低于底面（刀尖 z ≥ 85）
+        // 全程不得低于底面（刀尖 z ≥ 24）
         let lowest = path.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
         assert!(lowest >= DOME_CENTER.z - 1e-9, "有刀尖落到球心平面以下：{lowest}");
         let mut worst = 0.0f64;

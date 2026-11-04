@@ -229,7 +229,7 @@ uniform mat4 uVP;
 uniform mat4 uModel;
 out vec3 vN;
 out vec3 vP;
-out vec4 vC;
+flat out vec4 vC;
 void main(){
   vec4 wp = uModel * vec4(aPos, 1.0);
   vP = wp.xyz;
@@ -242,7 +242,7 @@ const FS = `#version 300 es
 precision highp float;
 in vec3 vN;
 in vec3 vP;
-in vec4 vC;
+flat in vec4 vC;
 uniform int uFlat;
 // **剖切平面**：世界 z 超过它就丢弃片元。五轴件的内腔不剖开根本看不见。
 uniform float uClipZ;
@@ -318,16 +318,19 @@ gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibuf);
 gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, IDX, gl.STATIC_DRAW);
 
 // ── 地面参考网格（给一个"哪边是上"的锚点）──
+//
+// **模型是 Z-up**（毛坯高度沿 z，与 G 代码一致），所以地面是 z = 底面 − 0.8
+// 的 X-Y 平面。早先按 Y-up 铺在 X-Z 平面上，零件看上去像"躺着"，地面也立着。
 function makeGrid(){
-  const span = Math.max(HI[0]-LO[0], HI[2]-LO[2]) * 0.9 + 4.0;
-  const cx = (HI[0]+LO[0])/2, cz = (HI[2]+LO[2])/2;
-  const y = LO[1] - 0.8;
+  const span = Math.max(HI[0]-LO[0], HI[1]-LO[1]) * 1.2 + 4.0;
+  const cx = (HI[0]+LO[0])/2, cy = (HI[1]+LO[1])/2;
+  const z = LO[2] - 0.8;
   const step = Math.max(1.0, Math.pow(10, Math.round(Math.log10(span/10))));
   const n = Math.ceil(span / step) + 1;
   const v = [];
   for (let i = -n; i <= n; i++) {
-    v.push(cx + i*step, y, cz - n*step,  cx + i*step, y, cz + n*step);
-    v.push(cx - n*step, y, cz + i*step,  cx + n*step, y, cz + i*step);
+    v.push(cx + i*step, cy - n*step, z,  cx + i*step, cy + n*step, z);
+    v.push(cx - n*step, cy + i*step, z,  cx + n*step, cy + i*step, z);
   }
   return new Float32Array(v);
 }
@@ -347,7 +350,9 @@ gl.vertexAttrib4f(2, 0.0, 128.0/255.0, 0.0, 1.0);
 // ── 相机 ──
 const center = [(HI[0]+LO[0])/2, (HI[1]+LO[1])/2, (HI[2]+LO[2])/2];
 const radius = Math.max(1e-3, 0.5 * Math.hypot(HI[0]-LO[0], HI[1]-LO[1], HI[2]-LO[2]));
-let yaw = -0.9, pitch = 0.55, dist = radius * 2.6;
+// **Z-up 轨道相机**：模型、剖切平面、网格都以 z 为竖直轴。默认距离 2.45R
+// 让毛坯尽量填满画面；早期是 2.6R，顶部半球只占中间一小块。
+let yaw = -1.2, pitch = 0.45, dist = radius * 2.45;
 
 function perspective(fovy, aspect, near, far){
   const f = 1 / Math.tan(fovy / 2);
@@ -410,10 +415,10 @@ function draw(){
   gl.enable(gl.DEPTH_TEST);
 
   const cp = Math.cos(pitch), sp = Math.sin(pitch);
-  const dir = [Math.cos(yaw)*cp, sp, Math.sin(yaw)*cp];
+  const dir = [Math.cos(yaw)*cp, Math.sin(yaw)*cp, sp];
   const eye = [center[0]+dir[0]*dist, center[1]+dir[1]*dist, center[2]+dir[2]*dist];
   const proj = perspective(0.8, canvas.width / canvas.height, Math.max(0.01, dist*0.01), dist*40 + radius*8);
-  const view = lookAt(eye, center, [0,1,0]);
+  const view = lookAt(eye, center, [0,0,1]);
   const vp = mul(proj, view);
 
   // 探针：把包围盒 8 个角投到 NDC，给自动化检查用（也方便手抖时排查"为什么白屏"）
@@ -473,7 +478,7 @@ canvas.addEventListener('wheel', e => {
   dist = Math.max(radius * 0.15, Math.min(radius * 40, dist));
 }, {passive:false});
 canvas.addEventListener('dblclick', () => {
-  yaw = -0.9; pitch = 0.55; dist = radius * 2.6;
+  yaw = -1.2; pitch = 0.45; dist = radius * 2.45;
 });
 </script>
 </body>
@@ -517,6 +522,18 @@ mod tests {
             }
         }
         assert!(html.contains(&base64(&bytes)), "位置数据没有内嵌进去");
+    }
+
+    #[test]
+    fn palette_indices_use_flat_interpolation_in_both_renderers() {
+        let html = build_html(&tri(), "t");
+        assert!(html.contains("flat out vec4 vC;"), "WebGL 顶点输出仍在插值调色板编号");
+        assert!(html.contains("flat in vec4 vC;"), "WebGL 片元输入仍在插值调色板编号");
+        let wesl = include_str!("../../../assets/shaders/cut.wesl");
+        assert!(
+            wesl.contains("@location(5) @interpolate(flat) color: vec4<f32>"),
+            "窗口着色器仍在插值调色板编号，跨色三角形会生成第三种颜色"
+        );
     }
 
     #[test]

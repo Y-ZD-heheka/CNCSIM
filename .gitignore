@@ -29,6 +29,9 @@ Thumbs.db
 /tools/ovdb_bench/*.exe
 /tools/ovdb_bench/*.dll
 
+# 用户自备的测试模型（单个可到 75 MB，不入库；用 --cam 指向本地路径即可）
+/stls/
+
 # agent / 编辑器工具的元数据，不属于项目本身
 /.workbuddy/
 /.workbuddy-ai/

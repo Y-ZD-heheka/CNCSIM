@@ -1,0 +1,18 @@
+[package]
+name = "cncsim-cam"
+description = "CAM：三角网格 → 高度场 → 3 轴粗加工 / 平行精加工 → G 代码"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cncsim-math.workspace = true
+cncsim-tool.workspace = true
+
+[dev-dependencies]
+# 端到端验收：生成 → 解释器 → 仿真 → 设计比对。
+# 只是测试依赖，不进入 cam 的正常依赖图。
+cncsim-gcode.workspace = true
+cncsim-sim.workspace = true
+cncsim-voxel.workspace = true

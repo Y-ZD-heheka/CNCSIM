@@ -241,8 +241,12 @@ impl TileCache {
 /// 逐字节比较两个网格（先比长度，再比内容）。用来决定"这块要不要重传"。
 fn same_mesh(a: &MeshData, b: &MeshData) -> bool {
     a.positions.len() == b.positions.len()
+        && a.normals.len() == b.normals.len()
+        && a.colors.len() == b.colors.len()
         && a.indices.len() == b.indices.len()
         && a.positions.iter().zip(&b.positions).all(|(x, y)| x == y)
+        && a.normals == b.normals
+        && a.colors == b.colors
         && a.indices == b.indices
 }
 
@@ -292,6 +296,23 @@ mod tests {
             },
             &flat_end_mill(6.0, 20.0),
         );
+    }
+
+    #[test]
+    fn color_only_change_must_be_uploaded() {
+        let a = MeshData {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+            colors: vec![[3, 128, 0, 255]; 3],
+            ..Default::default()
+        };
+        let mut b = a.clone();
+        b.colors[1][0] = 7;
+        assert!(!same_mesh(&a, &b), "几何没变、只变 creator 也必须重传");
+        b.colors = a.colors.clone();
+        b.normals[1] = [0.0, 1.0, 0.0];
+        assert!(!same_mesh(&a, &b), "法向变化同样影响最终画面");
     }
 
     #[test]

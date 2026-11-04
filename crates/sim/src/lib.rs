@@ -12,6 +12,7 @@ pub mod job;
 pub mod playback;
 pub mod run;
 pub mod stock;
+pub mod surface_dev;
 
 use cncsim_math::DVec3;
 
@@ -91,6 +92,8 @@ pub struct SimReport {
     pub programmed_time_s: f64,
     pub actual_time_s: f64,
     pub removed_volume_mm3: f64,
+    /// 作为**悬浮碎屑**丢掉的体素数（`RunConfig::drop_chips` 打开时才有）。
+    pub chip_voxels: usize,
     pub gouge_volume_mm3: f64,
     /// 过切最大深度（解析扫掠点测试，mm）。0 = 没有超阈值的过切。
     ///

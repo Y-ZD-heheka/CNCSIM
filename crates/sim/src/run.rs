@@ -71,20 +71,24 @@ pub struct RunConfig {
     ///
     /// 1 = 每叶一个字节（最省），8 = 每个体素一个（最锐）。
     ///
-    /// **默认 1**：颜色现在是 **254 级连续进度 + 着色器插值**，色带边界不再靠
-    /// 索引的锐度，而是靠顶点色插值。`sub = 4` 的 64 B/叶（R15 半球 31 MB）
-    /// 只换来"边界位置准 0.1 mm"，在渐变下看不出差别。
+    /// **默认 8（每体素一个标记）**：只有真正被本刀去除材料（材料→空气）的
+    /// 体素继承颜色，擦过旧面不改色。内存 512 B/叶；R15 半球凸台实测 **49 MB**
+    /// （满叶理论上限 250 MB），切削比 sub=1 慢约 30%；精度优先。
     ///
-    /// 实测内存：sub = 1/2/4 → **0.5 / 3.9 / 31 MB**（50×50×100 毛坯）。
-    /// 溢出量：1/0.5/0.1 mm（`crates/sim/tests/creator_granularity.rs`）。
-    /// 需要"哪一刀切的"精确反查时再调大。
+    /// 大毛坯只关心形状时可显式调小；`set_creator(0)` 会完全关闭溯源。
     pub creator_sub: u8,
+    /// 跑完丢掉与主体不连通的材料块（**悬浮碎屑**）。
+    ///
+    /// 体素 CSG 只做去除、不管"切下来的那块还连着没有"：真实切削里它会掉下来
+    /// 变成切屑，场里却原地飘着，预览上就是一层莫名其妙的小方块。打开后做一次
+    /// 6 邻域连通块标记，只留最大块。代价约 O(毛坯域体素)，花瓶中 h=1 约 0.3 s。
+    pub drop_chips: bool,
 }
 
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
-            creator_sub: 1,
+            creator_sub: 8,
             grid: GridConfig::default(),
             stock_origin: DVec3::ZERO,
             // 20×20×20 mm，h=0.1
@@ -99,6 +103,7 @@ impl Default for RunConfig {
             design_step: DEFAULT_DESIGN_STEP_MM,
             gouge_tol: DEFAULT_GOUGE_TOL_MM,
             nonlinear_samples: 32,
+            drop_chips: false,
         }
     }
 }
@@ -253,6 +258,15 @@ pub fn run_tools_observed(
 
     // 设计比对用的切削段（含块号/行号/起始时刻，报警要能跳回源文件）
     let mut cut_segs: Vec<CutSegment> = Vec::new();
+    // 批量切削：攒够 CUT_BATCH 段再交给 `cut_batch`（并行粒度从"单段"变成"一批"）
+    // `CNCSIM_CUT_BATCH=1` 退回逐段切削（对照用）
+    let cut_batch = std::env::var("CNCSIM_CUT_BATCH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(256)
+        .max(1);
+    let mut pending: Vec<(cncsim_motion::Pose, cncsim_motion::Pose)> = Vec::new();
+    let mut pending_tool: Option<u16> = None;
 
     // 非线性误差追踪。`nl_seed` 给逆解做多解连续：上一块的解当下一块的种子，
     // 解不出来就清空复位（下一块从零起步）。
@@ -394,6 +408,16 @@ pub fn run_tools_observed(
 
         let mut cur = prev;
         let n = pts.len().max(1);
+        // 换刀前必须把上一把刀的批次切完（母线不同）
+        if pending_tool != Some(tool.number) {
+            if !pending.is_empty() {
+                let t0 = std::time::Instant::now();
+                grid.cut_batch(&pending, &tool.cutter);
+                cut_ms += t0.elapsed().as_secs_f64() * 1e3;
+                pending.clear();
+            }
+            pending_tool = Some(tool.number);
+        }
         for (k, &p) in pts.iter().enumerate() {
             // 刀轴按块内进度插值（三轴时两端相同，插值退化成常量）
             let u = (k + 1) as f64 / n as f64;
@@ -413,15 +437,32 @@ pub fn run_tools_observed(
                         tool: tool.number,
                     });
                 }
-                let t0 = std::time::Instant::now();
-                grid.cut_segment(&cur, &next, &tool.cutter);
-                cut_ms += t0.elapsed().as_secs_f64() * 1e3;
+                // **批量切**：一段只有 1~2 mm，扫掠包围盒几十个体素，
+                // 够不到并行阈值——12 万段全串行，多核利用率极低。
+                // `cut_batch` 与逐段 `cut_segment` **逐位等价**（CSG 是 max，
+                // 交换律/结合律 + 量化幂等），攒够一批再切，AABB 变大就能并行。
+                pending.push((cur, next));
                 stats.cut_segments += 1;
+                if pending.len() >= cut_batch {
+                    let t0 = std::time::Instant::now();
+                    grid.cut_batch(&pending, &tool.cutter);
+                    cut_ms += t0.elapsed().as_secs_f64() * 1e3;
+                    pending.clear();
+                }
             } else if matches!(block.motion, MotionKind::Rapid) {
                 stats.rapid_segments += 1;
             }
 
             // ② 碰撞（快移也查：真实撞机大多是 G0 撞夹具）
+            //
+            // 碰撞要拿**当前**毛坯场判刀杆，所以开了碰撞就先冲批次，保证
+            // 网格状态严格等于"这一段之前"。关碰撞时（CAM 链）不用冲。
+            if !pending.is_empty() && bodies[tool_idx].is_some() {
+                let t0 = std::time::Instant::now();
+                grid.cut_batch(&pending, &tool.cutter);
+                cut_ms += t0.elapsed().as_secs_f64() * 1e3;
+                pending.clear();
+            }
             if let Some(b) = &bodies[tool_idx] {
                 let t0 = std::time::Instant::now();
                 if let Some(c) = check_shank(&grid, b, &tool.shank, &cur, &next) {
@@ -454,7 +495,24 @@ pub fn run_tools_observed(
         prev = to;
     }
 
+    // 尾巴：最后不足一批的段
+    if !pending.is_empty() {
+        let t0 = std::time::Instant::now();
+        if let Some(tn) = pending_tool
+            && let Some(td) = tools.by_number(tn)
+        {
+            grid.cut_batch(&pending, &td.cutter);
+        }
+        cut_ms += t0.elapsed().as_secs_f64() * 1e3;
+        pending.clear();
+    }
     stats.stopped_at = stopped_at;
+    // ── 悬浮碎屑：切下来却还挂着的那几块，按"掉成切屑"处理 ──
+    // 必须在体积统计和设计比对**之前**做，否则它们会被算成残留。
+    let mut chips = 0usize;
+    if cfg.drop_chips {
+        chips = grid.drop_floating_islands();
+    }
     stats.volume_after = grid.material_volume();
     stats.cut_ms = cut_ms;
     stats.collide_ms = collide_ms;
@@ -480,6 +538,7 @@ pub fn run_tools_observed(
         programmed_time_s: sim_time,
         actual_time_s: t_wall.elapsed().as_secs_f64(),
         removed_volume_mm3: (stats.volume_before - stats.volume_after).max(0.0),
+        chip_voxels: chips,
         gouge_volume_mm3: cmp.gouge_volume_mm3,
         gouge_max_depth_mm: cmp.gouge_max_depth,
         gouge_at: cmp.gouge_at,
@@ -776,6 +835,15 @@ mod tests {
 
     /// 刀尖在 z=9.5（毛坯顶面 z=10 之下 0.5 mm）走一条直线槽 → 切到料，不撞刀杆
     const SAFE: &str = "G0 X2 Y10 Z9.5\nG1 X18 F300\nM30\n";
+
+    #[test]
+    fn default_creator_granularity_is_per_voxel() {
+        assert_eq!(
+            RunConfig::default().creator_sub,
+            8,
+            "切割染色默认应按体素归属；更粗的子块会让相邻刀痕互相侵染"
+        );
+    }
 
     /// 没有 `T` 字的程序（绝大多数三轴程序）**不该报缺刀**。
     ///

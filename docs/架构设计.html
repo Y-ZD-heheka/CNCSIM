@@ -238,7 +238,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <div class="layout">
 <aside>
   <div class="brand">Technical Design</div>
-  <div class="brand-title">架构设计（13 crate）</div>
+  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
   <div class="toc">
 <ul>
 <li><a href="#0">0. 先说初版分层错在哪</a></li>
@@ -276,7 +276,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 </aside>
 <main>
-<h1 id="cncsim">CNCSIM 架构设计</h1><div class="meta"><span class="chip hi">架构契约</span><span class="chip hi">2026-10-30</span></div>
+<h1 id="cncsim">CNCSIM 架构设计</h1>
 <blockquote>
 <p>日期：2026-10-28
 目标：模块化、高内聚、低耦合，且<strong>耦合约束可机器校验</strong>
@@ -376,6 +376,11 @@ L0 词汇    cncsim-motion ── cncsim-tool
 <td>math, motion, tool</td>
 </tr>
 <tr>
+<td><strong><code>cncsim-cam</code></strong></td>
+<td>工艺生成：三角网格 → 3 轴高度场刀路 / <strong>A/C 回转 RTCP 刀路</strong> → G 代码（<strong>不依赖 voxel/sim</strong>）</td>
+<td>math, tool</td>
+</tr>
+<tr>
 <td><strong><code>cncsim-voxel</code></strong></td>
 <td>实体表示与 CSG：稀疏树、解析 SDF、扫掠、MC 提取、STL 解析、网格体素化</td>
 <td>math, motion, tool</td>
@@ -412,12 +417,13 @@ L0 词汇    cncsim-motion ── cncsim-tool
 </tr>
 </tbody>
 </table></div>
-<p><strong>13 个 crate 会不会太多？</strong> 判断标准是"删掉它之后耦合会不会变高"：</p>
+<p><strong>14 个 crate 会不会太多？</strong> 判断标准是"删掉它之后耦合会不会变高"：</p>
 <ul>
 <li>删 <code>motion</code> → <code>kin</code> 和 <code>gcode</code> 必须互相依赖或各自定义 <code>Pose</code>，耦合升高 ✓ 保留</li>
 <li>删 <code>tool</code> → <code>voxel</code> 和 <code>collide</code> 各自定义刀具，两份会漂移 ✓ 保留</li>
 <li>删 <code>collide</code> → <code>sim</code> 里塞进 GJK 和保守推进，回到杂货铺 ✓ 保留</li>
 <li>删 <code>ui</code> → <code>render</code> 里塞进 egui，呈现层职责混杂 ✓ 保留</li>
+<li>删 <code>cam</code> → <code>app</code> 里塞进高度场/刀路/后处理，<strong>生成器和验证器互相依赖</strong>，无法独立测 ✓ 保留</li>
 <li>删 <code>hmi</code> → 控制状态机塞进 <code>ui</code>，<strong>headless 批处理就没有急停/倍率/报警</strong>；塞进 <code>sim</code> 则仿真调度与操作语义混在一起 ✓ 保留</li>
 <li>删 <code>config</code> → <code>kin</code> 就得读整个 <code>.ron</code>，于是它必须知道 <code>Shape::Box</code> 和 <code>ColliderSpec::Derived</code>，<strong>L1 算法层被磁盘格式污染</strong>；或者 <code>app</code> 里手写解析，各层共享的字段定义无处安放 ✓ 保留</li>
 </ul>
@@ -438,6 +444,9 @@ motion   → math
 tool     → math
 kin      → math, motion
 gcode    → math, motion, tool
+cam      → math, tool            ← 只出 G 代码文本；解释/仿真在 app/sim
+            │  3 轴：高度场 → Z 层行切 + 平行精加工
+            └  5 轴：细网格真值轮廓 → 径向让刀粗加工 + 法向摆角精加工（G43.4）
 voxel    → math, motion, tool
 collide  → math, motion, tool
 sim      → math, motion, tool, kin, gcode, voxel, collide

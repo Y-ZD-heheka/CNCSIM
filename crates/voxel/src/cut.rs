@@ -651,20 +651,11 @@ impl<S: Scalar> SparseGrid<S> {
                     PROF_N_BLOCK.fetch_add(1, Relaxed);
                 }
                 stats.changed += block.n as usize;
-                // **n == 0 的块直接丢掉**：一个体素都没变的叶，不该被当成
-                // "这一刀动过的地方"——它会被盖上切面色（`touched` 就是盖章名单），
-                // 而且还要白写 512 个相同的字节、白 prune 一遍。
+                // **n == 0 的块直接丢掉**：一个体素都没变，说明这一刀没有
+                // 去除材料，不能改任何 creator，也不该白写 512 个相同的字节。
                 //
                 // 深腔短路路径（`cut_box` 里"整叶埋进扫掠体 → 整叶填 +band"）
                 // 不检查 `n` 就把块推了进来，这里是唯一的兜底。
-                //
-                // **注意：实测面铣一层，n==0 的块数是 0**——全是空气的叶会在
-                // 上一刀末尾被 `prune` 成 `Constant`，于是更早就被
-                // `to_distance(v) >= band` 那条短路跳掉了。所以这是防御性的，
-                // **不是**切面色溢出的原因（溢出是叶级粒度，见 `docs/项目记忆.md` §10.2b）。
-                // **`n == 0` 不等于"这一刀没碰过这里"**：值没变但擦在面上时，
-                // `changed_mask` 依然给了盖章位（见 `any_value_near_surface`）。
-                // 丢掉就会把那一刀的色号一起丢掉 —— 球面因此保留粗加工色。
                 if block.n == 0 && block.mask_off == u32::MAX {
                     continue;
                 }
@@ -950,32 +941,17 @@ impl<S: Scalar> SparseGrid<S> {
             return (self.count_changed(vals, view), [0u64; 8], 0);
         }
         let sub = self.creator_sub as usize;
-        // **染色阈值 = 整个窄带，不是一格。**
+        // **只有"这一刀真的搬动了这一格的材料"才继承颜色**：
+        // 场值必须变了（CSG 是 max，移除材料 ⟺ 值变大），且新值离切面不到一格。
         //
-        // 早先只给 `|sd| < h`（一格）的体素盖章，理由是"只有贴着切面的那层
-        // 才代表这一刀切出的面"。这个理由在**几何精确**的等值面上成立，但
-        // 顶点是从粗格（LOD）插值出来的，位置带 0.1–0.3 mm 的误差：顶点一偏
-        // 出那一格，就取到上一个工序的旧色（或料内的 0）。实测 R15 凸台球面
-        // 上有 3% 的灰点就是这么来的。
-        //
-        // 放宽到 `band` 之后，"这一刀改过场、且改动在窄带内"就盖章——颜色带
-        // 覆盖窄带全宽，顶点落在带内任一处都拿得到最新的那一刀。代价是颜色
-        // 向两侧各溢出最多 0.4 mm；对"每工序 10 档"的粒度来说这个代价是零。
-        let band = self.config.band_mm();
+        // 不能要求"材料 → 空气"：留量 0.02–0.05 mm 的精加工只会把表面格从
+        // −0.14 抬到 −0.01，格心仍在材料侧，但那一刀确实把面削出来了。
+        // 早先按"跨零"判，赤道一圈就成了 9/11 的椒盐（实测 −14 → −1 被丢掉）。
+        // 反过来，只擦过、没去料的刀（值不变，`max` 不动）仍然保留原色。
         let h = self.config.h;
         if sub == 1 {
             let n = self.count_changed(vals, view);
-            // 整叶一个标记。两种情形都要盖：
-            // ① 这一刀把某些体素推到了面附近（`|new| < band`）；
-            // ② **值一个都没变**——说明这一刀正好擦在已经成形的面上（球顶是
-            //    面铣层与精加工的切点，两次切削的等距面重合）。这种情况
-            //    `n == 0`，早先连 mask 都不给，结果是球面永远保留粗加工的色，
-            //    精加工的色号根本盖不上去。
-            let hit = if n > 0 {
-                self.any_changed_near_surface(vals, view, band)
-            } else {
-                self.any_value_near_surface(vals, band)
-            };
+            let hit = self.any_changed_near_surface(vals, view, h);
             return (n, if hit { [1, 0, 0, 0, 0, 0, 0, 0] } else { [0; 8] }, 1);
         }
         let old = match view {
@@ -993,18 +969,13 @@ impl<S: Scalar> SparseGrid<S> {
                 let bits = sub.trailing_zeros();
                 let shift = 3 - bits;
                 for (i, &new) in vals.iter().enumerate() {
-                    let stamp = if new != v {
-                        // `n` 必须数**全部**改动：它决定这个块要不要写回。
-                        // 只数"贴面的改动"会让整块窄带填充被跳过，几何都变了。
+                    // `n` 必须数**全部**改动：它决定这个块要不要写回几何。
+                    let changed = new != v;
+                    if changed {
                         n += 1;
-                        self.to_distance(new).abs() < band
-                    } else {
-                        // **值没变，但这一刀正好擦在这个面上**：两次切削的等距面
-                        // 在这里重合（球顶 = 面铣层与精加工的切点），数值不需要改，
-                        // 可表面确实是这一刀的形状。不盖章就会永远保留上一刀的
-                        // 颜色——球顶那 2 个 creator=1 的点就是这么来的。
-                        self.to_distance(v).abs() < h
-                    };
+                    }
+                    // 盖章只认"这一刀真的搬动了这一格"：值变了、且新面仍在一格内。
+                    let stamp = changed && self.to_distance(new).abs() < h;
                     if stamp {
                         let (x, y, z) = (i & 7, (i >> 3) & 7, i >> 6);
                         let s = ((x >> shift) & (sub - 1))
@@ -1029,13 +1000,11 @@ impl<S: Scalar> SparseGrid<S> {
         let mut n = 0usize;
         let mut mask = [0u64; 8];
         for (i, (&nv, &ov)) in vals.iter().zip(old).enumerate() {
-            let stamp = if nv != ov {
+            let changed = nv != ov;
+            if changed {
                 n += 1;
-                self.to_distance(nv).abs() < band
-            } else {
-                // 值没变也可能是"这一刀擦在这个面上"——见上面 `other` 分支的注释
-                self.to_distance(ov).abs() < h
-            };
+            }
+            let stamp = changed && self.to_distance(nv).abs() < h;
             if stamp {
                 let x = (i & 7) >> shift;
                 let y = ((i >> 3) & 7) >> shift;
@@ -1047,40 +1016,23 @@ impl<S: Scalar> SparseGrid<S> {
         (n, mask, words)
     }
 
-    /// 叶里有没有"变了 **且** 新值在窄带内"的体素（整叶粒度用）。
+    /// 叶里有没有「这一刀真的搬动了、且新面仍在一格内」的体素（整叶粒度用）。
     fn any_changed_near_surface(
         &self,
         vals: &[S; LEAF_VOXELS],
         view: &Option<LeafView<'_, S>>,
-        band: f64,
+        h: f64,
     ) -> bool {
         let old: &[S] = match view {
             Some(LeafView::Leaf(Leaf::Dense(a))) => a.as_slice(),
             _ => return true, // 整叶同值：保守地认为有（下面会被 n 的判据兜住）
         };
         for i in 0..LEAF_VOXELS {
-            if vals[i] != old[i] && self.to_distance(vals[i]).abs() < band {
+            if vals[i] != old[i] && self.to_distance(vals[i]).abs() < h {
                 return true;
             }
         }
         false
-    }
-
-    /// 叶里有没有**已经在面附近**的体素（`|value| < band`），不看是否变化。
-    ///
-    /// 给"值一个没变、但这一刀确实擦在这个面上"的情形用：此时没有变化可供比较，
-    /// 只能看几何位置。只在 `sub == 1`（整叶一个标记）时用，粒度本来就是叶级。
-    fn any_value_near_surface(&self, vals: &[S; LEAF_VOXELS], band: f64) -> bool {
-        // **快速路径**：整叶同值（全空气 / 全材料）只算一次。
-        //
-        // 这条不是微优化：`n == 0` 的叶绝大多数是"刀从空气里穿过"——
-        // 整叶都是 `+band`。不先判同值就要做 512 次 `to_distance`（每次一次
-        // 除法 + 取绝对值），实测让 R15 半球从 17 s 涨到 25 s（+47%）。
-        let first = vals[0];
-        if vals.iter().all(|v| *v == first) {
-            return self.to_distance(first).abs() < band;
-        }
-        vals.iter().any(|v| self.to_distance(*v).abs() < band)
     }
 
     fn count_changed(&self, vals: &[S; LEAF_VOXELS], view: &Option<LeafView<'_, S>>) -> usize {

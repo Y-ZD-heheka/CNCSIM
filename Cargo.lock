@@ -2283,6 +2283,7 @@ dependencies = [
 name = "cncsim-app"
 version = "0.1.0"
 dependencies = [
+ "cncsim-cam",
  "cncsim-collide",
  "cncsim-config",
  "cncsim-gcode",
@@ -2294,6 +2295,17 @@ dependencies = [
  "cncsim-sim",
  "cncsim-tool",
  "cncsim-ui",
+ "cncsim-voxel",
+]
+
+[[package]]
+name = "cncsim-cam"
+version = "0.1.0"
+dependencies = [
+ "cncsim-gcode",
+ "cncsim-math",
+ "cncsim-sim",
+ "cncsim-tool",
  "cncsim-voxel",
 ]
 

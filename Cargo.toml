@@ -16,6 +16,7 @@ cncsim-motion  = { path = "crates/motion" }
 cncsim-tool    = { path = "crates/tool" }
 cncsim-kin     = { path = "crates/kin" }
 cncsim-gcode   = { path = "crates/gcode" }
+cncsim-cam     = { path = "crates/cam" }
 cncsim-voxel   = { path = "crates/voxel" }
 cncsim-collide = { path = "crates/collide" }
 cncsim-sim     = { path = "crates/sim" }

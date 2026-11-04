@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AGENTS</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-soft: #12171f;
+  --panel: #161b22;
+  --border: #232a35;
+  --border-soft: #1c222b;
+  --fg: #d6dde6;
+  --fg-dim: #8b96a5;
+  --fg-bright: #eef3f9;
+  --accent: #58a6ff;
+  --accent-dim: #1f6feb;
+  --warn: #d29922;
+  --ok: #3fb950;
+  --code-bg: #0b0f14;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.layout { display: flex; align-items: flex-start; }
+
+/* ── 侧栏 ── */
+aside {
+  position: sticky; top: 0; height: 100vh; width: 300px; flex: 0 0 300px;
+  overflow-y: auto; padding: 28px 18px 60px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-soft);
+}
+aside .brand {
+  font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--fg-dim); margin-bottom: 4px;
+}
+aside .brand-title {
+  font-size: 15px; font-weight: 650; color: var(--fg-bright);
+  line-height: 1.45; margin-bottom: 18px;
+}
+aside .toc > ul { list-style: none; margin: 0; padding: 0; }
+aside .toc > ul > li > a { font-weight: 600; color: var(--fg); }
+aside .toc ul ul { list-style: none; padding-left: 12px; margin: 2px 0 10px; border-left: 1px solid var(--border-soft); }
+aside .toc ul ul a { font-size: 13.5px; color: var(--fg-dim); }
+aside a {
+  display: block; padding: 3px 8px; border-radius: 5px;
+  text-decoration: none; font-size: 14px; transition: background .12s, color .12s;
+}
+aside a:hover { background: #1b2330; color: var(--accent); }
+aside ul ul a:hover { color: var(--accent); }
+
+/* ── 正文 ── */
+main { flex: 1 1 auto; min-width: 0; margin: 0 auto; padding: 44px 56px 120px; max-width: 1020px; }
+
+h1 {
+  font-size: 30px; line-height: 1.3; color: var(--fg-bright); font-weight: 700;
+  margin: 0 0 8px; letter-spacing: -.01em;
+}
+h2 {
+  font-size: 21px; color: var(--fg-bright); font-weight: 650;
+  margin: 56px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+h3 { font-size: 17px; color: var(--fg-bright); font-weight: 650; margin: 34px 0 12px; }
+h4 { font-size: 15px; color: var(--accent); font-weight: 600; margin: 24px 0 10px; }
+
+p { margin: 12px 0; }
+strong { color: var(--fg-bright); font-weight: 650; }
+em { color: #c9d3df; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+hr { border: 0; border-top: 1px solid var(--border-soft); margin: 40px 0; }
+
+blockquote {
+  margin: 18px 0; padding: 12px 18px;
+  background: #131a24; border-left: 3px solid var(--accent-dim);
+  border-radius: 0 6px 6px 0; color: #b8c4d2;
+}
+blockquote p { margin: 4px 0; }
+
+ul, ol { padding-left: 24px; margin: 12px 0; }
+li { margin: 5px 0; }
+li > ul, li > ol { margin: 4px 0; }
+
+/* ── 表格 ── */
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; }
+thead { background: #1a2230; }
+th {
+  text-align: left; padding: 10px 13px; font-weight: 650; color: var(--fg-bright);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+td { padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: #141b25; }
+
+/* ── 代码 ── */
+code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: .875em; background: #1b222c; color: #e3b341;
+  padding: .14em .4em; border-radius: 4px;
+}
+.codehilite {
+  position: relative; margin: 18px 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--code-bg); overflow: hidden;
+}
+.codehilite pre {
+  margin: 0; padding: 15px 17px; overflow-x: auto;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  font-size: 13px; line-height: 1.62;
+}
+.codehilite code { background: none; padding: 0; color: inherit; font-size: inherit; }
+.codehilite::before {
+  content: attr(data-lang); position: absolute; top: 0; right: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: #5a6675; padding: 4px 10px;
+}
+
+/* ── Pygments ── */
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #ffffcc }
+.codehilite { background: #282C34; color: #ABB2BF }
+.codehilite .c { color: #7F848E } /* Comment */
+.codehilite .err { color: #ABB2BF } /* Error */
+.codehilite .esc { color: #ABB2BF } /* Escape */
+.codehilite .g { color: #ABB2BF } /* Generic */
+.codehilite .k { color: #C678DD } /* Keyword */
+.codehilite .l { color: #ABB2BF } /* Literal */
+.codehilite .n { color: #E06C75 } /* Name */
+.codehilite .o { color: #56B6C2 } /* Operator */
+.codehilite .x { color: #ABB2BF } /* Other */
+.codehilite .p { color: #ABB2BF } /* Punctuation */
+.codehilite .ch { color: #7F848E } /* Comment.Hashbang */
+.codehilite .cm { color: #7F848E } /* Comment.Multiline */
+.codehilite .cp { color: #7F848E } /* Comment.Preproc */
+.codehilite .cpf { color: #7F848E } /* Comment.PreprocFile */
+.codehilite .c1 { color: #7F848E } /* Comment.Single */
+.codehilite .cs { color: #7F848E } /* Comment.Special */
+.codehilite .gd { color: #E06C75 } /* Generic.Deleted */
+.codehilite .ge { color: #ABB2BF; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #ABB2BF } /* Generic.EmphStrong */
+.codehilite .gr { color: #E06C75 } /* Generic.Error */
+.codehilite .gh { color: #ABB2BF; font-weight: bold } /* Generic.Heading */
+.codehilite .gi { color: #98C379 } /* Generic.Inserted */
+.codehilite .go { color: #E06C75 } /* Generic.Output */
+.codehilite .gp { color: #ABB2BF } /* Generic.Prompt */
+.codehilite .gs { color: #ABB2BF; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #ABB2BF; font-weight: bold } /* Generic.Subheading */
+.codehilite .gt { color: #E06C75 } /* Generic.Traceback */
+.codehilite .kc { color: #E5C07B } /* Keyword.Constant */
+.codehilite .kd { color: #C678DD } /* Keyword.Declaration */
+.codehilite .kn { color: #C678DD } /* Keyword.Namespace */
+.codehilite .kp { color: #C678DD } /* Keyword.Pseudo */
+.codehilite .kr { color: #C678DD } /* Keyword.Reserved */
+.codehilite .kt { color: #E5C07B } /* Keyword.Type */
+.codehilite .ld { color: #ABB2BF } /* Literal.Date */
+.codehilite .m { color: #D19A66 } /* Literal.Number */
+.codehilite .s { color: #98C379 } /* Literal.String */
+.codehilite .na { color: #E06C75 } /* Name.Attribute */
+.codehilite .nb { color: #E5C07B } /* Name.Builtin */
+.codehilite .nc { color: #E5C07B } /* Name.Class */
+.codehilite .no { color: #E06C75 } /* Name.Constant */
+.codehilite .nd { color: #61AFEF } /* Name.Decorator */
+.codehilite .ni { color: #E06C75 } /* Name.Entity */
+.codehilite .ne { color: #E06C75 } /* Name.Exception */
+.codehilite .nf { color: #61AFEF; font-weight: bold } /* Name.Function */
+.codehilite .nl { color: #E06C75 } /* Name.Label */
+.codehilite .nn { color: #E06C75 } /* Name.Namespace */
+.codehilite .nx { color: #E06C75 } /* Name.Other */
+.codehilite .py { color: #E06C75 } /* Name.Property */
+.codehilite .nt { color: #E06C75 } /* Name.Tag */
+.codehilite .nv { color: #E06C75 } /* Name.Variable */
+.codehilite .ow { color: #56B6C2 } /* Operator.Word */
+.codehilite .pm { color: #ABB2BF } /* Punctuation.Marker */
+.codehilite .w { color: #ABB2BF } /* Text.Whitespace */
+.codehilite .mb { color: #D19A66 } /* Literal.Number.Bin */
+.codehilite .mf { color: #D19A66 } /* Literal.Number.Float */
+.codehilite .mh { color: #D19A66 } /* Literal.Number.Hex */
+.codehilite .mi { color: #D19A66 } /* Literal.Number.Integer */
+.codehilite .mo { color: #D19A66 } /* Literal.Number.Oct */
+.codehilite .sa { color: #98C379 } /* Literal.String.Affix */
+.codehilite .sb { color: #98C379 } /* Literal.String.Backtick */
+.codehilite .sc { color: #98C379 } /* Literal.String.Char */
+.codehilite .dl { color: #98C379 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #98C379 } /* Literal.String.Doc */
+.codehilite .s2 { color: #98C379 } /* Literal.String.Double */
+.codehilite .se { color: #98C379 } /* Literal.String.Escape */
+.codehilite .sh { color: #98C379 } /* Literal.String.Heredoc */
+.codehilite .si { color: #98C379 } /* Literal.String.Interpol */
+.codehilite .sx { color: #98C379 } /* Literal.String.Other */
+.codehilite .sr { color: #98C379 } /* Literal.String.Regex */
+.codehilite .s1 { color: #98C379 } /* Literal.String.Single */
+.codehilite .ss { color: #98C379 } /* Literal.String.Symbol */
+.codehilite .bp { color: #E5C07B } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #56B6C2; font-weight: bold } /* Name.Function.Magic */
+.codehilite .vc { color: #E06C75 } /* Name.Variable.Class */
+.codehilite .vg { color: #E06C75 } /* Name.Variable.Global */
+.codehilite .vi { color: #E06C75 } /* Name.Variable.Instance */
+.codehilite .vm { color: #E06C75 } /* Name.Variable.Magic */
+.codehilite .il { color: #D19A66 } /* Literal.Number.Integer.Long */
+
+/* 首屏 meta */
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 30px;
+}
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: #16202c; border: 1px solid #223040; color: #9fb0c4;
+}
+.chip.hi { background: #10243a; border-color: #1f4f7a; color: #79b8ff; }
+
+@media (max-width: 1080px) {
+  aside { display: none; }
+  main { padding: 28px 22px 80px; }
+}
+@media print {
+  aside { display: none; }
+  body { background: #fff; color: #111; }
+  main { padding: 0; max-width: none; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">Technical Design</div>
+  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
+  <div class="toc">
+<ul>
+<li><a href="#1">1. 这是什么</a></li>
+<li><a href="#2">2. 命令（改完代码必跑）</a><ul>
+<li><a href="#_1">运行时入口</a></li>
+<li><a href="#ignore">性能基准（默认 #[ignore]，改热路径后跑）</a></li>
+<li><a href="#_2">文档</a></li>
+</ul>
+</li>
+<li><a href="#3">3. 目录与分层</a><ul>
+<li><a href="#_3">测试数</a></li>
+</ul>
+</li>
+<li><a href="#4">4. 硬规定（违反即返工）</a><ul>
+<li><a href="#_4">工作方式</a></li>
+</ul>
+</li>
+<li><a href="#5">5. 当前进度</a><ul>
+<li><a href="#24-releasei7-13700k-8p8e">性能锚点（24 线程 release，i7-13700K = 8P+8E）</a></li>
+</ul>
+</li>
+<li><a href="#6">6. 下一步（按价值排序）</a></li>
+<li><a href="#7">7. 改代码前读哪份文档</a></li>
+<li><a href="#8">8. 已知环境坑</a></li>
+<li><a href="#9">9. 记忆与文档索引</a></li>
+</ul>
+</div>
+
+</aside>
+<main>
+<h1 id="agentsmd">AGENTS.md</h1>
+<blockquote>
+<p>给 AI agent / 新接手者的入口。<strong>先读这一页，再读 <code>docs/项目记忆.md</code>。</strong></p>
+<p>最后更新：2026-11-04 · 14 crate / <strong>494 测试全绿</strong> / 5 个外部依赖全最新
+（<code>cargo clippy</code> 有 8 条历史遗留告警，见 §2 注）</p>
+</blockquote>
+<hr />
+<h2 id="1">1. 这是什么</h2>
+<p>Bevy + Rust 的<strong>五轴 CNC 仿真验证器</strong>，另带一个 <strong>3 轴简化 CAM</strong>（STL → 高度场 → G 代码）用于自造测试程序。</p>
+<p>只回答四个问题：<strong>会不会撞、会不会过切、实际跑多久、哪里出问题。</strong></p>
+<p><strong>纯自用，不对外分发。</strong> 由此可以读/抄 LinuxCNC（vismach、<code>5axiskins.c</code>、<code>g-code.adoc</code>）；但 GrabCAD 的"非商用"限制的是<strong>使用场景</strong>，公司商用仍适用 → 机床外观一律参数化生成。</p>
+<hr />
+<h2 id="2">2. 命令（改完代码必跑）</h2>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF">                        </span><span style="color: #7F848E"># 477 绿（29 ignored 是性能基准/需外部输入）</span>
+cargo<span style="color: #ABB2BF"> </span>clippy<span style="color: #ABB2BF"> </span>--all-targets<span style="color: #ABB2BF">        </span><span style="color: #7F848E"># 零新增；现有 8 条历史遗留（collide/gcode/voxel 旧代码），改到哪清到哪</span>
+python<span style="color: #ABB2BF"> </span>tools/check_deps.py<span style="color: #ABB2BF">        </span><span style="color: #7F848E"># 架构守卫：依赖白名单 + L0–L3 无 bevy + 禁用名</span>
+python<span style="color: #ABB2BF"> </span>tools/check_versions.py<span style="color: #ABB2BF">    </span><span style="color: #7F848E"># 依赖必须最新稳定版且精确锁定</span>
+</code></pre></div>
+
+<p><strong>Python 解释器</strong>（已装 numpy / markdown / pygments）：
+<code>C:\Users\15796\.workbuddy-ai\binaries\python\envs\default\Scripts\python.exe</code></p>
+<h3 id="_1">运行时入口</h3>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF">                                              </span><span style="color: #7F848E"># 四段自检：运动学 → G代码 → 稀疏树 → 提取 → 端到端</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--export<span style="color: #ABB2BF"> </span>out/preview.html<span style="color: #ABB2BF">       </span><span style="color: #7F848E"># 导自包含 WebGL2 预览（单文件，可离线发给别人）</span>
+node<span style="color: #ABB2BF"> </span>tools/check_preview.mjs<span style="color: #ABB2BF"> </span>out/preview.html<span style="color: #ABB2BF">          </span><span style="color: #7F848E"># 桩 WebGL 验页面本身（无显示器也能跑）</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--features<span style="color: #ABB2BF"> </span>window<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--window<span style="color: #ABB2BF">      </span><span style="color: #7F848E"># 开 Bevy 窗口（首次编译付 Bevy 税）</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--machine<span style="color: #ABB2BF"> </span>assets/machines/ac_trunnion.machine.ron<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 换机床，不重编译</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--design<span style="color: #ABB2BF"> </span>part.stl<span style="color: #ABB2BF">                         </span><span style="color: #7F848E"># 设计模型从 STL 加载，算过切/残留</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--demo<span style="color: #ABB2BF"> </span>pocket<span style="color: #ABB2BF">                             </span><span style="color: #7F848E"># 换回旧演示（面铣 + G41 方槽 + G83 孔）</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--demo<span style="color: #ABB2BF"> </span>dome<span style="color: #ABB2BF"> </span>--export<span style="color: #ABB2BF"> </span>out/dome.html<span style="color: #ABB2BF">  </span><span style="color: #7F848E"># 50×50×40 铣 R15 半球凸台：T1 粗 + T2 锥度球头精（换刀端到端）</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span>assets/models/relief.stl<span style="color: #ABB2BF"> </span>--stock<span style="color: #ABB2BF"> </span><span style="color: #D19A66">16</span>,16,3.5<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/relief.nc<span style="color: #ABB2BF"> </span>--diff<span style="color: #ABB2BF"> </span>out/relief.diff.html<span style="color: #ABB2BF"> </span>--export<span style="color: #ABB2BF"> </span>out/cam.html
+<span style="color: #7F848E"># CAM（3 轴）：STL → G 代码 → 解释器 → 仿真 → Δz 热力图（`--cam` 在 `--machine` 之前分支）</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span><span style="color: #98C379">"C:/path/流云花瓶.stl"</span><span style="color: #ABB2BF"> </span>--stock<span style="color: #ABB2BF"> </span><span style="color: #D19A66">112</span>,112,250<span style="color: #ABB2BF"> </span>--rotary<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/vase.nc<span style="color: #ABB2BF"> </span>--diff<span style="color: #ABB2BF"> </span>out/vase.diff.html<span style="color: #ABB2BF"> </span>--export<span style="color: #ABB2BF"> </span>out/vase.html
+<span style="color: #7F848E"># CAM（A/C 回转 + RTCP）：粗（径向让刀螺旋）+ 精（法向摆角）→ G43.4 → 外轮廓 Δr</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span><span style="color: #98C379">"C:/path/流云花瓶.stl"</span><span style="color: #ABB2BF"> </span>--stock<span style="color: #ABB2BF"> </span><span style="color: #D19A66">112</span>,112,250<span style="color: #ABB2BF"> </span>--rotary<span style="color: #ABB2BF"> </span>--no-rough<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/nr.nc
+<span style="color: #7F848E"># 对照实验：跳过粗加工，隔离"过切是粗加工留下的还是精加工造成的"</span>
+python<span style="color: #ABB2BF"> </span>tools/check_mesh.py<span style="color: #ABB2BF"> </span>out/dome.html<span style="color: #ABB2BF"> </span>--ref-sphere<span style="color: #ABB2BF"> </span><span style="color: #D19A66">25</span>,25,24,15<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 网格体检：几何/拓扑/法线/颜色（连通分量按**位置**判，不受拆顶点副本干扰）</span>
+</code></pre></div>
+
+<p><strong>截图检查</strong>（无显示器时唯一能看画面的手段）：</p>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code><span style="color: #7F848E"># 三个方向的轴向正视图，隐藏刀具，停在 t=45 s（程序结束）</span>
+<span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span>v<span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span>x<span style="color: #ABB2BF"> </span>y<span style="color: #ABB2BF"> </span>z<span style="color: #ABB2BF">; </span><span style="color: #C678DD">do</span>
+<span style="color: #ABB2BF">  </span><span style="color: #E06C75">CNCSIM_VIEW</span><span style="color: #56B6C2">=</span><span style="color: #E06C75">$v</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">CNCSIM_HIDE_TOOL</span><span style="color: #56B6C2">=</span><span style="color: #D19A66">1</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">CNCSIM_T</span><span style="color: #56B6C2">=</span><span style="color: #D19A66">45</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">CNCSIM_CAM_SCALE</span><span style="color: #56B6C2">=</span><span style="color: #D19A66">0</span>.6<span style="color: #ABB2BF"> </span><span style="color: #98C379">\</span>
+<span style="color: #ABB2BF">    </span>./target/release/cncsim-app<span style="color: #ABB2BF"> </span>--window<span style="color: #ABB2BF"> </span>--screenshot<span style="color: #ABB2BF"> </span>out/axis_<span style="color: #E06C75">$v</span>.png
+<span style="color: #C678DD">done</span>
+</code></pre></div>
+
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>环境变量</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CNCSIM_T</code></td>
+<td>起始回放时刻（<strong>不自动播放</strong>，否则截到哪一帧取决于帧率）</td>
+</tr>
+<tr>
+<td><code>CNCSIM_CAM_SCALE</code></td>
+<td>相机距离倍率</td>
+</tr>
+<tr>
+<td><code>CNCSIM_HIDE_TOOL=1</code></td>
+<td>隐藏刀具（看切面时它会挡住最想看的区域）</td>
+</tr>
+<tr>
+<td><code>CNCSIM_VIEW=x\|y\|z\|-x\|-y\|-z</code></td>
+<td>固定轴向正视图；<strong>不挂轨道相机</strong>（它会按自己的 yaw/pitch 覆盖 Transform）</td>
+</tr>
+<tr>
+<td><code>CNCSIM_PROF=1</code></td>
+<td>打印每刀 求值/落盘 拆分</td>
+</tr>
+<tr>
+<td><code>CNCSIM_THREADS=1</code></td>
+<td>强制串行（对拍、定位并行问题）</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="ignore">性能基准（默认 <code>#[ignore]</code>，改热路径后跑）</h3>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>-p<span style="color: #ABB2BF"> </span>cncsim-voxel<span style="color: #ABB2BF"> </span>--test<span style="color: #ABB2BF"> </span>millout<span style="color: #ABB2BF">    </span>--<span style="color: #ABB2BF"> </span>--ignored<span style="color: #ABB2BF"> </span>--nocapture<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 铣光 200 刀</span>
+cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>-p<span style="color: #ABB2BF"> </span>cncsim-voxel<span style="color: #ABB2BF"> </span>--test<span style="color: #ABB2BF"> </span>cut_perf<span style="color: #ABB2BF">   </span>--<span style="color: #ABB2BF"> </span>--ignored<span style="color: #ABB2BF"> </span>--nocapture<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 单刀成本</span>
+cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>-p<span style="color: #ABB2BF"> </span>cncsim-voxel<span style="color: #ABB2BF"> </span>--test<span style="color: #ABB2BF"> </span>extract<span style="color: #ABB2BF">    </span>--<span style="color: #ABB2BF"> </span>--ignored<span style="color: #ABB2BF"> </span>--nocapture<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 200mm 提取（578 ms / 3200 万面）</span>
+cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>-p<span style="color: #ABB2BF"> </span>cncsim-voxel<span style="color: #ABB2BF"> </span>--test<span style="color: #ABB2BF"> </span>lod<span style="color: #ABB2BF">        </span>--<span style="color: #ABB2BF"> </span>--ignored<span style="color: #ABB2BF"> </span>--nocapture<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># LOD（实测 k=4: 252 ms / 200 万面 / 52 MB）</span>
+cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>-p<span style="color: #ABB2BF"> </span>cncsim-voxel<span style="color: #ABB2BF"> </span>--test<span style="color: #ABB2BF"> </span>sweep_perf<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--ignored<span style="color: #ABB2BF"> </span>--nocapture<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 扫掠 SDF 单次求值成本</span>
+cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>-p<span style="color: #ABB2BF"> </span>cncsim-voxel<span style="color: #ABB2BF"> </span>--test<span style="color: #ABB2BF"> </span>creator_perf<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--ignored<span style="color: #ABB2BF"> </span>--nocapture<span style="color: #ABB2BF"> </span><span style="color: #7F848E"># 溯源开销 A/B（同窗交替，四档粒度）</span>
+cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>-p<span style="color: #ABB2BF"> </span>cncsim-voxel<span style="color: #ABB2BF"> </span>--test<span style="color: #ABB2BF"> </span>creator_analysis<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--ignored<span style="color: #ABB2BF"> </span>--nocapture<span style="color: #ABB2BF"> </span><span style="color: #7F848E"># 缓存/线程分析（工作集扫描）</span>
+<span style="color: #C678DD">for</span><span style="color: #ABB2BF"> </span>t<span style="color: #ABB2BF"> </span><span style="color: #C678DD">in</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">1</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">8</span><span style="color: #ABB2BF"> </span><span style="color: #D19A66">24</span><span style="color: #ABB2BF">; </span><span style="color: #C678DD">do</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">CNCSIM_THREADS</span><span style="color: #56B6C2">=</span><span style="color: #E06C75">$t</span><span style="color: #ABB2BF"> </span>cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</span><span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>-p<span style="color: #ABB2BF"> </span>cncsim-voxel<span style="color: #ABB2BF"> </span><span style="color: #98C379">\</span>
+<span style="color: #ABB2BF">  </span>--test<span style="color: #ABB2BF"> </span>creator_analysis<span style="color: #ABB2BF"> </span>thread_scaling<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--ignored<span style="color: #ABB2BF"> </span>--nocapture<span style="color: #ABB2BF"> </span><span style="color: #D19A66">2</span>&gt;/dev/null<span style="color: #ABB2BF"> | </span>grep<span style="color: #ABB2BF"> </span>THREADS<span style="color: #ABB2BF">; </span><span style="color: #C678DD">done</span>
+<span style="color: #E06C75">CNCSIM_PROF</span><span style="color: #56B6C2">=</span><span style="color: #D19A66">1</span><span style="color: #ABB2BF"> </span>...<span style="color: #ABB2BF">                                       </span><span style="color: #7F848E"># 打印每刀 求值/落盘 拆分</span>
+<span style="color: #E06C75">CNCSIM_THREADS</span><span style="color: #56B6C2">=</span><span style="color: #D19A66">1</span><span style="color: #ABB2BF"> </span>...<span style="color: #ABB2BF">                                    </span><span style="color: #7F848E"># 强制串行（对拍、定位并行问题）</span>
+</code></pre></div>
+
+<h3 id="_2">文档</h3>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>python<span style="color: #ABB2BF"> </span>tools/md2html.py<span style="color: #ABB2BF"> </span>&lt;<span style="color: #C678DD">in</span>.md&gt;<span style="color: #ABB2BF"> </span>&lt;out.html&gt;<span style="color: #ABB2BF"> </span><span style="color: #98C379">"侧栏标题"</span><span style="color: #ABB2BF"> </span><span style="color: #98C379">"chip1|chip2"</span><span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 改完 md 必须重渲染</span>
+</code></pre></div>
+
+<hr />
+<h2 id="3">3. 目录与分层</h2>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>crates/           14 个 crate（依赖方向由 check_deps.py 守卫）
+  math            零依赖 f64 线性代数（含非对称矩阵求逆）
+  motion          Pose（tip + axis）+ slerp
+  tool            刀具母线 Profile + sd_profile
+  kin             FK / IK / RTCP / 奇异点 / 非线性误差
+  config          .machine.ron → MachineTopology（唯一知道磁盘格式的 crate）
+  gcode           文本 → 位姿（不做运动学）
+  cam             三角网格 → 3 轴高度场刀路 / A/C 回转 RTCP 刀路 → G 代码（只依赖 math/tool）
+  voxel           稀疏窄带 SDF + 扫掠 + CSG + Surface Nets + LOD + STL + 连通块清理
+  collide         保守推进 + GJK + EPA + episode 聚类
+  sim             编排：run / compare / stock / job / playback
+  hmi             控制状态机（急停、倍率、报警队列）
+  render          GPU 缓冲 + 分块增量重建 + HTML 预览 + Bevy 外壳
+  ui              面板数据层（纯函数，无 egui 依赖）
+  app             CLI 与自检
+docs/             20 篇 md + html（ADR-002…011 + 专题 + 项目记忆 + 开发日志）
+tools/            守卫脚本、golden 生成、文档渲染、OpenVDB 对比基准
+refs/linuxcnc/    LinuxCNC 源码（GPLv2，仅阅读，作为语义 oracle）
+assets/           .machine.ron + MiSans 字体
+testdata/         golden CSV + design_box.stl
+</code></pre></div>
+
+<h3 id="_3">测试数</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>crate</th>
+<th>测试</th>
+<th>crate</th>
+<th>测试</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>voxel</code></td>
+<td>156</td>
+<td><code>gcode</code></td>
+<td>117</td>
+</tr>
+<tr>
+<td><code>sim</code></td>
+<td>82</td>
+<td><code>collide</code></td>
+<td>34</td>
+</tr>
+<tr>
+<td><code>kin</code></td>
+<td>28</td>
+<td><code>render</code></td>
+<td>18</td>
+</tr>
+<tr>
+<td><code>cam</code></td>
+<td>13</td>
+<td><code>tool</code></td>
+<td>10</td>
+</tr>
+<tr>
+<td><code>math</code> / <code>motion</code> / <code>config</code></td>
+<td>9 / 9 / 9</td>
+<td><code>ui</code></td>
+<td>6</td>
+</tr>
+<tr>
+<td><code>hmi</code></td>
+<td>3</td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="4">4. 硬规定（违反即返工）</h2>
+<ol>
+<li><strong>Edition 2024</strong>（<code>resolver = "3"</code>）；第三方依赖只用<strong>精确最新稳定版</strong> <code>version = "=x.y.z"</code>，<strong>禁止 <code>^</code></strong>。加依赖前先 <code>check_versions.py --show &lt;crate&gt;</code>。</li>
+<li><strong>L0–L3 零 Bevy 依赖</strong>——正确性必须能纯 <code>cargo test</code> 锁定。</li>
+<li><strong>没有 <code>cncsim-core</code></strong>；禁止 <code>common</code> / <code>utils</code> / <code>types</code> / <code>shared</code> 这类名字。</li>
+<li><strong><code>collide</code> 不依赖 <code>voxel</code></strong>（<code>DistanceField</code> trait 反转，接线在 <code>sim::stock</code>）。</li>
+<li><strong><code>gcode</code> 不做运动学</strong>（输出位姿不是关节值，RTCP 归 <code>kin</code>）。</li>
+<li><strong><code>ui</code> 只依赖 <code>hmi</code></strong>，不直连 <code>sim</code>。UI 需要的 <code>Alarm</code>/<code>Severity</code> 由 <code>hmi</code> 显式重导出。</li>
+<li><strong><code>SparseGrid</code> 单一所有者</strong>，跨线程只走 channel。禁止 <code>Arc&lt;Mutex&lt;SparseGrid&gt;&gt;</code>。</li>
+<li><strong>结果必须逐位可复现</strong>——任何破坏确定性的优化都不接受，哪怕更快。</li>
+<li><strong>不建共享 <code>Diagnostic</code> 枚举</strong>：各层自带 finding，<code>sim</code> 组合。</li>
+<li><strong><code>Pose.axis</code></strong> 是单位向量，<strong>由刀尖指向主轴</strong>（A=0 → +Z）。</li>
+</ol>
+<h3 id="_4">工作方式</h3>
+<ul>
+<li><strong>TDD 强制</strong>：红 → 绿 → 重构。先写测试、跑一次确认它<strong>因正确的原因失败</strong>（不是拼写错）。禁止先写实现再补测试。</li>
+<li><strong>每个测试必须能被证伪</strong>：断言要具体到能区分"做对了"和"做错了"。<code>assert!(x.is_ok())</code> 不算。</li>
+<li><strong>交付时报告红绿过程</strong>：先写了什么测试、它如何失败、再如何通过。<strong>主动证伪</strong>（改坏一处 → 跑 → 复原）。</li>
+<li><strong>声称"完成"前必须实际跑过构建和测试</strong>，报告真实输出。发现自己的说法被实测推翻时明确更正，不静默改口。</li>
+</ul>
+<hr />
+<h2 id="5">5. 当前进度</h2>
+<p><strong>L0–L3 内核全部落地，L4 窗口能开但显示增强未接。</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>层</th>
+<th>状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>运动学</td>
+<td>✅ FK / IK / RTCP / 奇异点（条件数判据）/ 轴限位 / 非线性误差。543 行 golden 基准，RTCP↔FK 偏差 7.7e-14</td>
+</tr>
+<tr>
+<td>机床配置</td>
+<td>✅ <code>.machine.ron</code> → <code>MachineTopology</code>，换机床不重编译；<code>hardcoded_matches_file</code> 锁两份数据不漂移</td>
+</tr>
+<tr>
+<td>G 代码</td>
+<td>✅ 117 测试。15 个模态组 / 25 个执行阶段 / 五轴 A·B·C / G68.2 倾斜平面 / <strong>隐式模态运动</strong> / 固定循环 G73·G76·G81–89 / G10·G52·G92 坐标改写 / G41·G42 刀径补偿 / <code>Trust</code> 分级</td>
+</tr>
+<tr>
+<td>稀疏体素</td>
+<td>✅ 三级树（root 也能存 tile）+ 量化 + 插值。40 亿体素填充 5.6 ms，叶 0 个</td>
+</tr>
+<tr>
+<td>材料去除</td>
+<td>✅ 扫掠 SDF + CSG + 行级分类 + 沿轴共享 + <code>cut_batch</code></td>
+</tr>
+<tr>
+<td>表面提取</td>
+<td>✅ Surface Nets（不用经典 MC）+ 单元格索引（块 + 位掩码）</td>
+</tr>
+<tr>
+<td>显示 LOD</td>
+<td>✅ 粗格重采样，<code>k ≤ band</code> 是硬约束（超限 panic）</td>
+</tr>
+<tr>
+<td>碰撞</td>
+<td>✅ 保守推进 + GJK + EPA + episode 聚类 + 毛坯双向接线</td>
+</tr>
+<tr>
+<td>仿真编排</td>
+<td>✅ 端到端主循环 + 设计比对（过切/残留）+ 后台任务 + 回放 + HMI ingest</td>
+</tr>
+<tr>
+<td>显示层</td>
+<td>✅ GPU 缓冲 + 分块增量重建（11×）+ 自包含 HTML 预览 + Bevy 窗口外壳（顶点色材质 / 刀具旋转体 + 刀刃刀柄分色 / <code>--screenshot</code>）</td>
+</tr>
+<tr>
+<td>切割面着色</td>
+<td>✅ 色号 = <strong>刀具号 × 10 段 + 进度段</strong>（粗加工 1..10、精加工 11..20，20 色定性板：粗暗饱 / 精亮饱，段间色相 36°），硬边色块 + flat 插值；溯源粒度默认 <strong>每体素 1 B</strong>（512 B/叶，50×50×40 半球实测 40 MB，可调 1³/2³/4³）；<strong>只有"这一刀真的搬动了这一格"（场值变了）且新面在一格内的体素继承颜色</strong>；只擦过、没去料的刀不改色（CSG 的 <code>max</code> 不动值）；提取从空气侧角点取色；<strong>刀刃与切面同源</strong>（同一个 <code>creator_of_tool_segment</code>、同一张 <code>PALETTE</code>）；<code>--export</code> 打切面颜色分布表</td>
+</tr>
+<tr>
+<td>面板</td>
+<td>✅ 数据层（横幅/色调/报警行，纯函数可测）</td>
+</tr>
+<tr>
+<td>刀具 / 换刀</td>
+<td>✅ 锥度球头刀（母线相切于球头，不是折角）/ <code>ToolTable</code> 按<strong>刀号</strong>查（不是下标）/ <strong>一份程序内换刀</strong>：切、碰撞、着色、回放、活毛坯逐段按刀号取母线；<code>DesignModel::Boss</code>（盒∪球，半球凸台）</td>
+</tr>
+<tr>
+<td>CAM（3 轴）</td>
+<td>✅ STL → 高度场 → 粗加工（Z 层行切，按刀盘腐蚀）+ 精加工（球头平行，法向偏置）→ G 代码；<code>--cam</code> 一条链跑解释器 + 仿真 + Δz 热力图；<strong>中空/倒扣件按每列独立层数检测并拒绝</strong>（3 轴高度场只能做单值上表面）；STEP 明确拒绝（B-rep 先三角化）</td>
+</tr>
+<tr>
+<td>CAM（回转 5 轴）</td>
+<td>✅ <code>--rotary</code>：0.5°×0.25 mm 细网格取真值轮廓（<strong>双线性查询，不取 3×3 最大</strong>——取最大等于跟着包络走，刀永远进不了凹谷）→ 粗加工（<strong>平头 Ø16</strong>，径向让刀螺旋，竖直刀轴，可证不啃伤，顺带车掉方料四角）+ 精加工（<strong>Ø2 锥度球头</strong> 尖端 R1/10° 锥颈，<strong>A/C 沿外法向</strong>，<code>G43.4 H1</code> 刀尖跟随）；A 超 110° 时<strong>限位 + 沿法向抬刀 <code>R(1−cosδ)</code></strong>（不跳过，跳过会连出穿件的弦）；比对两套——<strong>亚体素 SDF 零点二分</strong>（窗 ±3.5 mm，精度 0.01 mm）出 θ×z 的 Δr 热力图，<strong>名义曲面逐点有符号偏差</strong>（<code>sim::surface_dev</code>，1.08 M 点）出深度分布 + 按所需 A 角分组</td>
+</tr>
+<tr>
+<td>形状保真度度量</td>
+<td>✅ 三层口径：① 单向几何量（<code>Δz</code> / <code>Δr</code>）② 整实体体积（<code>compare_with_design</code>，过切/残料体积 + 定位回 G 代码行）③ 名义曲面逐点（<code>surface_dev</code>，正=过切深度、负=残料厚度）；口径与盲区见 <code>docs/项目记忆.md</code> §27</td>
+</tr>
+<tr>
+<td>悬浮碎屑</td>
+<td>✅ <code>RunConfig::drop_chips</code>：跑完做一次 6 邻域连通块标记，只留最大块——切下来还"挂"在场里的碎块按掉落的切屑处理。体素 CSG 只做去除、不管连通性，不清理的话预览上会浮着一层小方块（花瓶实测丢掉 67 万格）</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="24-releasei7-13700k-8p8e">性能锚点（24 线程 release，i7-13700K = 8P+8E）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200 mm 毛坯提取（3200 万面）</td>
+<td><strong>578 ms</strong>；LOD k=4 <strong>257 ms / 200 万面 / 52 MB</strong></td>
+</tr>
+<tr>
+<td>铣光 50×50×100 / 200 刀</td>
+<td>逐刀 <strong>48 ms</strong>（0.24 ms/刀）；整批 <strong>16 ms</strong>（0.08 ms/刀）</td>
+</tr>
+<tr>
+<td><strong>建场</strong>（同场景 <code>fill_box_exact</code>）</td>
+<td><strong>14 ms</strong>（按叶整块写回；原 47 ms）</td>
+</tr>
+<tr>
+<td>20 mm 单刀</td>
+<td><strong>~0.6 ms</strong>（初版 11.9 ms，19×）</td>
+</tr>
+<tr>
+<td>vs OpenVDB 14（端到端逐刀）</td>
+<td><strong>8.0–9.4×</strong>（铣光合计 <strong>12.3×</strong>）</td>
+</tr>
+</tbody>
+</table></div>
+<blockquote>
+<p><strong>这些数字有 ±15% 的机器波动</strong>：连续跑几十轮后 CPU 降频，铣光逐刀 47 → 56–65 ms、
+建场 14 → 18–21。<strong>单次测量不可信</strong>——A/B 对比要在同一窗口交替跑，或看 <code>perf_cut_loop</code>
+的 20 轮累计值。</p>
+</blockquote>
+<hr />
+<h2 id="6">6. 下一步（按价值排序）</h2>
+<ol start="0">
+<li><strong>回转件还差最后一层：中段过切</strong>。换刀（平头开粗 + Ø2 锥度球头）并把刀路从
+   "包络"改成"真值"之后，<code>流云花瓶.stl</code> 从 24.9% → <strong>61.0%</strong> 落在 ±0.15 mm，
+   残料 23.7% → 1.6%，超窄带 24492 → 0。<strong>但 A 60..110° 这一段仍有过切</strong>
+   （平均 0.39 / 0.52，而 A 30..60° 与 &gt;110° 只有 0.16 / 0.22）——嫌疑是锥颈在中等
+   摆角扫到对面的壁，以及 1.25°/0.6 mm 步距下的弦高。下一步：把颈长/锥角做成参数
+   扫一遍（注意 §28 记的坑：单纯缩短颈长不成立），以及试"沿纹理走刀"（streamline）
+   替掉当前的 θ 栅格——当前走刀方向与漩涡成 ~45°，每个谷都被横切。</li>
+<li><strong>剖切平面进 Bevy</strong>——HTML 预览版已有（HUD 滑块 + <code>discard</code>），窗口里还没接。五轴件的内腔不剖开根本看不见。</li>
+<li><strong>点选面 → 反查 creator</strong>（ADR-005 §交互）。溯源数据已经有了，缺的是拾取 + 图例面板。</li>
+<li><strong><code>TileCache</code> 增量上传进窗口</strong>（<code>render</code> 侧 11× 已实测，差 Bevy 那一步）。</li>
+<li><strong><code>SimJob</code> 进度条</strong>（事件层已备，面板接一下）。</li>
+<li>自适应 LOD / <code>k=2</code> 按 level-1 分块 / 块索引第一遍并行 / <code>G95</code> 时间口径。</li>
+<li><strong>小刀切削成本</strong>：R0.5 锥度球头逐刀 3.4 ms（φ6 只要 0.24 ms）——小刀的 AABB
+   小但 sd_profile 的固定成本占比高，值得给"球头/锥度"加一条解析快路径。</li>
+<li><strong>大毛坯显式降粒度</strong>：默认 <code>creator_sub = 8</code> 换精度，R15 半球实测 49 MB；
+   只关心几何时调回 1/2/4，或 <code>set_creator(0)</code> 关闭溯源。</li>
+</ol>
+<p><strong>不要做的</strong>：通用网格碰撞、BVH、STEP（B-rep）解析、<code>cncsim-core</code>、共享 <code>Diagnostic</code> 枚举。</p>
+<hr />
+<h2 id="7">7. 改代码前读哪份文档</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>要改</th>
+<th>先读</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>切削 / 扫掠 / 体素存储</td>
+<td><code>docs/ADR-006-稀疏体素数据结构.md</code>、<code>docs/ADR-002-材料去除内核-SDF体素方案评估.md</code></td>
+</tr>
+<tr>
+<td>表面提取 / LOD</td>
+<td><code>docs/ADR-006</code> §7.1、<code>docs/ADR-008-显示LOD与网格预算.md</code>、<code>docs/ADR-010-单元格索引.md</code></td>
+</tr>
+<tr>
+<td>并行 / 性能</td>
+<td><code>docs/ADR-009-段内并行.md</code>、<code>docs/并发与性能.md</code></td>
+</tr>
+<tr>
+<td>碰撞</td>
+<td><code>docs/ADR-004-碰撞检查方案.md</code></td>
+</tr>
+<tr>
+<td>G 代码语义</td>
+<td><code>docs/G代码解释器设计.md</code>、<code>refs/linuxcnc/overview.adoc</code>（<strong>权威清单在这里，别凭记忆</strong>）</td>
+</tr>
+<tr>
+<td>运动学 / 机床参数</td>
+<td><code>docs/机床建模-AC双转台.md</code>、<code>docs/ADR-007-机床模型表示.md</code></td>
+</tr>
+<tr>
+<td>着色 / 溯源</td>
+<td><code>docs/ADR-005-切割面着色与溯源.md</code></td>
+</tr>
+<tr>
+<td>刀具形状 / 换刀 / 半球场景</td>
+<td><code>docs/项目记忆.md</code> §21（母线切点、螺旋解析式、锥颈干涉）</td>
+</tr>
+<tr>
+<td>渲染缺陷体检 / 颜色麻点</td>
+<td><code>docs/项目记忆.md</code> §22（四类检查、四个根因、法线细步长为什么失败）</td>
+</tr>
+<tr>
+<td>显示层 / 窗口</td>
+<td><code>docs/ADR-011-显示层与预览导出.md</code></td>
+</tr>
+<tr>
+<td>HMI / 报错</td>
+<td><code>docs/HMI与控制语义.md</code></td>
+</tr>
+<tr>
+<td>精度问题</td>
+<td><code>docs/计算精度分析.md</code></td>
+</tr>
+<tr>
+<td>依赖取舍 / 自研边界（"为什么不用 X"）</td>
+<td><code>docs/ADR-003-自研技术栈边界与替代方案.md</code></td>
+</tr>
+<tr>
+<td><strong>任何"这条试过没有"</strong></td>
+<td><strong><code>docs/开发日志.md</code></strong>（含 9 条死胡同清单与全部证伪记录）</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="8">8. 已知环境坑</h2>
+<ul>
+<li><strong><code>cargo test</code> 打印大量 <code>error deleting lock file</code></strong>——Windows 增量编译锁残留，无害，不是代码警告。</li>
+<li><strong>Bevy 0.20</strong>：<code>shadows_enabled</code> → <code>shadow_maps_enabled</code>；<code>DefaultPlugins</code> 已含 picking（重复加 panic）；<code>Mesh</code> 属性是<strong>带类型数组</strong>（传扁平 <code>Vec&lt;f32&gt;</code> 编译过、<strong>运行时</strong> panic）；自定义着色器必须 WESL。</li>
+<li><strong>egui 自带字体无 CJK 字形</strong>（中文全方框）→ 已嵌 MiSans（<code>assets/fonts/</code>）。</li>
+<li><strong>Rust 2024</strong>：隐式借用模式里不能写 <code>&amp;v</code>；<code>unsafe fn</code> 内每个不安全调用要显式包 <code>unsafe {}</code>。</li>
+<li><strong><code>rayon</code> 只能经 <code>voxel::par::pool()</code></strong>——绕过它直接调 <code>par_iter</code> 会另建全局池（实测 50 线程抢 24 核）。</li>
+<li><strong>并行不是默认更快</strong>：<code>blit_leaves_parallel</code> 在逐刀（256 KB）上比串行慢 <strong>8.4 倍</strong>，已加 1 MB 门槛。加并行前先算"每块工作 vs fork-join 唤醒（15–50 µs）"。</li>
+<li><strong>性能诊断不要用每刀 <code>eprintln!</code></strong>——打印比被测对象贵，测出来的分布全偏。用 <code>CNCSIM_PROF=1</code> + <code>prof_take()</code> / <code>prof_take_write()</code> / <code>prof_take_box()</code>（原子累加，跑完一次读）。</li>
+<li><strong>建场和切削要分开计时</strong>：<code>PROF_BOX</code> 是建场（一次性），<code>PROF_EVAL/WRITE</code> 是切削（每刀）。混在一起看不出谁贵。</li>
+<li><strong>"数学上等价"的浮点改写要实测</strong>：<code>cur * k_dist &lt; x</code> 与 <code>cur &lt; ceil(x * k_value)</code> 在实数上等价、浮点下不等价（见 <code>cut.rs::int_threshold_tests</code> 的反向测试）。</li>
+<li><strong><code>uniform_value</code> 适合大块（早退），<code>count_ne</code> 必须小块（要数清楚）</strong>。把后者也提到 32 会让铣光慢 8 ms。</li>
+<li><strong>单位陷阱（最高频的一类 bug）</strong>：<code>RunConfig.stock_size</code> 是<strong>体素</strong>不是 mm；<code>kin</code> 旋转轴是<strong>度</strong>不是弧度；<code>D</code> 是寄存器号不是半径；<code>DVec3</code> 没有 <code>/ f64</code>。完整 11 条见 <code>docs/项目记忆.md</code> §16。</li>
+<li>本机 cargo 走 rsproxy-sparse 镜像。</li>
+</ul>
+<hr />
+<h2 id="9">9. 记忆与文档索引</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>文档</th>
+<th>什么时候读</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>docs/项目记忆.md</code></strong></td>
+<td><strong>决策层单一真相源</strong>：架构铁律、精度口径、性能锚点、死胡同、单位陷阱、测试方法论、待办</td>
+</tr>
+<tr>
+<td><strong><code>docs/开发日志.md</code></strong></td>
+<td>按日期的工作史：每天做了什么、拿到什么数字、踩了什么坑（含被推翻的中间结论）</td>
+</tr>
+<tr>
+<td><code>README.md</code></td>
+<td>项目全貌 + 每块实现的详细说明（较长）</td>
+</tr>
+<tr>
+<td><code>docs/技术方案-五轴CNC仿真.md</code></td>
+<td>13 章完整方案</td>
+</tr>
+<tr>
+<td><code>docs/架构设计.md</code></td>
+<td>分层、依赖白名单、守卫机制</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>.workbuddy-ai/memory/MEMORY.md</code> 与 <code>.workbuddy/memory/README.md</code> 现在只是<strong>指针</strong>——不要再往那两个目录写笔记，统一写进 <code>docs/开发日志.md</code>。</p>
+</main>
+</div>
+<script>
+// 给代码块标注语言
+document.querySelectorAll('.codehilite').forEach(function (el) {
+  var code = el.querySelector('code');
+  if (!code) return;
+  var cls = Array.from(code.classList).find(function (c) { return c.indexOf('language-') === 0; });
+  if (cls) el.setAttribute('data-lang', cls.replace('language-', ''));
+});
+// 侧栏当前章节高亮
+var links = Array.from(document.querySelectorAll('aside a[href^="#"]'));
+var targets = links.map(function (a) { return document.getElementById(a.getAttribute('href').slice(1)); });
+function spy() {
+  var y = window.scrollY + 120, best = -1;
+  targets.forEach(function (t, i) { if (t && t.offsetTop <= y) best = i; });
+  links.forEach(function (a, i) { a.style.color = i === best ? 'var(--accent)' : ''; });
+}
+window.addEventListener('scroll', spy, { passive: true });
+spy();
+</script>
+</body>
+</html>

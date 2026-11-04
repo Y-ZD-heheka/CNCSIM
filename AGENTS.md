@@ -2,14 +2,14 @@
 
 > 给 AI agent / 新接手者的入口。**先读这一页，再读 `docs/项目记忆.md`。**
 >
-> 最后更新：2026-11-02 · 13 crate / **469 测试全绿** / 3 个外部依赖全最新
+> 最后更新：2026-11-04 · 14 crate / **494 测试全绿** / 5 个外部依赖全最新
 > （`cargo clippy` 有 8 条历史遗留告警，见 §2 注）
 
 ---
 
 ## 1. 这是什么
 
-Bevy + Rust 的**五轴 CNC 仿真验证器**，不是 CAM（不生成刀路）。
+Bevy + Rust 的**五轴 CNC 仿真验证器**，另带一个 **3 轴简化 CAM**（STL → 高度场 → G 代码）用于自造测试程序。
 
 只回答四个问题：**会不会撞、会不会过切、实际跑多久、哪里出问题。**
 
@@ -20,7 +20,7 @@ Bevy + Rust 的**五轴 CNC 仿真验证器**，不是 CAM（不生成刀路）�
 ## 2. 命令（改完代码必跑）
 
 ```bash
-cargo test                        # 431 绿（17 ignored 是性能基准）
+cargo test                        # 477 绿（29 ignored 是性能基准/需外部输入）
 cargo clippy --all-targets        # 零新增；现有 8 条历史遗留（collide/gcode/voxel 旧代码），改到哪清到哪
 python tools/check_deps.py        # 架构守卫：依赖白名单 + L0–L3 无 bevy + 禁用名
 python tools/check_versions.py    # 依赖必须最新稳定版且精确锁定
@@ -39,8 +39,14 @@ cargo run --release --features window -- --window      # 开 Bevy 窗口（首�
 cargo run -- --machine assets/machines/ac_trunnion.machine.ron   # 换机床，不重编译
 cargo run -- --design part.stl                         # 设计模型从 STL 加载，算过切/残留
 cargo run -- --demo pocket                             # 换回旧演示（面铣 + G41 方槽 + G83 孔）
-cargo run --release -- --demo dome --export out/dome.html  # 50×50×100 铣 R15 半球凸台：T1 粗 + T2 锥度球头精（换刀端到端）
-python tools/check_mesh.py out/dome.html --ref-sphere 25,25,84,15   # 网格体检：几何/拓扑/法线/颜色（连通分量按**位置**判，不受拆顶点副本干扰）
+cargo run --release -- --demo dome --export out/dome.html  # 50×50×40 铣 R15 半球凸台：T1 粗 + T2 锥度球头精（换刀端到端）
+cargo run --release -- --cam assets/models/relief.stl --stock 16,16,3.5 --gcode out/relief.nc --diff out/relief.diff.html --export out/cam.html
+# CAM（3 轴）：STL → G 代码 → 解释器 → 仿真 → Δz 热力图（`--cam` 在 `--machine` 之前分支）
+cargo run --release -- --cam "C:/path/流云花瓶.stl" --stock 112,112,250 --rotary --gcode out/vase.nc --diff out/vase.diff.html --export out/vase.html
+# CAM（A/C 回转 + RTCP）：粗（径向让刀螺旋）+ 精（法向摆角）→ G43.4 → 外轮廓 Δr
+cargo run --release -- --cam "C:/path/流云花瓶.stl" --stock 112,112,250 --rotary --no-rough --gcode out/nr.nc
+# 对照实验：跳过粗加工，隔离"过切是粗加工留下的还是精加工造成的"
+python tools/check_mesh.py out/dome.html --ref-sphere 25,25,24,15   # 网格体检：几何/拓扑/法线/颜色（连通分量按**位置**判，不受拆顶点副本干扰）
 ```
 
 **截图检查**（无显示器时唯一能看画面的手段）：
@@ -89,14 +95,15 @@ python tools/md2html.py <in.md> <out.html> "侧栏标题" "chip1|chip2"   # 改�
 ## 3. 目录与分层
 
 ```
-crates/           13 个 crate（依赖方向由 check_deps.py 守卫）
+crates/           14 个 crate（依赖方向由 check_deps.py 守卫）
   math            零依赖 f64 线性代数（含非对称矩阵求逆）
   motion          Pose（tip + axis）+ slerp
   tool            刀具母线 Profile + sd_profile
   kin             FK / IK / RTCP / 奇异点 / 非线性误差
   config          .machine.ron → MachineTopology（唯一知道磁盘格式的 crate）
   gcode           文本 → 位姿（不做运动学）
-  voxel           稀疏窄带 SDF + 扫掠 + CSG + Surface Nets + LOD + STL
+  cam             三角网格 → 3 轴高度场刀路 / A/C 回转 RTCP 刀路 → G 代码（只依赖 math/tool）
+  voxel           稀疏窄带 SDF + 扫掠 + CSG + Surface Nets + LOD + STL + 连通块清理
   collide         保守推进 + GJK + EPA + episode 聚类
   sim             编排：run / compare / stock / job / playback
   hmi             控制状态机（急停、倍率、报警队列）
@@ -114,11 +121,12 @@ testdata/         golden CSV + design_box.stl
 
 | crate | 测试 | crate | 测试 |
 |---|---|---|---|
-| `voxel` | 149 | `gcode` | 117 |
-| `sim` | 71 | `collide` | 34 |
-| `kin` | 28 | `render` | 16 |
-| `tool` | 10 | `math` / `motion` / `config` | 9 / 9 / 9 |
-| `ui` | 6 | `hmi` | 3 |
+| `voxel` | 156 | `gcode` | 117 |
+| `sim` | 82 | `collide` | 34 |
+| `kin` | 28 | `render` | 18 |
+| `cam` | 13 | `tool` | 10 |
+| `math` / `motion` / `config` | 9 / 9 / 9 | `ui` | 6 |
+| `hmi` | 3 | | |
 
 ---
 
@@ -160,9 +168,13 @@ testdata/         golden CSV + design_box.stl
 | 碰撞 | ✅ 保守推进 + GJK + EPA + episode 聚类 + 毛坯双向接线 |
 | 仿真编排 | ✅ 端到端主循环 + 设计比对（过切/残留）+ 后台任务 + 回放 + HMI ingest |
 | 显示层 | ✅ GPU 缓冲 + 分块增量重建（11×）+ 自包含 HTML 预览 + Bevy 窗口外壳（顶点色材质 / 刀具旋转体 + 刀刃刀柄分色 / `--screenshot`） |
-| 切割面着色 | ✅ 色号 = **刀具号 × 10 段 + 进度段**（粗加工 1..10、精加工 11..20，20 色定性板：粗暗饱 / 精亮饱，段间色相 36°），硬边色块；溯源粒度默认 **每叶 1 B**（0.5 MB，可调 2³/4³/每体素）；**刀刃与切面同源**（同一个 `creator_of_tool_segment`、同一张 `PALETTE`）；`--export` 打切面颜色分布表 |
+| 切割面着色 | ✅ 色号 = **刀具号 × 10 段 + 进度段**（粗加工 1..10、精加工 11..20，20 色定性板：粗暗饱 / 精亮饱，段间色相 36°），硬边色块 + flat 插值；溯源粒度默认 **每体素 1 B**（512 B/叶，50×50×40 半球实测 40 MB，可调 1³/2³/4³）；**只有"这一刀真的搬动了这一格"（场值变了）且新面在一格内的体素继承颜色**；只擦过、没去料的刀不改色（CSG 的 `max` 不动值）；提取从空气侧角点取色；**刀刃与切面同源**（同一个 `creator_of_tool_segment`、同一张 `PALETTE`）；`--export` 打切面颜色分布表 |
 | 面板 | ✅ 数据层（横幅/色调/报警行，纯函数可测） |
 | 刀具 / 换刀 | ✅ 锥度球头刀（母线相切于球头，不是折角）/ `ToolTable` 按**刀号**查（不是下标）/ **一份程序内换刀**：切、碰撞、着色、回放、活毛坯逐段按刀号取母线；`DesignModel::Boss`（盒∪球，半球凸台） |
+| CAM（3 轴） | ✅ STL → 高度场 → 粗加工（Z 层行切，按刀盘腐蚀）+ 精加工（球头平行，法向偏置）→ G 代码；`--cam` 一条链跑解释器 + 仿真 + Δz 热力图；**中空/倒扣件按每列独立层数检测并拒绝**（3 轴高度场只能做单值上表面）；STEP 明确拒绝（B-rep 先三角化） |
+| CAM（回转 5 轴） | ✅ `--rotary`：0.5°×0.25 mm 细网格取真值轮廓（**双线性查询，不取 3×3 最大**——取最大等于跟着包络走，刀永远进不了凹谷）→ 粗加工（**平头 Ø16**，径向让刀螺旋，竖直刀轴，可证不啃伤，顺带车掉方料四角）+ 精加工（**Ø2 锥度球头** 尖端 R1/10° 锥颈，**A/C 沿外法向**，`G43.4 H1` 刀尖跟随）；A 超 110° 时**限位 + 沿法向抬刀 `R(1−cosδ)`**（不跳过，跳过会连出穿件的弦）；比对两套——**亚体素 SDF 零点二分**（窗 ±3.5 mm，精度 0.01 mm）出 θ×z 的 Δr 热力图，**名义曲面逐点有符号偏差**（`sim::surface_dev`，1.08 M 点）出深度分布 + 按所需 A 角分组 |
+| 形状保真度度量 | ✅ 三层口径：① 单向几何量（`Δz` / `Δr`）② 整实体体积（`compare_with_design`，过切/残料体积 + 定位回 G 代码行）③ 名义曲面逐点（`surface_dev`，正=过切深度、负=残料厚度）；口径与盲区见 `docs/项目记忆.md` §27 |
+| 悬浮碎屑 | ✅ `RunConfig::drop_chips`：跑完做一次 6 邻域连通块标记，只留最大块——切下来还"挂"在场里的碎块按掉落的切屑处理。体素 CSG 只做去除、不管连通性，不清理的话预览上会浮着一层小方块（花瓶实测丢掉 67 万格） |
 
 ### 性能锚点（24 线程 release，i7-13700K = 8P+8E）
 
@@ -182,7 +194,13 @@ testdata/         golden CSV + design_box.stl
 
 ## 6. 下一步（按价值排序）
 
-0. **`creator_sub = 8` 还没默认启用**：它把溢出压到 0.025 mm，但内存 ×8（200 mm 毛坯 @h=0.05 约 128 MB）且切削慢 30%。默认 4 是拐点——除非有场景真的需要亚体素精度。
+0. **回转件还差最后一层：中段过切**。换刀（平头开粗 + Ø2 锥度球头）并把刀路从
+   "包络"改成"真值"之后，`流云花瓶.stl` 从 24.9% → **61.0%** 落在 ±0.15 mm，
+   残料 23.7% → 1.6%，超窄带 24492 → 0。**但 A 60..110° 这一段仍有过切**
+   （平均 0.39 / 0.52，而 A 30..60° 与 >110° 只有 0.16 / 0.22）——嫌疑是锥颈在中等
+   摆角扫到对面的壁，以及 1.25°/0.6 mm 步距下的弦高。下一步：把颈长/锥角做成参数
+   扫一遍（注意 §28 记的坑：单纯缩短颈长不成立），以及试"沿纹理走刀"（streamline）
+   替掉当前的 θ 栅格——当前走刀方向与漩涡成 ~45°，每个谷都被横切。
 1. **剖切平面进 Bevy**——HTML 预览版已有（HUD 滑块 + `discard`），窗口里还没接。五轴件的内腔不剖开根本看不见。
 2. **点选面 → 反查 creator**（ADR-005 §交互）。溯源数据已经有了，缺的是拾取 + 图例面板。
 3. **`TileCache` 增量上传进窗口**（`render` 侧 11× 已实测，差 Bevy 那一步）。
@@ -190,6 +208,8 @@ testdata/         golden CSV + design_box.stl
 5. 自适应 LOD / `k=2` 按 level-1 分块 / 块索引第一遍并行 / `G95` 时间口径。
 6. **小刀切削成本**：R0.5 锥度球头逐刀 3.4 ms（φ6 只要 0.24 ms）——小刀的 AABB
    小但 sd_profile 的固定成本占比高，值得给"球头/锥度"加一条解析快路径。
+7. **大毛坯显式降粒度**：默认 `creator_sub = 8` 换精度，R15 半球实测 49 MB；
+   只关心几何时调回 1/2/4，或 `set_creator(0)` 关闭溯源。
 
 **不要做的**：通用网格碰撞、BVH、STEP（B-rep）解析、`cncsim-core`、共享 `Diagnostic` 枚举。
 

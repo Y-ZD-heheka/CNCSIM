@@ -314,6 +314,7 @@ impl<S: Scalar> SparseGrid<S> {
         // （32 字节）——VTune 上 `__rdl_realloc` + `copy_nonoverlapping` 合计 1.1 s CPU。
         let mut out: Vec<VertexRecord> = Vec::with_capacity(range.len().saturating_mul(64));
         let mut seen: FxHashMap<[i32; 3], ()> = FxHashMap::default();
+        let mut color_cursor = crate::tree::CreatorCursor::default();
 
         for lc in &leaves[range] {
             let base = [lc[0] << 3, lc[1] << 3, lc[2] << 3];
@@ -331,21 +332,7 @@ impl<S: Scalar> SparseGrid<S> {
             // 批量取 27 片叶要复制 13.8 KB/叶，比逐点查更慢）。
             let mut lo = f64::INFINITY;
             let mut hi = f64::NEG_INFINITY;
-            let (view, slot) = self.leaf_view_with_slot(base);
-            // 溯源：这片叶的 `creator` 起点（ADR-005）。没有叶（tile / 背景）
-            // 就是原始毛坯面，索引 0。
-            //
-            // **按子块取**而不是整叶一个值：`creator_sub > 1` 时同一片叶里
-            // 切过的子块和没切过的子块颜色不同，这正是"颜色溢出"的修法。
-            let creator_leaf = slot.map(|(li, _)| li);
-            // `sub == 1`：整片叶一个值，**提到循环外**——与加粒度之前逐字相同，
-            // 16M 顶点的提取不会因为溯源多付一次逐顶点取址。
-            // `sub > 1` 才需要按子块取（`None` 表示"走逐顶点分支"）。
-            let uniform_creator = if self.creator_sub == 1 {
-                Some(creator_leaf.map(|li| self.creator_at(li as u32)).unwrap_or(0))
-            } else {
-                None
-            };
+            let (view, _slot) = self.leaf_view_with_slot(base);
             match view {
                 Some(LeafView::Leaf(Leaf::Dense(a))) => {
                     for hz in 0..8usize {
@@ -508,17 +495,22 @@ impl<S: Scalar> SparseGrid<S> {
                         }
 
                         if let Some((pos, normal)) = vertex_of(&corners, self.voxel_center(p), h) {
-                            // 顶点取**自己那一格最小角**所在子块的颜色。
-                            // 叶外（halo 格、主人叶不存在）一律 0。
-                            let creator = match uniform_creator {
-                                Some(c) => c,
-                                None => match creator_leaf {
-                                    Some(li) if crate::leaf_coord(p) == *lc => {
-                                        self.creator_at_voxel(li, p)
-                                    }
-                                    _ => 0,
-                                },
+                            // **颜色取空气侧**：8 个角中 SDF 最大（最像空气）的那个体素。
+                            // 盖色的语义是“这个体素被哪把刀从材料切成空气”，
+                            // 材料侧角点根本没有换色，取它会把切面染成 0 / 旧色。
+                            // 跨叶查询走游标，避免逐顶点哈希下降。
+                            let color_p = {
+                                let ci = (0..8)
+                                    .max_by(|&a, &b| corners[a].total_cmp(&corners[b]))
+                                    .unwrap_or(0);
+                                [
+                                    p[0] + CORNER[ci][0],
+                                    p[1] + CORNER[ci][1],
+                                    p[2] + CORNER[ci][2],
+                                ]
                             };
+                            let creator =
+                                self.creator_of_voxel_cached(color_p, &mut color_cursor);
                             // 本地去重：同一块内相邻叶会各算一次同一格。
                             // 必须用哈希，不能线性扫（200mm 毛坯一块就有几十万顶点）。
                             //

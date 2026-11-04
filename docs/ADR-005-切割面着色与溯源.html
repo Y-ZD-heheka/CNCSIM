@@ -238,7 +238,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <div class="layout">
 <aside>
   <div class="brand">Technical Design</div>
-  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
+  <div class="brand-title">ADR-005 切割面着色</div>
   <div class="toc">
 <ul>
 <li><a href="#0">0. 结论</a></li>
@@ -267,7 +267,9 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#8">8. 工作量</a></li>
 <li><a href="#9">9. 测试</a></li>
 <li><a href="#_1">修订记录</a><ul>
+<li><a href="#2026-11-04">2026-11-04：默认每体素溯源，只认材料去除</a></li>
 <li><a href="#2026-11-02-10">2026-11-02：色号从「每刀」改成「每工序内进度 10 档」</a></li>
+<li><a href="#2026-11-04_1">2026-11-04（晚）：判据从「跨零」改成「场值真的变了」</a></li>
 </ul>
 </li>
 </ul>
@@ -275,7 +277,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 </aside>
 <main>
-<h1 id="adr-005">ADR-005 切割面着色与溯源</h1>
+<h1 id="adr-005">ADR-005 切割面着色与溯源</h1><div class="meta"><span class="chip hi">溯源</span><span class="chip hi">flat</span><span class="chip">体素级</span></div>
 <blockquote>
 <p>状态：<strong>设计</strong>
 日期：2026-10-28
@@ -619,6 +621,27 @@ G 代码：N1240 - N1380
 <p><strong>要能证伪</strong>：不能只断言"颜色不是默认值"，要断言<strong>具体的 sweep id</strong>。<code>second_tool_overwrites_first</code> 是最关键的一条——它锁住"取最晚"这个语义，写反了（取最早）颜色看起来也对，但语义是错的。</p>
 <hr />
 <h2 id="_1">修订记录</h2>
+<h3 id="2026-11-04">2026-11-04：默认每体素溯源，只认材料去除</h3>
+<p><strong>问题</strong>：硬边色块下，同叶/同子块的旧刀痕与原始毛坯面会被当前刀一起改色；
+WebGL/WGSL 还线性插值调色板编号，跨色三角形内部生成第三种颜色。</p>
+<p><strong>修法</strong>：</p>
+<ul>
+<li><code>RunConfig::creator_sub</code> 默认 <strong>8</strong>（每体素 1 B，512 B/叶）。实测 30×30×12
+  毛坯最坏溢出 <strong>0.025 mm</strong>，切削 2.7 ms（sub=1 为 2.1 ms）。</li>
+<li><strong>盖章只认材料去除</strong>：旧值 <code>&lt; 0</code>、新值 <code>&gt;= 0</code>、且新面仍在窄带内。
+  完全重合的刀、擦过旧面的刀、只修正邻近距离场但未去除材料的刀都不改色。</li>
+<li>提取时颜色取 8 个角中 <strong>SDF 最大（空气侧）</strong> 的体素；材料侧角点没有换色，
+  继续取最小角会把切面染成 0 或旧色。</li>
+<li>顶点色在两条渲染链都用 <strong>flat</strong> 插值，三角形内只能是某一个端点的色号。</li>
+<li><code>TileCache::same_mesh</code> 比较法向与颜色，纯 creator 变化也会重传。</li>
+</ul>
+<p>回归：<code>adjacent_cuts_in_one_leaf_do_not_recolor_each_other</code>、
+<code>original_top_next_to_cut_stays_uncolored_at_voxel_granularity</code>、
+<code>coincident_pass_keeps_the_surface_it_did_not_change</code>、
+<code>grazing_pass_does_not_recolor_untouched_wall</code>、
+<code>creator_changes_only_where_the_cut_moved_the_surface</code>、
+<code>palette_indices_use_flat_interpolation_in_both_renderers</code>、
+<code>color_only_change_must_be_uploaded</code>。</p>
 <h3 id="2026-11-02-10">2026-11-02：色号从「每刀」改成「每工序内进度 10 档」</h3>
 <p>原文的"索引 = 第几刀（12 色往返，周期 22）"在刀数上千的场景失效：
 半球凸台精加工 3008 条 <code>G1</code>，每 1.2 mm 换一次色，12 色装不下，
@@ -633,6 +656,27 @@ G 代码：N1240 - N1380
 </ul>
 <p>代价：不能再靠颜色反查"第几刀"。如果将来需要，可以加"点选面 → 反查 creator"
 （原 ADR §交互 已列），颜色只做粗粒度阶段提示。</p>
+<h3 id="2026-11-04_1">2026-11-04（晚）：判据从「跨零」改成「场值真的变了」</h3>
+<p><strong>现象</strong>：50×50×40 半球放大后，赤道一圈 T1 紫（9）与 T2 棕（11）交替，
+24.55–24.85 mm 那圈 <strong>71.6%</strong> 的顶点仍是 T1 色。</p>
+<p><strong>逐体素追踪</strong>：粗加工最后一层留量 <code>ROUGH_FLOOR_ALLOW_MM = 0.02</code>，精加工的
+锥颈只削 0.02–0.04 mm。表面格实测 <strong>−14 → −1</strong>（−0.044 → −0.003 mm）：
+场值确实变了、面确实是这一刀削出来的，但格心没有跨到空气侧，旧判据直接丢掉。
+提取又取空气侧角点，那里还是粗加工留下的 9。</p>
+<p><strong>决定</strong>：盖章条件 = <strong>值变了 且 |新值| &lt; h</strong>。</p>
+<ul>
+<li>值变 ⟺ 这一刀真的搬动了这一格的材料：CSG 是 <code>d = max(d, −sd_tool)</code>，
+  没去料的刀（<code>sd_tool ≥ 0</code>）不会改任何值，所以「擦边不改色」仍然成立。</li>
+<li><code>|新值| &lt; h</code> 把范围锁在造面的一格内，深处被挖空的体素不盖章。</li>
+<li>不再要求 <code>old &lt; 0 &amp;&amp; new ≥ 0</code>——留量小于一格时这条永远抓不到面。</li>
+</ul>
+<p><strong>验证</strong>（同一份 40 mm 网格，修前 → 修后）：赤道 9 号顶点 219/306 → <strong>46/306</strong>；
+孤立噪点 56 → <strong>23</strong>；混色三角形 8010 → <strong>6964</strong>；沿 z 每个 2° 扇区里
+11→12 的切换次数 <strong>177/180 恰好 1 次</strong>（3 个扇区 3 次）——色带边界不再来回横跳。</p>
+<p><strong>边界</strong>：仍有一格（0.4 mm）宽的锯齿，这是顶点色 + flat 插值的分辨率极限，
+不是串色。要更细只能降 LOD k，或改逐片元插值（会重新产生中间色号，本 ADR 不要）。</p>
+<p><strong>顺带</strong>：演示毛坯从 50×50×100 改为 <strong>50×50×40</strong>（球心 z=24、球顶 39、顶面 24），
+HTML 预览相机与地面从 Y-up 改为 <strong>Z-up</strong>，默认距离 2.45R（截图另取 1.95R 取景）。</p>
 </main>
 </div>
 <script>

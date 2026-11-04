@@ -331,9 +331,29 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#_78">当天追加：样板件从「半球坑」改成「半球凸台」</a></li>
 <li><a href="#_79">再追加：球顶那块灰斑</a></li>
 <li><a href="#10">再追加：色号改成「每工序内 10 档」</a></li>
+<li><a href="#11-04">再追加：切割染色改体素级，只认材料去除（11-04）</a></li>
 </ul>
 </li>
-<li><a href="#_80">数字演进一览</a></li>
+<li><a href="#11-04_1">赤道色斑：判据从「跨零」改成「值真的变了」（11-04 晚）</a></li>
+<li><a href="#camstl-g-11-04">简化 CAM：STL → 高度场 → G 代码（11-04 晚）</a></li>
+<li><a href="#rtcp-11-04">回转五轴 RTCP + 悬浮碎屑（11-04 深夜）</a><ul>
+<li><a href="#rtcp">回转 RTCP</a></li>
+<li><a href="#_80">悬浮碎屑</a></li>
+</ul>
+</li>
+<li><a href="#11-04_2">形状保真度该量什么（11-04 更晚）</a><ul>
+<li><a href="#_81">三层口径</a></li>
+<li><a href="#486-249">结果：48.6% → 24.9%，并且否掉了上一节的解释</a></li>
+</ul>
+</li>
+<li><a href="#11-04_3">平头开粗 + 锥度球头精加工（11-04 深夜）</a><ul>
+<li><a href="#_82">主因不在刀，在刀路</a></li>
+<li><a href="#_83">换刀</a></li>
+<li><a href="#_84">结果（同一件花瓶、同一套度量）</a></li>
+<li><a href="#_85">一个被证伪的调参方向</a></li>
+</ul>
+</li>
+<li><a href="#_86">数字演进一览</a></li>
 </ul>
 </div>
 
@@ -2661,8 +2681,304 @@ z=100，赤道就是底面平面；设计模型加 <code>DesignModel::Boss</code
 两条都改的是<strong>测试</strong>（断言写错/容差拍太紧），不是代码。<code>hemisphere</code> 的 6 个测试同样
 先红：粗加工那条把不等式方向写反（应是"刀在等距面<strong>内</strong>"），精加工那条是 G 代码
 3 位小数圆整把相切误差抬到 1e-3（改 4 位 + 容差 2e-4）。</p>
+<h3 id="11-04">再追加：切割染色改体素级，只认材料去除（11-04）</h3>
+<p>用户报「染色做不到只染切割的地方，相邻切割互相侵染」。三个叠加根因：</p>
+<ol>
+<li>默认 <code>creator_sub = 1</code>，整片叶（8h）共用一个色号；</li>
+<li><code>changed_mask</code> 只要旧值贴面就盖章，不管当前刀是否经过——同子块任意变化
+   都会重盖旧刀痕和原始毛坯面；</li>
+<li>WGSL/WebGL 插值调色板编号，跨色三角形内部生成第三种颜色。</li>
+</ol>
+<p>修法：默认 <code>creator_sub = 8</code>；盖章只认 <strong>材料→空气且新面在窄带内</strong> 的体素，
+重合刀/擦边刀/仅距离场修正都不改色；提取取 8 角中 SDF 最大（空气侧）的体素；
+顶点色 flat；<code>same_mesh</code> 比较颜色与法向。</p>
+<p><strong>红绿过程</strong>：先加体素级语义测试，旧实现报「完全重合的刀把旧面从 3 改成 7」
+和「未去除材料的体素 (0,22,19) 从 3 改成 7」。收紧盖章后几何测试又暴露
+“取最小角取到材料侧”，4 条切面颜色变 0；改成取空气侧角点后全绿。</p>
+<p><strong>实测</strong>（30×30×12，六切深）：sub=1 溢出 0.500 mm，2/4/8 依次 0.200 / 0.100 /
+<strong>0.025 mm</strong>；sub=8 的 run 2.7 ms（sub=1 为 2.1 ms），几何顶点四档完全相同。
+R15 半球整件仿真 <strong>16.7 s</strong>，溯源数组 49 MB，切面 13 色全部保留。
+全量 <strong>477 绿、29 ignored</strong>；clippy 无新增；架构与依赖守卫通过。</p>
 <hr />
-<h2 id="_80">数字演进一览</h2>
+<h2 id="11-04_1">赤道色斑：判据从「跨零」改成「值真的变了」（11-04 晚）</h2>
+<p>用户把赤道放大发来：「颜色互相侵染」。截图上的棕/紫/绿不是渐变，是 <strong>T1 的 9 号
+紫和 T2 的 11 号棕在同一个球面上交替</strong>。</p>
+<p><strong>逐体素追踪</strong>（临时 <code>CNCSIM_TRACE=叶x,叶y,叶z,局部i</code>，只在目标叶打印）：
+表面格的值从 <strong>−14 被精加工抬到 −1</strong>（−0.044 → −0.003 mm），<code>stamp=0</code>——
+旧判据要求「材料→空气」，格心没跨零就丢了。提取再取空气侧角点，那边还是
+粗加工留下的 9，于是同一物理面 9/11 椒盐。</p>
+<p>根因不在调色板，也不在提取：<strong>粗加工最后一层的 <code>ROUGH_FLOOR_ALLOW_MM = 0.02</code>
+比一个体素（0.1 mm）还小</strong>，精加工在赤道只削 0.02–0.04 mm。</p>
+<p><strong>修法</strong>：盖章条件 = <code>值变了 &amp;&amp; |新值| &lt; h</code>。CSG 是 <code>max(d, −sd_tool)</code>，没去料的刀
+不会改值，所以「擦边不改色」仍然成立；<code>|新值| &lt; h</code> 把范围锁在造面的一格内。
+<code>sub=1</code> 的叶级分支同样改。</p>
+<p><strong>红绿</strong>：先把 <code>creator_changes_only_where_material_becomes_air</code> 改成
+<code>creator_changes_only_where_the_cut_moved_the_surface</code>（值变了且贴面必须换色；
+值没变必须保留），旧实现当场报「第二刀确实削出了这一格的面，却没换色」。
+改判据后 12 条溯源测试全绿。</p>
+<p><strong>实测</strong>（50×50×40，LOD k=4，同一份网格修前/修后）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>指标</th>
+<th>修前</th>
+<th>修后</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>赤道 24.55–24.85 的 9 号顶点</td>
+<td>219 / 306（71.6%）</td>
+<td><strong>46 / 306（15.0%）</strong></td>
+</tr>
+<tr>
+<td>孤立噪点（与所有邻居异色）</td>
+<td>56</td>
+<td><strong>23</strong></td>
+</tr>
+<tr>
+<td>混色三角形</td>
+<td>8010</td>
+<td><strong>6964</strong></td>
+</tr>
+<tr>
+<td>每个 2° 扇区 11→12 的切换次数</td>
+<td>—</td>
+<td><strong>177/180 恰好 1 次</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>剩下的一格锯齿是顶点色 + flat 的分辨率极限，不是串色。</p>
+<p><strong>顺带</strong>：毛坯 100 → <strong>40 mm</strong>（球心 z=24，球顶 39），安全高度改成
+<code>STOCK_MM[2]+15</code>；HTML 预览相机/地面从 Y-up 改 <strong>Z-up</strong>（零件原来躺着），
+默认距离 2.6R → 2.45R，截图另取 1.95R 取景（<code>check_preview</code> 要求 bbox 不出视锥）。整件导出 70 557 顶点 / 140 424 三角形 /
+4.9 MB，溯源数组 40 MB。全量 <strong>477 绿、29 ignored</strong>，clippy 无新增，守卫通过。</p>
+<hr />
+<h2 id="camstl-g-11-04">简化 CAM：STL → 高度场 → G 代码（11-04 晚）</h2>
+<p>用户要「输入毛坯，输出 G 代码，用现有解释器和仿真验证」。新增第 14 个 crate
+<code>cncsim-cam</code>，依赖只有 <code>math</code> + <code>tool</code>——<strong>它只生成文本，完全不认识解释器/
+仿真器</strong>；验收在 <code>crates/cam/tests/e2e.rs</code>，避免"自己验自己"。</p>
+<p><strong>输入</strong>：三角网格 + 轴对齐毛坯。STL 由 app 读；STEP 是 B-rep，明确拒绝
+（本机没有 OpenCascade/FreeCAD，先三角化）。</p>
+<p><strong>算法</strong>：
+1. XY 高度场：三角形按包围盒分桶，逐列向下射线，取最高 z；法向用 z 的
+   中心差分（命中面法向会在折面交界处啃 0.03 mm）。
+2. 粗加工：平底刀 Z 层行切；可下刀区 = 刀盘腐蚀（<code>max(z within r) &lt;= z层 - 余量</code>）；
+   下刀 G1（G0 在仿真里不算切削）。
+3. 精加工：球头平行行切，<code>tip = p + R·n - (0,0,R)</code>；行距与沿程采样分开，
+   沿程用 <code>sample_mm</code> 避免弦切过切。
+4. 倒扣检测：每列独立表面层数（&gt;10 µm 才算一层）；&gt;2 层超过 2% 直接拒绝。</p>
+<p><strong>红绿过程</strong>：
+- 精加工沿程用行距（0.8）→ 过切 0.032；改 0.25 后 0.022。
+- 粗加工最低层 0 段：<code>max_within</code> 卡 1e-9，零件最低面高 0.02（高斯尾）→
+  判断余量 0.05（只放宽腐蚀，不降切削面），2 层 14 段恢复。
+- 倒扣检测按"命中次数"→ relief 被共边三角形误报 49%；改成按 z 合并成层后
+  relief 2 层通过。
+- 端到端：relief 16×16×3.5，G 代码 1509 行，仿真 1496 块，<strong>过切 0 mm³ /
+  0.022 mm，残留 3.97 mm³ / 0.18 mm</strong>；全量 <strong>483 绿 / 29 ignored</strong>。</p>
+<p><strong>对比</strong>：<code>--cam</code> 除 gouge/residual 外还逐列比 <code>加工顶面 − 设计顶面</code>：
+relief 平均 |Δz| 0.002 mm、P95 0、最大残料 0.25、过切 0、<strong>99% 在 ±0.1 mm</strong>；
+输出 <code>*.diff.html</code> 热力图。</p>
+<p><strong>流云花瓶实测</strong>：1 199 996 三角形 / 108×108×250；高度场 <strong>21564/29045 列
+（74%）有 2 层以上表面</strong>——薄壁/中空，3 轴高度场加工不了，CAM 在生成前拒绝。
+这不是失败，是工艺假设被模型违反；要加工需要 4/5 轴（回转体可先做 A 轴）
+或先把模型简化成实心单值面。</p>
+<p><strong>CLI</strong>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>cargo run --release -- --cam assets/models/relief.stl --stock 16,16,3.5   --gcode out/relief.nc --diff out/relief.diff.html --export out/cam.html
+</code></pre></div>
+
+<hr />
+<h2 id="rtcp-11-04">回转五轴 RTCP + 悬浮碎屑（11-04 深夜）</h2>
+<p>用户接着要「五轴带 RTCP」加工同一个花瓶，然后又报了「切割过程中有没切掉的悬浮碎屑」。</p>
+<h3 id="rtcp">回转 RTCP</h3>
+<p>新增 <code>crates/cam/src/rotary.rs</code>：绕 Z 的轮廓 + A/C 摆头 + <code>G43.4 H1</code>。工艺是
+粗 Ø16 球头 + 精 Ø4 球头，A 限位 110°。踩了四个坑，每个都靠<strong>量化</strong>定位：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>现象</th>
+<th>定位手段</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>90%+ 采样点整窗读 −3.5</td>
+<td>打整条径向 SDF 剖面，发现全 +4.0（纯空气）</td>
+<td>5°×1.5 mm 分箱取<strong>最大半径</strong>是包络，平均胖 1.13 mm、最大 7.36 mm</td>
+</tr>
+<tr>
+<td>换成真值轮廓后仍 −3 mm</td>
+<td>分开跑「只精加工」：0.976；加粗加工：3.0</td>
+<td>粗加工竖直刀轴在倒扣面把球心放到曲面下方</td>
+</tr>
+<tr>
+<td>粗加工改法向偏置后仍 −2.4</td>
+<td>统计 G 代码相邻刀点：</td>
+<td>ΔA</td>
+</tr>
+<tr>
+<td>最终方案</td>
+<td>——</td>
+<td>粗加工改<strong>径向让刀</strong>（球心放 z 高度、半径 <code>max(R_k, r+余量+R)</code>），可证径向不啃伤，顺带车掉方料四角</td>
+</tr>
+</tbody>
+</table></div>
+<p>途中还确认了两件事：<code>ToolSpec::flute_mm</code> 是<strong>参与切削的圆柱段</strong>（30 mm 刃长的
+Ø4 球头一摆头就把相邻凹面扫平，改 1.25×D）；A 超限时<strong>整点跳过</strong>会让相邻两刀
+连出穿过工件的 G1 弦，改成限位 + 沿法向抬刀 <code>R(1−cosδ)</code>。</p>
+<p>护栏：<code>rotary_rtcp.rs</code>（圆锥位姿自检：球心必须在外侧）、<code>rotary_cylinder.rs</code>
+（圆柱闭环，h=1 下 |Δr|&lt;0.12）、<code>roughing_keeps_the_allowance</code>。三个都不跑仿真，
+加起来 20 s。</p>
+<p>结果：32715 块 / RTCP 段 32714 / 0 条 issue；外轮廓 Δr 平均 1.242、P95 0.175、
+|Δr|≤0.5 占 <strong>48.7%</strong>；轮廓需要的最大 A 145.9°，其中 10160 点被限位（最大抬刀 0.38 mm）。</p>
+<h3 id="_80">悬浮碎屑</h3>
+<p>预览里一直浮着一层小方块，前一版当成"表面粗糙"。实际是<strong>体素 CSG 只做材料去除、
+不管连通性</strong>：切下来的那一块在真实切削里会掉成切屑，场里却原地飘着。</p>
+<ul>
+<li><code>voxel/components.rs</code>：<code>drop_floating_islands()</code>，6 邻域连通块标记，只留最大块，
+  其余写成空气；花瓶 112×112×250 一次丢 <strong>672087 格</strong>，约 0.3 s。</li>
+<li><code>RunConfig::drop_chips</code>（默认关，CAM 两条链打开），在<strong>体积统计和设计比对之前</strong>做，
+  否则碎屑会被算成残留；<code>SimReport::chip_voxels</code> 如实报出来。</li>
+</ul>
+<p>丢完之后漩涡花瓶的形状才真正露出来——之前看到的"疙瘩"一大半是碎屑。</p>
+<hr />
+<h2 id="11-04_2">形状保真度该量什么（11-04 更晚）</h2>
+<p>被问到「你如何判断加工后的模型与原版的形状保持尽可能一致」。原来只有前两层口径，
+这次补了第三层，结果顺手把上一节自己的结论推翻了。</p>
+<h3 id="_81">三层口径</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>层</th>
+<th>实现</th>
+<th>能发现</th>
+<th>盲区</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>① 单向几何量</td>
+<td><code>height_diff</code>（Δz）/ 回转 Δr</td>
+<td>系统性让刀、整圈偏深偏浅</td>
+<td>只量一个方向；格点之间的小坑读不出</td>
+</tr>
+<tr>
+<td>② 整实体体积</td>
+<td><code>compare_with_design</code></td>
+<td>设计面之外的残留、成片多切少切、可回溯到 G 代码行</td>
+<td>体积不是曲面位置，0.1 mm 整体让刀几乎不动</td>
+</tr>
+<tr>
+<td>③ 名义曲面逐点</td>
+<td>新增 <code>crates/sim/src/surface_dev.rs</code></td>
+<td>形状保真度本身、过切/残料深度分布、可按 A 角分组</td>
+<td>单边采样；窄带外被钳制；采样非等面积</td>
+</tr>
+</tbody>
+</table></div>
+<p>③ 的做法就是三坐标：设计面按 0.8 mm 采点，逐点查毛坯场 SDF——正=过切深度、
+负=残料厚度、<code>|d|≥band</code> 是钳制值。3 个单测（含"P95 必须取绝对值分位"的反向测试）
++ 圆柱闭环里追加的名义面断言（P95 0.067、100% ≤0.15）校准度量本身。</p>
+<h3 id="486-249">结果：48.6% → 24.9%，并且否掉了上一节的解释</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>① Δr     ：合格(≤0.5) 48.6% / 过切 51.4% / P95 3.500（=窗口边缘，早已饱和）
+③ 名义面 ：合格(≤0.15) 24.9% / 过切 51.4% / 残料 23.7% / 最大过切 &gt;4 / 最大残料 0.82
+按所需 A：30..60° 0.403；60..90° 0.702；90..110° 0.867；110..180° 0.530
+</code></pre></div>
+
+<p>上一节写的是"42% 的面 A 超 110° 所以够不到"。A 分组直接把它否了：过切在 A 各区间
+<strong>均匀</strong>，110..180° 那组反而最好。三条证据（偏差图上合格区只在漩涡脊线、谷底整片
+饱和；<code>--no-rough</code> 更差到 99.9%；A 分组均匀）一起指向<strong>Ø4 球头放不进 ~1 mm 级凹谷</strong>，
+球头架桥把谷整段切掉。</p>
+<p>另外记一个早先修掉的读数坑：<code>Δr</code> 的 P95 曾对<strong>带符号</strong>序列取分位，读到的是"有 5% 比它更负"，
+于是 3.5 这个窗口边缘值看起来像"偏差 3.5"，其实一半读数是钳制的。</p>
+<hr />
+<h2 id="11-04_3">平头开粗 + 锥度球头精加工（11-04 深夜）</h2>
+<p>用户问「平头铣刀开粗、锥度球头铣刀精加工，你之前全是平头切吗」，随后要求
+「充分利用不同类型刀具，必要时可以增加刀具」。</p>
+<p><strong>不是全平头</strong>：3 轴那条一直是平头开粗 + 球头精加工；<strong>回转那条之前是球头开粗 +
+球头精加工</strong>，既没有平头也没有锥度球头。</p>
+<h3 id="_82">主因不在刀，在刀路</h3>
+<p>写了个审计脚本，把 G 代码的刀尖半径和 STL 真值逐点对账：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>r_tip − 真值(最近格)   ：中位 +0.303  P95 +1.533 mm
+r_tip − 包络(3×3 最大) ：中位 +0.026  P95 +0.551 mm
+</code></pre></div>
+
+<p>刀尖跟着<strong>包络</strong>走，从来没进过凹谷——<code>RotaryProfile::radius()</code> 里 3×3 取最大，
+把刀顶在波纹的脊上。Ø4 球头一摆，2 mm 以内的谷全被整段削掉。这解释了 §27 里
+那 51% 过切，且与 A 行程无关。</p>
+<p>修的时候连带揪出两个取样 bug：细网格建格用<strong>截断</strong>（浮点让一半顶点落到前一格）、
+查询用<strong>最近格</strong>（0.5° 在 r=20 上就是 0.15 mm 量化）。改成"四舍五入建格 + 双线性
+查询"，加回归测试 <code>profile_follows_the_true_radius_not_the_envelope</code>（正弦起伏
+回转体：旧代码读 +0.26 mm 包络偏差，新代码 &lt;0.05）。</p>
+<h3 id="_83">换刀</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>之前</th>
+<th>现在</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>粗加工</td>
+<td>Ø16 球头</td>
+<td><strong>Ø16 平头</strong>（<code>ToolKind::Flat</code> 早就支持，回转链路没用上）</td>
+</tr>
+<tr>
+<td>精加工</td>
+<td>Ø4 球头 2.5°×1.2</td>
+<td><strong>Ø2 锥度球头</strong>（尖端 R1、10° 锥颈、2.5×D），1.25°×0.6</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>ToolSpec</code> 新增 <code>ToolKind::TaperedBall</code> + <code>ToolSpec::tapered()</code> + <code>top_radius()</code>，
+母线接 <code>cncsim-tool</code> 已有的 <code>tapered_ball_end_mill</code>（仿真早就支持 <code>CutterKind::TaperedBall</code>，
+差的是 CAM 侧）。刀杆直径按<strong>锥颈</strong>算，否则会出现"刀杆比刀还细"。</p>
+<h3 id="_84">结果（同一件花瓶、同一套度量）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>旧</th>
+<th>新</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>合格(≤0.15)</td>
+<td>24.9%</td>
+<td><strong>61.0%</strong></td>
+</tr>
+<tr>
+<td>过切 / 残料</td>
+<td>51.4% / 23.7%</td>
+<td>37.3% / <strong>1.6%</strong></td>
+</tr>
+<tr>
+<td>平均 |d| / P95</td>
+<td>0.642 / 1.840</td>
+<td><strong>0.320 / 1.184</strong></td>
+</tr>
+<tr>
+<td>超窄带(≥4 mm)</td>
+<td>24492</td>
+<td><strong>0</strong></td>
+</tr>
+<tr>
+<td>刀点 / 仿真</td>
+<td>30450 / 113 s</td>
+<td>120802 / 339 s</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="_85">一个被证伪的调参方向</h3>
+<p>想靠缩短锥颈（2.5×D → 1.2×D）压掉 A 60..110° 的过切：<strong>同一份 G 代码</strong>切出来变成
+一根圆柱，偏差图整窗全空气/整窗全料交替成斜条。圆柱闭环里两种颈长都 100% 合格，
+刀具母线没坏——短颈不是简单收益，机理未查清，已回退并留注释。</p>
+<hr />
+<h2 id="_86">数字演进一览</h2>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -2831,6 +3147,41 @@ z=100，赤道就是底面平面；设计模型加 <code>DesignModel::Boss</code
 <td><strong>11-02 进度着色</strong></td>
 <td><strong>467</strong></td>
 <td><strong>颜色改每工序 10 档：整段只换 9 次，球面 10 条宽色带</strong></td>
+</tr>
+<tr>
+<td><strong>11-04 体素级染色</strong></td>
+<td><strong>477</strong></td>
+<td><strong>默认 sub=8：溢出 0.025 mm；仅材料去除体素改色；色号 flat</strong></td>
+</tr>
+<tr>
+<td><strong>11-04 赤道补丁</strong></td>
+<td><strong>477</strong></td>
+<td><strong>判据改“值变了且贴面”：赤道 T1 残留 71.6%→15%；毛坯 40 mm；预览 Z-up</strong></td>
+</tr>
+<tr>
+<td><strong>11-04 简化 CAM</strong></td>
+<td><strong>483</strong></td>
+<td><strong>STL→高度场→G 代码；过切 0 / 0.022；Δz 99%≤0.1；花瓶 74% 多层被拒</strong></td>
+</tr>
+<tr>
+<td><strong>11-04 回转 RTCP</strong></td>
+<td><strong>487</strong></td>
+<td><strong>粗 2253 + 精 30450 点 / 32715 块 / 0 issue；Δr P95 0.175；A 需 145.9° 限位 10160 点</strong></td>
+</tr>
+<tr>
+<td><strong>11-04 丢碎屑</strong></td>
+<td><strong>488</strong></td>
+<td><strong>连通块清理：花瓶丢 672087 格，漩涡面才露出来</strong></td>
+</tr>
+<tr>
+<td><strong>11-04 形状保真度</strong></td>
+<td><strong>491</strong></td>
+<td><strong>新增名义面口径：花瓶 24.9%（旧口径 48.6%）；否掉"A 限位"解释，锁定球头半径</strong></td>
+</tr>
+<tr>
+<td><strong>11-04 刀具分工</strong></td>
+<td><strong>494</strong></td>
+<td><strong>平头开粗 + Ø2 锥度球头 + 刀路跟真值：24.9% → 61.0%，残料 → 1.6%</strong></td>
 </tr>
 </tbody>
 </table></div>

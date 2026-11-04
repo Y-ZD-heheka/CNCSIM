@@ -43,6 +43,12 @@ fn main() {
     println!("CNCSIM — 五轴联动 CNC 切割仿真");
     println!();
 
+    // `--cam <model.stl>`：跑 CAM 生成 → 解释器 → 仿真，不依赖机床配置。
+    if let Some(model) = cam_path_from_args() {
+        run_cam(&model);
+        return;
+    }
+
     let path = machine_path_from_args();
     let cfg = match cncsim_config::load(&path) {
         Ok(c) => c,
@@ -794,6 +800,888 @@ fn print_color_bands(mesh: &cncsim_voxel::MeshData) {
             "            Z 跨度比量化档大是侧壁上那一圈叶级溢出（最多一个叶宽 8h）"
         );
     }
+}
+
+/// `--cam <model.stl>`：CAM 生成 → 解释器 → 仿真，一条链跑完。
+///
+/// STL 是三角网格，直接进；STEP 是 B-rep，先三角化（错误信息里写清楚）。
+/// 生成的 G 代码默认写到模型旁边的 `.nc`，可 `--gcode <path>` 覆盖。
+fn run_cam(model: &std::path::Path) {
+    use cncsim_math::DVec3;
+
+    let ext = model
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(ext.as_str(), "stp" | "step") {
+        eprintln!("{}", cncsim_cam::CamError::StepNeedsTessellation);
+        eprintln!("  文件：{}", model.display());
+        std::process::exit(1);
+    }
+    let bytes = match std::fs::read(model) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("读模型失败\n  路径：{}\n  原因：{e}", model.display());
+            std::process::exit(1);
+        }
+    };
+    let tris = match cncsim_voxel::stl::parse(&bytes) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("解析 STL 失败：{e}\n  文件：{}", model.display());
+            std::process::exit(1);
+        }
+    };
+    let (mut lo, mut hi) = (
+        DVec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+        DVec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+    );
+    for t in &tris {
+        for v in t {
+            lo = DVec3::new(lo.x.min(v.x), lo.y.min(v.y), lo.z.min(v.z));
+            hi = DVec3::new(hi.x.max(v.x), hi.y.max(v.y), hi.z.max(v.z));
+        }
+    }
+    println!(
+        "模型：{} 个三角形，包围盒 ({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
+        tris.len(),
+        lo.x,
+        lo.y,
+        lo.z,
+        hi.x,
+        hi.y,
+        hi.z
+    );
+
+    let stock = match cam_stock_from_args() {
+        Some(size) => {
+            let c = (lo + hi) * 0.5;
+            cncsim_cam::Stock {
+                min: DVec3::new(c.x - size.x * 0.5, c.y - size.y * 0.5, lo.z),
+                max: DVec3::new(c.x + size.x * 0.5, c.y + size.y * 0.5, lo.z + size.z),
+            }
+        }
+        None => cncsim_cam::Stock {
+            min: lo - DVec3::new(1.0, 1.0, 0.0),
+            max: hi + DVec3::new(1.0, 1.0, 1.0),
+        },
+    };
+    println!(
+        "毛坯：({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
+        stock.min.x, stock.min.y, stock.min.z, stock.max.x, stock.max.y, stock.max.z
+    );
+
+    // ── 工艺选择：先判断"这件是不是回转体"，不靠命令行的 `--rotary` 猜 ──
+    //
+    // 回转（车铣）只对回转体有意义：方形支架、手机支架这种件，绕 Z 的轮廓根本
+    // 描述不了它，硬跑只会得到一堆"残料/过切"。判据是面积加权吻合度。
+    let rot = cncsim_cam::rotary::rotationality(&tris);
+    println!("回转体吻合度：{:.1}%", rot * 100.0);
+    if rotary_from_args() || rot >= 0.85 {
+        if rot < 0.85 {
+            eprintln!("  注意：吻合度偏低，回转工艺只能做外形近似（其余靠跳过）");
+        }
+        run_cam_rotary(model, &tris, stock);
+        return;
+    }
+    if rot < 0.85 {
+        println!("  不是回转体 → 走 3 轴高度场（单值上表面）");
+    }
+
+    // 刀径按毛坯短边缩放：小件用小刀，大件用 φ6。
+    let short = stock.size().x.min(stock.size().y);
+    let d_rough = 6.0f64.min(0.35 * short).max(1.0);
+    let d_finish = 4.0f64.min(d_rough * 0.7).max(0.8);
+    let rough = cncsim_cam::ToolSpec::flat(1, d_rough, 20.0);
+    let finish = cncsim_cam::ToolSpec::ball(2, d_finish, 20.0);
+    let sample = (short / 200.0).clamp(0.2, 0.6);
+    let process = cncsim_cam::Process {
+        stock_allowance_mm: 0.2,
+        stepdown_mm: 1.0,
+        rough_stepover_mm: d_rough * 0.6,
+        finish_stepover_mm: (short / 120.0).clamp(0.4, 1.2),
+        sample_mm: sample,
+        max_finish_slope_deg: 75.0,
+        ..Default::default()
+    };
+    let job = cncsim_cam::Job {
+        mesh: &tris,
+        stock,
+        rough: Some(rough.clone()),
+        finish: finish.clone(),
+        process: process.clone(),
+    };
+    let t0 = std::time::Instant::now();
+    let prog = match cncsim_cam::generate(&job) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("CAM 生成失败：{e}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "刀路：{} 行 / {} 层 / 粗 {} 段 / 精 {} 段 / 切 {:.0} mm（{:.2} s）",
+        prog.stats.lines,
+        prog.stats.levels,
+        prog.stats.rough_moves,
+        prog.stats.finish_moves,
+        prog.stats.cut_mm,
+        t0.elapsed().as_secs_f64()
+    );
+
+    let nc = gcode_path_from_args().unwrap_or_else(|| model.with_extension("nc"));
+    if let Err(e) = std::fs::write(&nc, &prog.gcode) {
+        eprintln!("写 G 代码失败：{e}");
+    } else {
+        println!("G 代码：{}", nc.display());
+    }
+
+    // ── 现有解释器 ──
+    let ic = cncsim_gcode::InterpConfig {
+        tool_radii: vec![0.0, rough.radius(), finish.radius()],
+        ..Default::default()
+    };
+    let program = cncsim_gcode::interpret(&prog.gcode, &ic);
+    if program.has_errors() {
+        eprintln!("解释器报错：{:?}", program.issues);
+        std::process::exit(1);
+    }
+    println!("解释：{} 块 / {} 条 issue", program.len(), program.issues.len());
+
+    // ── 现有仿真 + 设计比对 ──
+    let h = 0.25;
+    let size = stock.size();
+    let domain = [
+        (size.x / h).round().max(1.0) as i32,
+        (size.y / h).round().max(1.0) as i32,
+        (size.z / h).round().max(1.0) as i32,
+    ];
+    let grid = cncsim_voxel::GridConfig {
+        h,
+        band_voxels: 4,
+        value_type: cncsim_voxel::ValueType::I8,
+    };
+    let design = cncsim_sim::compare::field_design(&tris, grid, stock.min, domain, 0.3);
+    let cfg = cncsim_sim::run::RunConfig {
+        grid,
+        stock_origin: stock.min,
+        stock_size: domain,
+        design: Some(design),
+        design_step: 0.3,
+        collide: false,
+        creator_sub: 4,
+        drop_chips: true,
+        ..Default::default()
+    };
+    let tools = cncsim_tool::ToolTable::new(vec![rough.to_tool_def(), finish.to_tool_def()]);
+    let t0 = std::time::Instant::now();
+    let out = cncsim_sim::run::run_tools(&program, &tools, &cfg);
+    let r = &out.report;
+    println!(
+        "仿真：{:.1} s / {} 块 / {} 段 / 去料 {:.1} mm³ / 丢碎屑 {} 格",
+        t0.elapsed().as_secs_f64(),
+        out.stats.blocks,
+        out.stats.cut_segments,
+        r.removed_volume_mm3,
+        r.chip_voxels
+    );
+    println!(
+        "  过切 {:.3} mm³ / {:.4} mm；残留 {:.3} mm³ / {:.4} mm",
+        r.gouge_volume_mm3, r.gouge_max_depth_mm, r.residual_volume_mm3, r.residual_max_thickness
+    );
+
+    // ── 逐列比较：加工后的顶面 vs 设计顶面 ──
+    let design = cfg.design.as_ref().expect("上面刚设置 design");
+    let (dz, diff) = height_diff(&out.grid, design, &cfg, stock);
+    println!(
+        "高度差：{} 列 / 平均 |Δz| {:.3} mm / P95 {:.3} mm / 残料 {:+.3} mm / 过切 {:+.3} mm / |Δz|≤0.1 mm {:.1}%",
+        diff.columns,
+        diff.mean_abs,
+        diff.p95,
+        diff.max_residual,
+        diff.max_gouge,
+        diff.within_0_1 * 100.0
+    );
+    let diff_path = diff_path_from_args().unwrap_or_else(|| model.with_extension("diff.html"));
+    let title = model.file_name().unwrap_or_default().to_string_lossy();
+    match write_diff_html(&diff_path, &dz, cfg.stock_size[0], cfg.stock_size[1], &diff, &title) {
+        Ok(()) => println!("偏差图：{}", diff_path.display()),
+        Err(e) => eprintln!("写偏差图失败：{e}"),
+    }
+
+    if let Some(path) = export_path_from_args() {
+        let mesh = out.grid.extract_surface_lod(4);
+        let title = format!(
+            "CAM：{}",
+            model.file_name().unwrap_or_default().to_string_lossy()
+        );
+        match cncsim_render::preview::write_html(&path, &mesh, &title) {
+            Ok(s) => println!(
+                "预览：{}（{} 顶点 / {} 三角形 / {} MB）",
+                path.display(),
+                s.vertices,
+                s.triangles,
+                s.bytes / (1 << 20)
+            ),
+            Err(e) => eprintln!("写预览失败：{e}"),
+        }
+    }
+}
+
+#[derive(Default)]
+struct HeightDiff {
+    columns: usize,
+    mean_abs: f64,
+    p95: f64,
+    max_residual: f64,
+    max_gouge: f64,
+    within_0_1: f64,
+}
+
+/// 逐列比较「加工后的顶面」与「设计顶面」。
+///
+/// 两边都取**从上往下第一个材料体素的中心 z**，所以体素量化误差在差值里抵消；
+/// 差值为正 = 加工面高于设计面（残料），为负 = 切过头（过切）。
+fn height_diff(
+    grid: &cncsim_voxel::SparseGrid<i8>,
+    design: &cncsim_sim::compare::DesignModel,
+    cfg: &cncsim_sim::run::RunConfig,
+    stock: cncsim_cam::Stock,
+) -> (Vec<f32>, HeightDiff) {
+    let h = cfg.grid.h;
+    let [nx, ny, nz] = cfg.stock_size;
+    let mut dz = vec![f32::NAN; (nx * ny) as usize];
+    let mut vals: Vec<f64> = Vec::new();
+    for j in 0..ny {
+        for i in 0..nx {
+            let x = stock.min.x + (i as f64 + 0.5) * h;
+            let y = stock.min.y + (j as f64 + 0.5) * h;
+            let mut zm = None;
+            for k in (0..nz).rev() {
+                if grid.get([i, j, k]) < 0 {
+                    zm = Some(stock.min.z + (k as f64 + 0.5) * h);
+                    break;
+                }
+            }
+            let mut zd = None;
+            for k in (0..nz).rev() {
+                let z = stock.min.z + (k as f64 + 0.5) * h;
+                if design.sdf(cncsim_math::DVec3::new(x, y, z)) < 0.0 {
+                    zd = Some(z);
+                    break;
+                }
+            }
+            if let (Some(a), Some(b)) = (zm, zd) {
+                let d = a - b;
+                dz[(j * nx + i) as usize] = d as f32;
+                vals.push(d);
+            }
+        }
+    }
+    if vals.is_empty() {
+        return (dz, HeightDiff::default());
+    }
+    let n = vals.len();
+    let mut sorted = vals.clone();
+    sorted.sort_by(f64::total_cmp);
+    let mut s = HeightDiff {
+        columns: n,
+        mean_abs: vals.iter().map(|v| v.abs()).sum::<f64>() / n as f64,
+        p95: sorted[((n as f64 * 0.95) as usize).min(n - 1)],
+        max_residual: sorted[n - 1],
+        max_gouge: sorted[0],
+        within_0_1: vals.iter().filter(|v| v.abs() <= 0.1).count() as f64 / n as f64,
+    };
+    s.p95 = s.p95.abs();
+    (dz, s)
+}
+
+/// 偏差热力图：顶视图，红 = 残料（加工面高），蓝 = 过切（低），绿 = ±0.1 mm。
+fn write_diff_html(
+    path: &std::path::Path,
+    dz: &[f32],
+    nx: i32,
+    ny: i32,
+    stats: &HeightDiff,
+    title: &str,
+) -> std::io::Result<()> {
+    let mut arr = String::with_capacity(dz.len() * 7);
+    for (i, v) in dz.iter().enumerate() {
+        if i > 0 {
+            arr.push(',');
+        }
+        if v.is_finite() {
+            arr.push_str(&format!("{v:.2}"));
+        } else {
+            arr.push_str("null");
+        }
+    }
+    let html = format!(
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title} 偏差</title>
+<style>
+body{{background:#0b0e12;color:#d7dde5;font:13px/1.5 ui-monospace,Consolas,monospace;margin:24px}}
+h1{{font-size:16px;font-weight:600;margin:0 0 8px}}
+.k{{color:#8b98a8}} canvas{{image-rendering:pixelated;border:1px solid #2a3340;background:#222}}
+.legend{{display:flex;gap:16px;margin:10px 0}} .sw{{display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:-1px}}
+</style></head><body>
+<h1>{title} — 加工结果 vs 原始模型（顶视高度差）</h1>
+<div class="k">列数 {columns} · 平均 |Δz| {mean:.3} mm · P95 {p95:.3} mm · 残料最大 {res:.3} mm · 过切最大 {gouge:.3} mm · |Δz|≤0.1 mm {within:.1}%</div>
+<div class="legend"><span><i class="sw" style="background:#3cb45a"></i>±0.1 mm</span><span><i class="sw" style="background:#c83c3c"></i>残料（红）</span><span><i class="sw" style="background:#3c64c8"></i>过切（蓝）</span><span><i class="sw" style="background:#333"></i>无数据</span></div>
+<canvas id="c" width="{nx}" height="{ny}" style="width:640px;height:640px"></canvas>
+<script>
+const NX={nx}, NY={ny}, DZ=[{arr}];
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const img=ctx.createImageData(NX,NY);
+for(let j=0;j<NY;j++){{for(let i=0;i<NX;i++){{
+  const d=DZ[(NY-1-j)*NX+i], o=(j*NX+i)*4;
+  let r,g,b;
+  if(d===null){{r=g=b=45;}}
+  else if(Math.abs(d)<=0.1){{r=60;g=180;b=90;}}
+  else if(d>0){{const t=Math.min(1,(d-0.1)/0.4);r=200;g=Math.round(120*(1-t));b=60;}}
+  else{{const t=Math.min(1,(-d-0.1)/0.4);r=60;g=Math.round(120*(1-t));b=200;}}
+  img.data[o]=r;img.data[o+1]=g;img.data[o+2]=b;img.data[o+3]=255;
+}}}}
+ctx.putImageData(img,0,0);
+</script></body></html>"#,
+        title = title,
+        columns = stats.columns,
+        mean = stats.mean_abs,
+        p95 = stats.p95,
+        res = stats.max_residual,
+        gouge = stats.max_gouge,
+        within = stats.within_0_1 * 100.0,
+        nx = nx,
+        ny = ny,
+        arr = arr,
+    );
+    std::fs::write(path, html)
+}
+
+/// `--cam <model.stl> --rotary`：A/C 回转 + RTCP 的外轮廓加工。
+///
+/// 和 3 轴高度场是两条工艺：这里把工件转起来，刀轴沿外法向，程序用
+/// `G43.4 H1` 打开刀尖跟随。对比的是**外轮廓半径偏差**（θ×z），
+/// 不是顶视高度差——内腔不在这道工序里。
+fn run_cam_rotary(model: &std::path::Path, tris: &[cncsim_cam::Tri], stock: cncsim_cam::Stock) {
+    use cncsim_cam::rotary::{RotaryJob, generate_rotary};
+    use cncsim_math::DVec2;
+
+    let short = stock.size().x.min(stock.size().y);
+    let center = DVec2::new(
+        (stock.min.x + stock.max.x) * 0.5,
+        (stock.min.y + stock.max.y) * 0.5,
+    );
+
+    // ── 刀具按**这个模型自己的曲率**选，不写死 ──
+    //
+    // 尖球半径决定"能进多窄的谷"：R 大于局部凹曲率半径就会在谷口架桥、把谷底
+    // 整段削掉。`suggest_tip_radius` 取面积加权 97 分位的凹曲率半径，任何 STL 通用。
+    // 粗加工用平头（每层切出平面，去料率高），精加工用锥度球头（小尖球 + 粗颈）。
+    //
+    // `--auto` 打开"按模型自选刀/步距"（实验性）；默认用**已验证**的 Ø2 + 1.25°/0.6，
+    // 因为自适应路径在花瓶上还没跑通（同样代码换成 Ø1.7 会整件过切，原因未查明）。
+    let auto = args_flag("--auto");
+    let tip_r = if auto {
+        cncsim_cam::rotary::suggest_tip_radius(tris, center)
+    } else {
+        1.0
+    };
+    // 实际刀径还要受"件不能太小"约束；后面所有推导都用**实际**半径，不用建议值
+    let d_fin = (2.0 * tip_r).min(short / 20.0).max(0.4);
+    let tip_r = d_fin * 0.5;
+    let d_rough = (d_fin * 8.0).min(short / 4.0).max(2.0);
+    // 步距由**弦高预算**反推：球头沿弦走的误差 ≈ p²/(8R)，取 p = √(8R·0.08)。
+    let p_mm = (8.0 * tip_r * 0.08).sqrt().max(0.15);
+    let r_max = (short * 0.5).max(5.0);
+    let step_deg = if auto {
+        (p_mm / r_max).to_degrees().clamp(0.3, 6.0)
+    } else {
+        1.25
+    };
+    let step_z = if auto { (p_mm * 0.5).clamp(0.15, 2.0) } else { 0.6 };
+    println!(
+        "选刀：尖球 R{tip_r:.2}（Ø{d_fin:.1}）/ 粗 Ø{d_rough:.1} / 步距 {step_deg:.2}° × {step_z:.2} mm"
+    );
+    let rough_tool = cncsim_cam::ToolSpec::flat(1, d_rough, 20.0);
+    // 颈长 2.5×D。**不要**轻易缩短：改成 1.2×D 后同一份 G 代码切出来是一根
+    // 圆柱（整窗全空气/整窗全料交替），说明"短颈"在这套扫掠里不是简单收益。
+    let tool = cncsim_cam::ToolSpec::tapered(2, d_fin, 10.0, d_fin * 2.5);
+    let job = RotaryJob {
+        mesh: tris,
+        stock,
+        center,
+        tool: tool.clone(),
+        step_deg,
+        step_z_mm: step_z,
+        feed_mm_min: 1200.0,
+        plunge_mm_min: 300.0,
+        spindle_rpm: 10_000,
+        a_limit_deg: cncsim_cam::rotary::A_LIMIT_DEG,
+        // 刀轴朝 +Z 翘 35°：球心仍相切（球心恒在 p+R·n），只让锥颈离开相邻的脊。
+        // 12° 实测没用——A≈90° 时锥颈仍是"横着捅"，要翘到能抬离凹槽才行。
+        tilt_deg: 35.0,
+        // `--no-rough`：只跑精加工，用来隔离"过切是粗加工留下的还是精加工造成的"
+        roughing: if args_flag("--no-rough") {
+            None
+        } else {
+            Some(cncsim_cam::rotary::Roughing {
+                tool: rough_tool.clone(),
+                step_mm: d_rough * 0.6,
+                pitch_mm: d_rough * 0.6,
+                step_deg: 10.0,
+                allowance_mm: 0.5,
+            })
+        },
+    };
+    let t0 = std::time::Instant::now();
+    let prog = match generate_rotary(&job) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("CAM（回转）生成失败：{e}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "回转刀路：粗 {} 点 + 精 {} 点 / 轮廓 {}×{} / 切 {:.0} mm（{:.2} s）",
+        prog.rough_moves,
+        prog.moves,
+        prog.profile.n_theta,
+        prog.profile.n_z,
+        prog.cut_mm,
+        t0.elapsed().as_secs_f64()
+    );
+    println!(
+        "轮廓 r {:.2}..{:.2} mm / 需要最大 A {:.1}° / 超程限位 {} 点（最大抬刀 {:.2} mm）",
+        prog.profile.min_r(),
+        prog.profile.max_r(),
+        prog.max_a_deg,
+        prog.clamped,
+        prog.max_lift_mm
+    );
+    let nc = gcode_path_from_args().unwrap_or_else(|| model.with_extension("rotary.nc"));
+    if let Err(e) = std::fs::write(&nc, &prog.gcode) {
+        eprintln!("写 G 代码失败：{e}");
+    } else {
+        println!("G 代码：{}", nc.display());
+    }
+
+    let ic = cncsim_gcode::InterpConfig {
+        tool_radii: vec![0.0, d_rough * 0.5, tool.radius()],
+        // 回转 CAM 用 Head 约定生成 A/C（刀轴绕工件转）。双转台机床装夹等价，
+        // 仿真只消费刀尖/刀轴，不在这里做机床逆解。
+        rotary: cncsim_gcode::RotaryConvention::Head,
+        ..Default::default()
+    };
+    let program = cncsim_gcode::interpret(&prog.gcode, &ic);
+    if program.has_errors() {
+        eprintln!("解释器报错：{:?}", program.issues);
+        std::process::exit(1);
+    }
+    let rtcp_blocks = program.blocks.iter().filter(|b| b.rtcp).count();
+    println!(
+        "解释：{} 块 / RTCP 段 {} / {} 条 issue",
+        program.len(),
+        rtcp_blocks,
+        program.issues.len()
+    );
+
+    // 体素边长：跟着**刀的半径**走。h=1 mm 配 Ø2 刀意味着球半径只占 1 个体素，
+    // 网格根本表达不出球面（实测偏差 ~0.3 mm，和 h 同量级）。准则 h ≤ R/2；
+    // 再用体素总数上限兜住内存/时间。
+    let vol = stock.size().x * stock.size().y * stock.size().z;
+    let h_budget = (vol / 4.0e7).cbrt().max(0.25);
+    let h = h_from_args().unwrap_or(if auto {
+        (tip_r * 0.5).max(h_budget).min(1.0)
+    } else {
+        (h_budget).max(0.5).min(1.0)
+    });
+    println!("网格：h = {h:.2} mm（刀尖 R{tip_r:.2}，体素上限 4×10⁷）");
+    let size = stock.size();
+    let domain = [
+        (size.x / h).round().max(1.0) as i32,
+        (size.y / h).round().max(1.0) as i32,
+        (size.z / h).round().max(1.0) as i32,
+    ];
+    let grid = cncsim_voxel::GridConfig {
+        h,
+        band_voxels: 4,
+        value_type: cncsim_voxel::ValueType::I8,
+    };
+    let cfg = cncsim_sim::run::RunConfig {
+        grid,
+        stock_origin: stock.min,
+        stock_size: domain,
+        design: None, // 这道工序只做外轮廓，内腔不在验收范围
+        collide: false,
+        creator_sub: 1,
+        // 切下来还挂着的碎块按"掉成切屑"丢掉，否则预览里会浮着一层小方块
+        drop_chips: true,
+        ..Default::default()
+    };
+    // 刀表必须与刀路**同一把刀**：粗加工/精加工的母线、刃长稍有出入，
+    // 仿真就会按另一把刀去扫，量出来的偏差全是假的。
+    let tools = cncsim_tool::ToolTable::new(vec![
+        rough_tool.to_tool_def(),
+        tool.to_tool_def(),
+    ]);
+    let t0 = std::time::Instant::now();
+    let out = cncsim_sim::run::run_tools(&program, &tools, &cfg);
+    println!(
+        "仿真：{:.1} s / {} 块 / {} 段 / 去料 {:.1} mm³ / 丢碎屑 {}",
+        t0.elapsed().as_secs_f64(),
+        out.stats.blocks,
+        out.stats.cut_segments,
+        out.report.removed_volume_mm3,
+        out.report.chip_voxels
+    );
+
+    // ── 外轮廓半径偏差 ──
+    //
+    // 沿半径从外向内找 SDF 由正（空气）变负（材料）的零点，再二分到 0.01 mm。
+    // 早先版本直接判"体素值 < 0"，那是把 1 mm 的体素格当尺子：面只能在格子边上，
+    // 读数被量化到 ±0.5 mm 以上，刀路本身 0.05 mm 的偏差根本看不出来。
+    // 窗口 ±3.5 mm 要小于窄带（4 体素 = 4 mm），否则读到的是钳制值。
+    const WIN: f64 = 3.5;
+    let sdf_at = |rr: f64, th: f64, z: f64| {
+        out.grid.sdf(cncsim_math::DVec3::new(
+            center.x + rr * th.cos(),
+            center.y + rr * th.sin(),
+            z,
+        ))
+    };
+    let prof = &prog.profile;
+    let (nth, nz) = (prof.n_theta, prof.n_z);
+    let mut dz = vec![f32::NAN; nth * nz];
+    let mut vals: Vec<f64> = Vec::new();
+    let mut over = 0usize; // 超出窗口：残料 > WIN
+    for iz in 0..nz {
+        for it in 0..nth {
+            let Some(rd) = prof.r_at(it, iz) else {
+                continue;
+            };
+            let th = prof.theta(it);
+            let z = prof.z(iz);
+            // 粗扫 0.1 mm，找到第一个"空气 → 材料"的区间，再二分
+            let steps = (2.0 * WIN / 0.1) as usize;
+            let mut prev: Option<f64> = None;
+            let mut found = None;
+            for s in 0..=steps {
+                let rr = rd + WIN - s as f64 * 0.1;
+                if sdf_at(rr, th, z) < 0.0 {
+                    if let Some(rp) = prev {
+                        let (mut lo, mut hi) = (rr, rp); // lo 有料，hi 是空气
+                        for _ in 0..12 {
+                            let mid = 0.5 * (lo + hi);
+                            if sdf_at(mid, th, z) < 0.0 {
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        found = Some(0.5 * (lo + hi));
+                    }
+                    break;
+                }
+                prev = Some(rr);
+            }
+            let dv = match found {
+                Some(rm) => rm - rd,
+                // 整个窗口都是空气 → 这里被掏空了；全是材料 → 根本没切到
+                None if prev.is_some() => -WIN,
+                None => WIN,
+            };
+            if dv >= WIN - 1e-9 {
+                over += 1;
+            }
+            dz[iz * nth + it] = dv as f32;
+            vals.push(dv);
+        }
+    }
+    if vals.is_empty() {
+        eprintln!("外轮廓采样为空——毛坯/网格坐标系可能不匹配");
+        return;
+    }
+    vals.sort_by(f64::total_cmp);
+    let n = vals.len() as f64;
+    let mean = vals.iter().map(|v| v.abs()).sum::<f64>() / n;
+    // P95 取 **|Δr| 的 95 分位**：直接拿带符号序列的分位数，读出来的是
+    // "有 5% 比它更负"，跟"偏差多大"不是一回事。
+    let mut abs: Vec<f64> = vals.iter().map(|v| v.abs()).collect();
+    abs.sort_by(f64::total_cmp);
+    let p95 = abs[((n * 0.95) as usize).min(abs.len() - 1)];
+    let max_res = vals[vals.len() - 1];
+    let max_gouge = vals[0];
+    let within = vals.iter().filter(|v| v.abs() <= 0.5).count() as f64 / n;
+    println!(
+        "外轮廓 Δr：{} 点 / 平均 |Δr| {:.3} mm / P95 {:.3} / 残料 {:+.3} / 过切 {:+.3} / |Δr|≤0.5 {:.1}%",
+        vals.len(),
+        mean,
+        p95,
+        max_res,
+        max_gouge,
+        within * 100.0
+    );
+    println!(
+        "  ├ 合格(<0.5) {:.1}%  余量(0.5~2) {:.1}%  未切到(>2) {:.1}%  过切(<-0.5) {:.1}%",
+        within * 100.0,
+        vals.iter().filter(|v| **v >= 0.5 && **v < 2.0).count() as f64 / n * 100.0,
+        over as f64 / n * 100.0,
+        vals.iter().filter(|v| **v <= -0.5).count() as f64 / n * 100.0
+    );
+    // ── 名义曲面逐点偏差：形状保真度的验收口径 ──
+    //
+    // 上面那个 Δr 是"沿半径量外轮廓"，对**轴向错位、局部小坑、端面/底面**是盲的：
+    // 它只在 (θ,z) 格点上找最外层材料，格子之间的小坑和沿 z 的错位都可能读不出来。
+    // 真正判"形状保持得像不像"，要按**设计面**采样、逐点量到实际毛坯面的有符号
+    // 距离——这就是三坐标/全尺寸检测的做法。
+    //
+    // 只取**外轮廓面**上的样本：内腔本工序根本没加工，算进去只会得到一个
+    // 恒等于"残料 100%"的假数字。内腔点数如实报出来，不藏。
+    // 采样点带**面法向**：能不能加工，取决于面朝哪，不是半径。
+    // 法向朝下（n·z < cos(A限位)）的是倒扣面，一次装夹从上面下来根本够不到，
+    // 算进"切坏了"就是把工艺限制记成加工误差。
+    let surf = cncsim_voxel::meshvol::surface_points_with_normals(&tris, 0.8);
+    let cos_lim = cncsim_cam::rotary::A_LIMIT_DEG.to_radians().cos();
+    let mut outer: Vec<cncsim_math::DVec3> = Vec::with_capacity(surf.len());
+    let mut reach: Vec<bool> = Vec::with_capacity(surf.len());
+    let mut inner_pts = 0usize;
+    let mut under_pts = 0usize;
+    for (p, nrm) in &surf {
+        let rr = (p.x - center.x).hypot(p.y - center.y);
+        let th = (p.y - center.y).atan2(p.x - center.x).rem_euclid(std::f64::consts::TAU);
+        let Some(rd) = prog.profile.radius(th, p.z) else {
+            continue;
+        };
+        if rr < rd - 1.5 {
+            inner_pts += 1; // 内腔：本工序不加工
+            continue;
+        }
+        if nrm.z < cos_lim {
+            under_pts += 1; // 倒扣：A 超行程，一次装夹够不到
+            continue;
+        }
+        outer.push(*p);
+        reach.push(true);
+    }
+    let _ = &reach;
+    let dev = cncsim_sim::surface_dev::signed_deviation(&out.grid, &outer);
+    let band = 4.0 * h;
+    let sd = cncsim_sim::surface_dev::stats(&dev, 0.15, band);
+    // ── 溯源：这块面到底是哪把刀切出来的 ──
+    //
+    // 沿半径向内走，找到第一个"材料"体素，读它的 creator（工具号 = creator/10）。
+    // 过切点如果全是 1 号刀（粗加工），说明精加工根本没到过那里；
+    // 全是 2 号刀，说明就是精加工自己啃的。
+    let mut who_gouge = [0usize; 4];
+    let mut who_ok = [0usize; 4];
+    for (p, d) in outer.iter().zip(dev.iter()) {
+        let th = (p.y - center.y).atan2(p.x - center.x);
+        let (sn, cs) = th.sin_cos();
+        let mut found = 0usize;
+        let mut rr = (p.x - center.x).hypot(p.y - center.y) - 0.3;
+        for _ in 0..24 {
+            let q = cncsim_math::DVec3::new(
+                center.x + rr * cs,
+                center.y + rr * sn,
+                p.z,
+            );
+            if q.x < stock.min.x || q.y < stock.min.y || q.z < stock.min.z {
+                break;
+            }
+            let idx = [
+                ((q.x - stock.min.x) / h).floor() as i32,
+                ((q.y - stock.min.y) / h).floor() as i32,
+                ((q.z - stock.min.z) / h).floor() as i32,
+            ];
+            if idx[0] < domain[0] && idx[1] < domain[1] && idx[2] < domain[2] {
+                let v = out.grid.get(idx);
+                if v < 0 {
+                    let c = out.grid.creator_of_voxel(idx);
+                    found = (c / 10) as usize;
+                    break;
+                }
+            }
+            rr -= 0.25;
+        }
+        if d.abs() <= 0.15 {
+            who_ok[found.min(3)] += 1;
+        } else if *d > 0.15 {
+            who_gouge[found.min(3)] += 1;
+        }
+    }
+    println!(
+        "  ├ 溯源(过切点)：粗刀 {} / 精刀 {} / 无标记 {}",
+        who_gouge[1], who_gouge[2], who_gouge[0]
+    );
+    println!(
+        "  ├ 溯源(合格点)：粗刀 {} / 精刀 {} / 无标记 {}",
+        who_ok[1], who_ok[2], who_ok[0]
+    );
+    // 按「这一点的外法向需要多大 A 角」分组：一次装夹够不到的区域会自己显形，
+    // 比"整体合格率"有用得多——平均值会把"够不到的 40%"摊到"够得到的 60%"上。
+    let bins = [30.0, 60.0, 90.0, 110.0, 180.0];
+    let mut acc = vec![(0usize, 0.0f64, 0usize); bins.len()]; // (点数, Σ|d|, 合格数)
+    for (p, d) in outer.iter().zip(dev.iter()) {
+        let th = (p.y - center.y).atan2(p.x - center.x).rem_euclid(std::f64::consts::TAU);
+        let a = prog
+            .profile
+            .normal(th, p.z)
+            .z
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        let k = bins.iter().position(|&b| a < b).unwrap_or(bins.len() - 1);
+        acc[k].0 += 1;
+        acc[k].1 += d.abs();
+        if d.abs() <= 0.15 {
+            acc[k].2 += 1;
+        }
+    }
+    println!(
+        "名义曲面偏差：{} 点 / 平均 |d| {:.3} mm / P95 {:.3} / 合格(≤0.15) {:.1}% / 过切 {:.1}% / 残料 {:.1}%",
+        sd.points,
+        sd.mean_abs,
+        sd.p95_abs,
+        sd.ok_frac() * 100.0,
+        sd.gouge_frac() * 100.0,
+        sd.residual_frac() * 100.0
+    );
+    println!(
+        "  ├ 最大过切 {:+.2} / 最大残料 {:.2} / 超窄带(≥{band:.0} mm) {} 点",
+        sd.max_gouge, sd.max_residual, sd.saturated
+    );
+    println!(
+        "  ├ 未纳入：内腔面 {inner_pts} 点 / 倒扣面（A>{:.0}°）{under_pts} 点",
+        cncsim_cam::rotary::A_LIMIT_DEG
+    );
+    for (k, (c, sum, ok)) in acc.iter().enumerate() {
+        if *c == 0 {
+            continue;
+        }
+        let lo = if k == 0 { 0.0 } else { bins[k - 1] };
+        println!(
+            "  ├ A {lo:3.0}..{:<3.0}°：{c:7} 点 / 平均 |d| {:.3} / 合格 {:.1}%",
+            bins[k],
+            sum / *c as f64,
+            *ok as f64 / *c as f64 * 100.0
+        );
+    }
+
+    let stats = HeightDiff {
+        columns: vals.len(),
+        mean_abs: mean,
+        p95,
+        max_residual: max_res,
+        max_gouge,
+        within_0_1: within,
+    };
+    let diff_path = diff_path_from_args().unwrap_or_else(|| model.with_extension("rotary.diff.html"));
+    let title = format!(
+        "{} 外轮廓 Δr（θ×z）",
+        model.file_name().unwrap_or_default().to_string_lossy()
+    );
+    match write_diff_html(&diff_path, &dz, nth as i32, nz as i32, &stats, &title) {
+        Ok(()) => println!("偏差图：{}", diff_path.display()),
+        Err(e) => eprintln!("写偏差图失败：{e}"),
+    }
+
+    if let Some(path) = export_path_from_args() {
+        // 回转件的曲面是主特征，LOD 3（8 mm 粗格）会把波浪面抽成一块块疙瘩，
+        // 换成 LOD 1（2 mm）看得清表面质量。
+        let mesh = out.grid.extract_surface_lod(1);
+        match cncsim_render::preview::write_html(&path, &mesh, "CAM rotary RTCP") {
+            Ok(s) => println!(
+                "预览：{}（{} 顶点 / {} 三角形 / {} MB）",
+                path.display(),
+                s.vertices,
+                s.triangles,
+                s.bytes / (1 << 20)
+            ),
+            Err(e) => eprintln!("写预览失败：{e}"),
+        }
+    }
+}
+
+fn rotary_from_args() -> bool {
+    std::env::args().skip(1).any(|a| a == "--rotary")
+}
+
+/// `--no-rough`：跳过粗加工，只跑精加工（对照用：隔离过切来源）。
+/// `--h <mm>`：强制体素边长（默认按刀半径自动定）。
+fn h_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--h")
+        .and_then(|(_, v)| v.parse().ok())
+}
+
+fn args_flag(flag: &str) -> bool {
+    std::env::args().skip(1).any(|a| a == flag)
+}
+
+fn cam_path_from_args() -> Option<std::path::PathBuf> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--cam" {
+            return args.next().map(Into::into);
+        }
+        if let Some(v) = a.strip_prefix("--cam=") {
+            return Some(v.into());
+        }
+    }
+    None
+}
+
+fn cam_stock_from_args() -> Option<cncsim_math::DVec3> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        let raw = if a == "--stock" {
+            args.next()?
+        } else if let Some(v) = a.strip_prefix("--stock=") {
+            v.to_string()
+        } else {
+            continue;
+        };
+        let parts: Vec<f64> = raw
+            .replace(['x', 'X', '*'], ",")
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        if parts.len() == 3 {
+            return Some(cncsim_math::DVec3::new(parts[0], parts[1], parts[2]));
+        }
+        eprintln!("--stock 需要三个数（x,y,z 或 xXyXz）：{raw}");
+        std::process::exit(1);
+    }
+    None
+}
+
+fn diff_path_from_args() -> Option<std::path::PathBuf> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--diff" {
+            return args.next().map(Into::into);
+        }
+        if let Some(v) = a.strip_prefix("--diff=") {
+            return Some(v.into());
+        }
+    }
+    None
+}
+
+fn gcode_path_from_args() -> Option<std::path::PathBuf> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--gcode" {
+            return args.next().map(Into::into);
+        }
+        if let Some(v) = a.strip_prefix("--gcode=") {
+            return Some(v.into());
+        }
+    }
+    None
 }
 
 /// 跑一段演示程序，把切完的毛坯提取成网格并导出 HTML。

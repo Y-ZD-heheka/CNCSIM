@@ -23,6 +23,9 @@ ALLOWED = {
     # 不允许反过来（kin 不认识 .ron）。依赖面刻意收窄到 math + kin。
     "cncsim-config":  {"cncsim-math", "cncsim-kin"},
     "cncsim-gcode":   {"cncsim-math", "cncsim-motion", "cncsim-tool"},
+    # CAM 是**工艺生成器**：只认刀具几何与数学，输出 G 代码文本；
+    # 不依赖 voxel/sim（否则"生成"和"验证"会互相污染）。
+    "cncsim-cam":     {"cncsim-math", "cncsim-tool"},
     "cncsim-voxel":   {"cncsim-math", "cncsim-motion", "cncsim-tool"},
     "cncsim-collide": {"cncsim-math", "cncsim-motion", "cncsim-tool"},
     "cncsim-sim":     {"cncsim-math", "cncsim-motion", "cncsim-tool",
@@ -35,7 +38,7 @@ ALLOWED = {
                        "cncsim-sim", "cncsim-hmi", "cncsim-ui"},
     "cncsim-ui":      {"cncsim-math", "cncsim-hmi"},
     "cncsim-app":     {"cncsim-math", "cncsim-motion", "cncsim-tool", "cncsim-kin",
-                       "cncsim-config", "cncsim-gcode", "cncsim-voxel", "cncsim-collide",
+                       "cncsim-config", "cncsim-gcode", "cncsim-cam", "cncsim-voxel", "cncsim-collide",
                        "cncsim-sim", "cncsim-hmi", "cncsim-render", "cncsim-ui"},
 }
 

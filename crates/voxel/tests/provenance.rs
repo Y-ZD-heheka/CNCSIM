@@ -23,8 +23,13 @@ fn n(mm: f64) -> i32 {
 }
 
 fn stock() -> SparseGrid<i8> {
+    stock_with_creator_sub(1)
+}
+
+fn stock_with_creator_sub(sub: u8) -> SparseGrid<i8> {
     let cfg = GridConfig { h: H, band_voxels: 4, value_type: ValueType::I8 };
     let mut g = SparseGrid::<i8>::new(cfg, DVec3::ZERO);
+    g.set_creator_sub(sub);
     g.fill_box_exact([0, 0, 0], [n(S), n(S), n(S)], cfg.band_mm());
     g
 }
@@ -38,6 +43,13 @@ fn slot(grid: &mut SparseGrid<i8>, y: f64, floor: f64, creator: u8) {
     grid.set_creator(creator);
     // 刃长 15 mm > 毛坯高，槽顶开在毛坯外面（否则是封闭内腔，测起来要多解释一堆面）
     let cutter = flat_end_mill(6.0, 15.0);
+    grid.cut_segment(&pose(-5.0, y, floor), &pose(25.0, y, floor), &cutter);
+}
+
+/// φ2 窄槽：两条能放进同一片 4 mm 叶，且扫掠体互不相交。
+fn narrow_slot(grid: &mut SparseGrid<i8>, y: f64, floor: f64, creator: u8) {
+    grid.set_creator(creator);
+    let cutter = flat_end_mill(2.0, 15.0);
     grid.cut_segment(&pose(-5.0, y, floor), &pose(25.0, y, floor), &cutter);
 }
 
@@ -139,6 +151,149 @@ fn cut_surfaces_keep_their_own_creator() {
         }
     }
     assert!(near_y5 > 10 && near_y15 > 10, "两条槽的采样点太少：{near_y5} / {near_y15}");
+}
+
+/// 两条不相交的窄槽落在同一片叶里。第二刀不能把第一刀的既有表面
+/// 盖成自己的颜色——「这个子块有变化」不等于「这个旧面由本刀造成」。
+#[test]
+fn adjacent_cuts_in_one_leaf_do_not_recolor_each_other() {
+    let mut g = stock_with_creator_sub(8);
+    narrow_slot(&mut g, 8.5, 10.0, 3);
+    narrow_slot(&mut g, 11.0, 10.0, 7);
+    let m = g.extract_surface();
+
+    let (mut first, mut second) = (0usize, 0usize);
+    for (p, c) in m.positions.iter().zip(&m.colors) {
+        let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+        if !(9.2..10.8).contains(&z) || !(1.0..19.0).contains(&x) {
+            continue;
+        }
+        if (7.6..9.4).contains(&y) {
+            assert_eq!(c[0], 3, "第一刀的旧面被相邻第二刀侵染，位置 {p:?}");
+            first += 1;
+        } else if (10.1..11.9).contains(&y) {
+            assert_eq!(c[0], 7, "第二刀自己的面颜色不对，位置 {p:?}");
+            second += 1;
+        }
+    }
+    assert!(first > 10 && second > 10, "两条槽底采样不足：{first} / {second}");
+}
+
+/// 刀旁的原始顶面必须保持 0。每体素粒度下仍染色，说明问题不是分辨率，
+/// 而是把「旧值贴面」误当成了「当前扫掠在这里造面」。
+#[test]
+fn original_top_next_to_cut_stays_uncolored_at_voxel_granularity() {
+    let mut g = stock_with_creator_sub(8);
+    narrow_slot(&mut g, 10.0, 10.0, 5);
+    let m = g.extract_surface();
+
+    let mut top = 0usize;
+    for (p, c) in m.positions.iter().zip(&m.colors) {
+        let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+        if z > 19.0
+            && (1.0..19.0).contains(&x)
+            && (8.0..12.0).contains(&y)
+            && (y - 10.0).abs() > 1.5
+        {
+            assert_eq!(c[0], 0, "未切顶面被同叶刀痕染色，位置 {p:?}");
+            top += 1;
+        }
+    }
+    assert!(top > 10, "原始顶面采样不足：{top}");
+}
+
+/// 后一刀与既有切面完全重合，场值一个都没变——没有去除任何材料，
+/// 旧面必须保留原 creator，不能因为刀擦过就改色。
+#[test]
+fn coincident_pass_keeps_the_surface_it_did_not_change() {
+    let mut g = stock_with_creator_sub(8);
+    slot(&mut g, 10.0, 10.0, 3);
+    slot(&mut g, 10.0, 10.0, 7);
+    let m = g.extract_surface();
+    let mut floor = 0usize;
+    for (p, c) in m.positions.iter().zip(&m.colors) {
+        let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+        if (9.2..10.8).contains(&z)
+            && (1.0..19.0).contains(&x)
+            && (7.5..12.5).contains(&y)
+        {
+            assert_eq!(c[0], 3, "未改值的旧面被擦过的刀改色，位置 {p:?}");
+            floor += 1;
+        }
+    }
+    assert!(floor > 20, "槽底采样不足：{floor}");
+}
+
+/// 逐体素检查：刀**真的搬动了这一格**（场值变了）且新面仍在一格内，才换 creator。
+/// 值没变的体素（刀只是擦过、没去料）必须保留原色。
+///
+/// 注意不能要求"材料 → 空气"：精加工常常只把表面格从 −0.14 抬到 −0.01，
+/// 格心仍在材料侧，但那一刀确实把面削出来了（实测 −14 → −1）。
+#[test]
+fn creator_changes_only_where_the_cut_moved_the_surface() {
+    let mut g = stock_with_creator_sub(8);
+    narrow_slot(&mut g, 10.0, 10.0, 3);
+    let before = g.clone();
+    narrow_slot(&mut g, 12.4, 10.0, 7);
+
+    let nside = n(S);
+    let mut stamped = 0usize;
+    let mut changed = 0usize;
+    for z in 0..nside {
+        for y in 0..nside {
+            for x in 0..nside {
+                let ov = before.to_distance(before.get([x, y, z]));
+                let nv = g.to_distance(g.get([x, y, z]));
+                let c0 = before.creator_of_voxel([x, y, z]);
+                let c1 = g.creator_of_voxel([x, y, z]);
+                if ov == nv {
+                    assert_eq!(
+                        c1, c0,
+                        "刀只擦过、场值没变，却换了色：({x},{y},{z}) v={ov:+.3} {c0}→{c1}"
+                    );
+                    continue;
+                }
+                changed += 1;
+                if nv.abs() < H {
+                    assert_eq!(
+                        c1, 7,
+                        "第二刀确实削出了这一格的面，却没换色：({x},{y},{z}) {ov:+.3}→{nv:+.3}"
+                    );
+                    stamped += 1;
+                }
+            }
+        }
+    }
+    assert!(changed > 20, "第二刀改动的体素太少：{changed}");
+    assert!(stamped > 10, "第二刀贴面改动的体素太少：{stamped}");
+}
+
+/// 第二刀从第一刀槽壁外 0.4 mm 擦过：没有去除该槽壁的材料，
+/// 即使扫掠面进入一个体素范围内，也不能改色。
+#[test]
+fn grazing_pass_does_not_recolor_untouched_wall() {
+    let mut g = stock_with_creator_sub(8);
+    narrow_slot(&mut g, 10.0, 10.0, 3);
+    // 半径 1，刀心 y=12.4 → 扫掠面在 y=11.4；第一刀槽壁在 y=11.0，
+    // 中间还剩 0.4 mm 材料，场值不变。
+    narrow_slot(&mut g, 12.4, 10.0, 7);
+    let m = g.extract_surface();
+
+    let (mut first, mut second) = (0usize, 0usize);
+    for (p, c) in m.positions.iter().zip(&m.colors) {
+        let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+        if !(9.2..10.8).contains(&z) || !(1.0..19.0).contains(&x) {
+            continue;
+        }
+        if (8.8..11.2).contains(&y) {
+            assert_eq!(c[0], 3, "擦边刀改掉了未去除材料的槽壁颜色，位置 {p:?}");
+            first += 1;
+        } else if (12.4..13.6).contains(&y) {
+            assert_eq!(c[0], 7, "第二刀真正切出的底面颜色不对，位置 {p:?}");
+            second += 1;
+        }
+    }
+    assert!(first > 10 && second > 10, "采样不足：{first} / {second}");
 }
 
 /// 顶点色不能依赖分块数——`fetch_min` 就是为了这个（并行写同一格时取最小，

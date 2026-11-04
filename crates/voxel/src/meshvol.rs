@@ -278,6 +278,39 @@ pub fn surface_points(tris: &[Tri], step: f64) -> Vec<DVec3> {
     pts
 }
 
+/// 设计面采样点 + 该点所在三角形的**单位法向**（STL 的面法向，朝外）。
+///
+/// 验收要按"面朝哪"筛：法向朝下（`n.z < 0`）的是倒扣面，一次装夹从上面下来
+/// 根本够不到，不能算进"切坏了"。`surface_points` 只给位置，配不出这个判断。
+pub fn surface_points_with_normals(tris: &[Tri], step: f64) -> Vec<(DVec3, DVec3)> {
+    let step = step.max(1e-6);
+    let mut out = Vec::new();
+    for &[a, b, c] in tris {
+        let mut n = (b - a).cross(c - a);
+        let l = n.length();
+        if l > 1e-12 {
+            n = n * (1.0 / l);
+        } else {
+            continue; // 退化三角形：没有法向可言
+        }
+        let e1 = b - a;
+        let e2 = c - a;
+        let nu = (e1.length() / step).ceil().max(1.0) as usize;
+        let nv = (e2.length() / step).ceil().max(1.0) as usize;
+        for iu in 0..nu {
+            for iv in 0..nv {
+                let u = (iu as f64 + 0.5) / nu as f64;
+                let v = (iv as f64 + 0.5) / nv as f64;
+                if u + v > 1.0 {
+                    continue;
+                }
+                out.push((a + e1 * u + e2 * v, n));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

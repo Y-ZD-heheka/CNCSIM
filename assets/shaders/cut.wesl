@@ -19,7 +19,7 @@ struct FsIn {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
-    @location(5) color: vec4<f32>,
+    @location(5) @interpolate(flat) color: vec4<f32>,
 };
 
 // 名字必须与 Rust 结构体一致：`AsBindGroup` 的 derive 用类型名生成 WGSL 结构体名。

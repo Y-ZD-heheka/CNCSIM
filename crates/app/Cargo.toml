@@ -13,6 +13,7 @@ cncsim-tool.workspace = true
 cncsim-kin.workspace = true
 cncsim-config.workspace = true
 cncsim-gcode.workspace = true
+cncsim-cam.workspace = true
 cncsim-voxel.workspace = true
 cncsim-collide.workspace = true
 cncsim-sim.workspace = true
