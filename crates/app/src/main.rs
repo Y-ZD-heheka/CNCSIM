@@ -872,6 +872,21 @@ fn run_cam(model: &std::path::Path) {
         stock.min.x, stock.min.y, stock.min.z, stock.max.x, stock.max.y, stock.max.z
     );
 
+    // `--axis x,y,z`：**定轴 3+2**——把旋转轴锁到该方向，再走普通三轴刀路。
+    // `--multi`：多方向开粗 + 精加工（+Z / ±X / ±Y），一份程序。
+    if let Some(dir) = axis_from_args() {
+        println!(
+            "定轴 3+2：刀轴锁定 ({:.2},{:.2},{:.2})",
+            dir.x, dir.y, dir.z
+        );
+        run_cam_multi(model, &tris, stock, vec![dir]);
+        return;
+    }
+    if args_flag("--multi") {
+        run_cam_multi(model, &tris, stock, cncsim_cam::multi::default_directions());
+        return;
+    }
+
     // ── 工艺选择：先判断"这件是不是回转体"，不靠命令行的 `--rotary` 猜 ──
     //
     // 回转（车铣）只对回转体有意义：方形支架、手机支架这种件，绕 Z 的轮廓根本
@@ -947,7 +962,11 @@ fn run_cam(model: &std::path::Path) {
         eprintln!("解释器报错：{:?}", program.issues);
         std::process::exit(1);
     }
-    println!("解释：{} 块 / {} 条 issue", program.len(), program.issues.len());
+    println!(
+        "解释：{} 块 / {} 条 issue",
+        program.len(),
+        program.issues.len()
+    );
 
     // ── 现有仿真 + 设计比对 ──
     let h = 0.25;
@@ -971,6 +990,7 @@ fn run_cam(model: &std::path::Path) {
         design_step: 0.3,
         collide: false,
         creator_sub: 4,
+        colorize: args_flag("--color"),
         drop_chips: true,
         ..Default::default()
     };
@@ -985,6 +1005,11 @@ fn run_cam(model: &std::path::Path) {
         out.stats.cut_segments,
         r.removed_volume_mm3,
         r.chip_voxels
+    );
+    println!(
+        "  切割染色：{}（creator {:.1} KB）",
+        if cfg.colorize { "开" } else { "关" },
+        out.grid.creator_bytes() as f64 / 1024.0
     );
     println!(
         "  过切 {:.3} mm³ / {:.4} mm；残留 {:.3} mm³ / {:.4} mm",
@@ -1158,6 +1183,512 @@ ctx.putImageData(img,0,0);
     std::fs::write(path, html)
 }
 
+/// `--cam <model.stl> --multi`：多方向开粗 + 精加工，串成一份程序。
+///
+/// 这是"从 XYZ 任意方向开粗"的实现：每道工序用自己的 `Frame` 把模型转进该
+/// 方向的局部系跑同一条 3 轴链路，输出时再用 `G43.4 H1` + A/C 把刀轴摆过去。
+/// 单道做不了（该方向多层/倒扣）就跳过并报原因，不拖垮整份计划。
+fn run_cam_multi(
+    model: &std::path::Path,
+    tris: &[cncsim_cam::Tri],
+    stock: cncsim_cam::Stock,
+    dirs: Vec<cncsim_math::DVec3>,
+) {
+    use cncsim_cam::multi::{Pass, generate_plan};
+
+    // 工艺不设限的前提是"知道每条路能走多远"：回转件上 RTCP（刀轴逐点跟法向）
+    // 比"多道定轴"更好——既能覆盖到更陡的面，接触点曲率也是恒定的，光洁度更高。
+    // 这里如实把判断摆出来，而不是偷偷只用其中一条。
+    let rot = cncsim_cam::rotary::rotationality(tris);
+    if rot >= 0.85 {
+        println!(
+            "工艺提示：回转体吻合度 {:.1}% → 这件更适合 `--rotary`（五轴 RTCP，刀轴逐点跟法向）；\
+             当前按多道定轴编排",
+            rot * 100.0
+        );
+    } else {
+        println!(
+            "工艺提示：回转体吻合度 {:.1}% → 回转 RTCP 描述不了它，走多道定轴（3 轴 + 3+2）",
+            rot * 100.0
+        );
+    }
+
+    let short = stock.size().x.min(stock.size().y);
+    let d_rough = 6.0f64.min(0.35 * short).max(1.0);
+    let d_finish = 3.0f64.min(d_rough * 0.6).max(0.8);
+    let rough = cncsim_cam::ToolSpec::flat(0, d_rough, 20.0);
+
+    // ── 开粗参数：按**最大材料去除率**定，同时留够精加工余量 ──
+    //
+    // 材料去除率 MRR = ap(层深) × ae(行距) × vf(进给)。平底刀开粗的三项取满：
+    //   ap = 1.0×D（满刀深，平底刀每层切出一个平面，这是它相对球头的优势）
+    //   ae = 0.7×D（大于 0.7D 中心会留下未切芯，反而要跑第二遍）
+    //   vf = 进给，按刀径缩放（小刀跑不快）
+    // 留量 `allowance_mm` 是**法向**余量：粗加工把每个面留在真实面之外这么多，
+    // 精加工只削这一层。0.3 mm ≥ 精加工行距带来的残高，粗加工不会侵占设计面。
+    let allowance = 0.3f64;
+    let ap = d_rough.min(8.0);
+    let ae = d_rough * 0.7;
+    let vf = (600.0 + d_rough * 120.0).clamp(700.0, 1500.0);
+    let mrr = ap * ae * vf / 1000.0; // cm³/min
+
+    let process = cncsim_cam::Process {
+        stock_allowance_mm: allowance,
+        stepdown_mm: ap,
+        rough_stepover_mm: ae,
+        finish_stepover_mm: finish_step_from_args().unwrap_or((d_finish * 0.4).clamp(0.3, 1.2)),
+        sample_mm: (short / 250.0).clamp(0.2, 0.5),
+        // 陡壁的坡度门槛。**drop-cutter 不会因为坡陡而啃进去**（刀心取刀盘内最高点，
+        // 几何上保证不侵入），所以门槛放宽只多走路、不会多切。留 70° 是把"接近
+        // 竖直但还没到竖直"的那一段也纳进来；竖直面交给侧向工序。
+        max_finish_slope_deg: slope_deg(),
+        feed_mm_min: vf,
+        plunge_mm_min: vf * 0.35,
+        // 多方向/定轴是"尽最大努力"：孔、内腔、倒扣的背面切不到就留料，不拒收
+        allow_undercut: true,
+        ..Default::default()
+    };
+    // 球头精加工用 `--flat-finish` 换成平底刀（走 drop-cutter，见 cam 的 finish_pass）
+    let finish = if args_flag("--flat-finish") {
+        cncsim_cam::ToolSpec::flat(0, d_finish, 20.0)
+    } else {
+        cncsim_cam::ToolSpec::ball(0, d_finish, 20.0)
+    };
+
+    println!(
+        "开粗：ap {ap:.1}（{:.1}×D）× ae {ae:.1}（0.7×D）× vf {vf:.0} → MRR {mrr:.1} cm³/min，留量 {allowance:.2} mm",
+        ap / d_rough
+    );
+    // ── 网格与设计场：可达性分析要用，所以提前到"定工序"之前 ──
+    let size = stock.size();
+    let vol = size.x * size.y * size.z;
+    let h = h_from_args().unwrap_or((vol / 3.0e7).cbrt().max(0.3).min(1.0));
+    let domain = [
+        (size.x / h).round().max(1.0) as i32,
+        (size.y / h).round().max(1.0) as i32,
+        (size.z / h).round().max(1.0) as i32,
+    ];
+    let grid = cncsim_voxel::GridConfig {
+        h,
+        band_voxels: 4,
+        value_type: cncsim_voxel::ValueType::I8,
+    };
+    println!(
+        "网格：h = {h:.2} mm（{}×{}×{}）",
+        domain[0], domain[1], domain[2]
+    );
+    let design = cncsim_sim::compare::field_design(tris, grid, stock.min, domain, 0.3);
+    // 设计面采样（带法向和面积）：可达性分析用，比体素细一级没意义
+    let samples = {
+        let mut step = 1.5f64;
+        let mut smp = cncsim_voxel::meshvol::surface_samples(tris, step);
+        while smp.len() > 160_000 && step < 6.0 {
+            step *= 1.5;
+            smp = cncsim_voxel::meshvol::surface_samples(tris, step);
+        }
+        smp
+    };
+
+    let mut passes: Vec<Pass> = dirs
+        .iter()
+        .map(|d| Pass {
+            dir: *d,
+            rough: Some(rough.clone()),
+            finish: finish.clone(),
+        })
+        .collect();
+    // 轴向工序用 45° 坡度门槛，覆盖的是"法向与某根轴夹角 ≤45°"的面；剩下的洞在
+    // **体对角线**附近。补 4 条 54.7° 的斜向道，只精加工（粗料已被轴向道去掉）。
+    let mut n_oblique = 0usize;
+    let mut n_kinematic = 0usize;
+    if dirs.len() > 1 && !args_flag("--no-tilt-finish") {
+        // 默认 4 条体对角线；`--tilt <度> --tilt-n <条数>` 可给任意角度。
+        // 只受**机床运动学**约束：A 轴行程之外的方向直接丢，并如实报数。
+        let (tilt, n) = tilt_from_args().unwrap_or((54.735_610_229_728_65, 4));
+        let lim = cncsim_cam::rotary::A_LIMIT_DEG;
+        for d in cncsim_cam::multi::oblique_directions(tilt, n) {
+            let a = d.z.clamp(-1.0, 1.0).acos().to_degrees();
+            if a > lim + 1e-9 {
+                n_kinematic += 1; // A 轴够不到
+                continue;
+            }
+            passes.push(Pass {
+                dir: d,
+                rough: None,
+                finish: finish.clone(),
+            });
+            n_oblique += 1;
+        }
+        println!(
+            "斜向精加工：{n_oblique} 道（倾角 {tilt:.1}°）{}",
+            if n_kinematic > 0 {
+                format!("，A>{lim:.0}° 运动学挡掉 {n_kinematic} 道")
+            } else {
+                String::new()
+            }
+        );
+    }
+    // ── 工序编排：**不限定加工方式**，让覆盖面积决定要几道、往哪摆 ──
+    //
+    // 3 轴（+Z）、3+2（任意倾角定轴）在本实现里是同一套高度场，只是工序方向不同；
+    // 真正的五轴 RTCP（刀轴逐点跟法向）只在回转件上有实现（`--rotary`，判据是
+    // `rotationality ≥ 0.85`）。所以这里把**整个可达半球**当候选集，用带权集合覆盖
+    // 贪心地挑方向：每次挑"新覆盖面积最大"的那一个，收益低于阈值就停。
+    //
+    // 这样"用三轴还是 3+2"不再是命令行开关，而是几何和机床行程共同决定的结论：
+    // 平面件会被 +Z 一道吃满（贪心直接停），有侧壁的自然长出侧向/斜向道。
+    let rc = cncsim_sim::reach::ReachConfig::default();
+    let mut cand: Vec<cncsim_math::DVec3> = passes.iter().map(|p| p.dir).collect();
+    {
+        // 候选只在**机床摆得到**的范围内加：A = acos(dir.z) ≤ 110°
+        let lim = cncsim_cam::rotary::A_LIMIT_DEG;
+        for (tilt, n) in [(75.0f64, 8usize), (101.0, 8)] {
+            for d in cncsim_cam::multi::oblique_directions(tilt, n) {
+                if d.z.clamp(-1.0, 1.0).acos().to_degrees() > lim + 1e-9 {
+                    continue;
+                }
+                if cand.iter().any(|c| c.dot(d) > 0.999) {
+                    continue;
+                }
+                cand.push(d);
+            }
+        }
+    }
+    let vis = cncsim_sim::reach::visibility(&design, &samples, &cand, &rc);
+    let base_mask = if passes.is_empty() {
+        0
+    } else {
+        (1u64 << passes.len().min(63)) - 1
+    };
+    let mut reach = cncsim_sim::reach::report_with(&vis, base_mask);
+    let mut final_mask = base_mask;
+    let mut n_auto = 0usize;
+    if !args_flag("--no-auto-pass") {
+        let extra = vis.greedy(base_mask, 6, 0.004);
+        if extra.is_empty() {
+            println!(
+                "工序编排：候选 {} 个方向 → 现有 {} 道已覆盖 {:.1}%，再加没有收益",
+                vis.dirs.len(),
+                passes.len(),
+                reach.coverage() * 100.0
+            );
+        } else {
+            println!(
+                "工序编排：候选 {} 个方向（A≤{:.0}°）→ 现有 {} 道覆盖 {:.1}%",
+                vis.dirs.len(),
+                cncsim_cam::rotary::A_LIMIT_DEG,
+                passes.len(),
+                reach.coverage() * 100.0
+            );
+            let mut m = base_mask;
+            // 面朝过但一个候选方向都不通的面积：这些是工艺天花板，加方向也救不回来
+            let (mut blocked_area, mut back_area) = (0.0f64, 0.0f64);
+            for i in 0..vis.masks.len() {
+                if vis.masks[i] != 0 {
+                    continue;
+                }
+                if vis.facing[i] != 0 {
+                    blocked_area += vis.areas[i];
+                } else {
+                    back_area += vis.areas[i];
+                }
+            }
+            if blocked_area + back_area > 0.0 {
+                println!(
+                    "  ├ 上限 {:.1}%：另有 {:.0} mm² 被遮挡 + {:.0} mm² 是背面，任何方向都够不到",
+                    (1.0 - (blocked_area + back_area) / vis.total_area_mm2.max(1e-9)) * 100.0,
+                    blocked_area,
+                    back_area
+                );
+            }
+            for k in &extra {
+                let prev = m;
+                m |= 1u64 << *k;
+                let d = vis.dirs[*k];
+                let a = d.z.clamp(-1.0, 1.0).acos().to_degrees();
+                let c = d.x.atan2(-d.y).to_degrees();
+                println!(
+                    "  ├ +1 道 --axis={:.2},{:.2},{:.2}（A{a:.0}° C{c:.0}°）覆盖 {:.1}% → {:.1}%（新增 {:.0} mm²）",
+                    d.x,
+                    d.y,
+                    d.z,
+                    vis.coverage(prev) * 100.0,
+                    vis.coverage(m) * 100.0,
+                    (vis.coverage(m) - vis.coverage(prev)) * vis.total_area_mm2
+                );
+                passes.push(Pass {
+                    dir: d,
+                    rough: None,
+                    finish: finish.clone(),
+                });
+                n_auto += 1;
+            }
+            final_mask = m;
+            reach = cncsim_sim::reach::report_with(&vis, m);
+        }
+    }
+
+    println!(
+        "工序：{} 道（轴向 {} + 斜向 {n_oblique} + 编排 {n_auto}）· 粗 Ø{d_rough:.1} 平底 + 精 Ø{d_finish:.1} {}",
+        passes.len(),
+        dirs.len(),
+        if args_flag("--flat-finish") {
+            "平底（立铣刀）"
+        } else {
+            "球头"
+        }
+    );
+
+    let t0 = std::time::Instant::now();
+    let plan = match generate_plan(tris, stock, &process, &passes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("多方向 CAM 失败：{e}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "刀路：{} 行 / {} 层 / 粗 {} 段 / 精 {} 段 / 切 {:.0} mm（{:.2} s）",
+        plan.program.stats.lines,
+        plan.program.stats.levels,
+        plan.program.stats.rough_moves,
+        plan.program.stats.finish_moves,
+        plan.program.stats.cut_mm,
+        t0.elapsed().as_secs_f64()
+    );
+    println!(
+        "完成 {} 道 / 跳过 {} 道 / 刀杆避让 {} 点",
+        plan.passes,
+        plan.skipped.len(),
+        plan.program.stats.shank_skips
+    );
+    for (i, why) in &plan.skipped {
+        let d = passes[*i].dir;
+        println!(
+            "  ├ 跳过 #{i} dir ({:.0},{:.0},{:.0})：{why}",
+            d.x, d.y, d.z
+        );
+    }
+
+    let nc = gcode_path_from_args().unwrap_or_else(|| model.with_extension("multi.nc"));
+    if let Err(e) = std::fs::write(&nc, &plan.program.gcode) {
+        eprintln!("写 G 代码失败：{e}");
+    } else {
+        println!("G 代码：{}", nc.display());
+    }
+
+    // ── 解释：A/C 按 Head（双摆头）约定生成，必须配套 ──
+    let mut radii = vec![0.0; 64];
+    for t in &plan.tools {
+        let k = t.number as usize;
+        if k < radii.len() {
+            radii[k] = t.diameter * 0.5;
+        }
+    }
+    let ic = cncsim_gcode::InterpConfig {
+        tool_radii: radii,
+        rotary: cncsim_gcode::RotaryConvention::Head,
+        ..Default::default()
+    };
+    let program = cncsim_gcode::interpret(&plan.program.gcode, &ic);
+    if program.has_errors() {
+        eprintln!("解释器报错：{:?}", program.issues);
+        std::process::exit(1);
+    }
+    println!(
+        "解释：{} 块 / {} 条 issue",
+        program.len(),
+        program.issues.len()
+    );
+
+    let cfg = cncsim_sim::run::RunConfig {
+        grid,
+        stock_origin: stock.min,
+        stock_size: domain,
+        design: Some(design),
+        design_step: 0.3,
+        collide: false,
+        creator_sub: 4,
+        colorize: args_flag("--color"),
+        drop_chips: true,
+        ..Default::default()
+    };
+    let table = cncsim_tool::ToolTable::new(plan.tools.clone());
+    let t0 = std::time::Instant::now();
+    let out = cncsim_sim::run::run_tools(&program, &table, &cfg);
+    let r = &out.report;
+    println!(
+        "仿真：{:.1} s / {} 块 / {} 段 / 去料 {:.1} mm³ / 丢碎屑 {} 格",
+        t0.elapsed().as_secs_f64(),
+        out.stats.blocks,
+        out.stats.cut_segments,
+        r.removed_volume_mm3,
+        r.chip_voxels
+    );
+    println!(
+        "  切割染色：{}（creator {:.1} KB）",
+        if cfg.colorize { "开" } else { "关" },
+        out.grid.creator_bytes() as f64 / 1024.0
+    );
+    println!(
+        "  过切 {:.3} mm³ / {:.4} mm @ ({:.2},{:.2},{:.2})；残留 {:.3} mm³ / {:.4} mm @ ({:.2},{:.2},{:.2})",
+        r.gouge_volume_mm3,
+        r.gouge_max_depth_mm,
+        r.gouge_at.x,
+        r.gouge_at.y,
+        r.gouge_at.z,
+        r.residual_volume_mm3,
+        r.residual_max_thickness,
+        r.residual_at.x,
+        r.residual_at.y,
+        r.residual_at.z
+    );
+    if let Some((lo, hi)) = r.gouge_region {
+        println!(
+            "  过切区域 ({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
+            lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+        );
+    }
+
+    // ── 可达性报告：够不到的面单独列出来，并给出建议方向 ──
+    println!(
+        "可达性：{} 点 / {:.0} mm² → 可达 {:.1}% / 遮挡 {:.1}% / 背面 {:.1}%",
+        reach.points,
+        reach.total_area_mm2,
+        reach.reachable_area_mm2 / reach.total_area_mm2.max(1e-9) * 100.0,
+        reach.occluded_area_mm2 / reach.total_area_mm2.max(1e-9) * 100.0,
+        reach.backfacing_area_mm2 / reach.total_area_mm2.max(1e-9) * 100.0
+    );
+    for g in reach.groups.iter().take(4) {
+        let head = format!(
+            "  ├ {:.0} mm²（{:.1}%）区域 ({:.1},{:.1},{:.1})..({:.1},{:.1},{:.1})",
+            g.area_mm2,
+            g.area_mm2 / reach.total_area_mm2.max(1e-9) * 100.0,
+            g.lo.x,
+            g.lo.y,
+            g.lo.z,
+            g.hi.x,
+            g.hi.y,
+            g.hi.z
+        );
+        if g.has_direction() {
+            // 整片朝同一个方向：补一道那个方向的定轴工序就能覆盖
+            println!(
+                "{head}  → 加一道 --axis={:.2},{:.2},{:.2}（A{:.0}° C{:.0}°）{}",
+                g.dir.x,
+                g.dir.y,
+                g.dir.z,
+                g.a_deg(),
+                g.c_deg(),
+                if g.backfacing_frac > 0.8 {
+                    "，当前是纯背面"
+                } else {
+                    ""
+                }
+            );
+        } else {
+            println!("{head}  → 封闭/多向：没有单一方向能进去，需翻面或五轴联动");
+        }
+    }
+    if reach.occluded + reach.backfacing == 0 {
+        println!("  └ 所有面都可及：剩下的偏差全是刀路问题（刀径/步距/凹角让位）");
+    } else {
+        println!(
+            "  └ {} 点背面（没有工序方向朝向它）+ {} 点被遮挡：**刀路再调也切不到**，只能改工艺",
+            reach.backfacing, reach.occluded
+        );
+        println!(
+            "  └ 剩下能切到的面上若还有残料，那才是刀路问题（实测过切 {:.3} mm³ / 残留 {:.3} mm³）",
+            r.gouge_volume_mm3, r.residual_volume_mm3
+        );
+    }
+
+    // ── 名义曲面逐点偏差：和回转链路同一套口径，直接回答"像不像原版" ──
+    let pts = cncsim_voxel::meshvol::surface_points(tris, 0.8);
+    let dev = cncsim_sim::surface_dev::signed_deviation(&out.grid, &pts);
+    let sd = cncsim_sim::surface_dev::stats(&dev, 0.15, 4.0 * h);
+    println!(
+        "名义曲面：{} 点 / 平均 |d| {:.3} / P95 {:.3} / 合格(≤0.15) {:.1}% / 过切 {:.1}% / 残料 {:.1}% / 最大过切 {:+.2}",
+        sd.points,
+        sd.mean_abs,
+        sd.p95_abs,
+        sd.ok_frac() * 100.0,
+        sd.gouge_frac() * 100.0,
+        sd.residual_frac() * 100.0,
+        sd.max_gouge
+    );
+
+    // ── 可达 × 偏差 交叉表：把"够不到"和"没切好"彻底分开 ──
+    //
+    // 不分的话只有一个笼统的"合格 81.6%"，看不出下一步该改刀路还是改工艺。
+    // 分开之后两边的结论是定性的：可达面上不合格 → 刀路/刀具问题；
+    // 不可达面上残料 → 只能翻面或换工艺，别再调步距。
+    {
+        let pts: Vec<cncsim_math::DVec3> = vis.points.clone();
+        let dev2 = cncsim_sim::surface_dev::signed_deviation(&out.grid, &pts);
+        // (点数, 合格, 过切, 残料)
+        let mut r = (0usize, 0usize, 0usize, 0usize);
+        let mut u = (0usize, 0usize, 0usize, 0usize);
+        for (i, d) in dev2.iter().enumerate() {
+            let reachable = vis.masks[i] & final_mask != 0;
+            let d = *d;
+            let slot = if d.abs() <= 0.15 {
+                1
+            } else if d > 0.15 {
+                2
+            } else {
+                3
+            };
+            let t = if reachable { &mut r } else { &mut u };
+            t.0 += 1;
+            match slot {
+                1 => t.1 += 1,
+                2 => t.2 += 1,
+                _ => t.3 += 1,
+            }
+        }
+        let pct = |n: usize, t: usize| if t == 0 { 0.0 } else { n as f64 / t as f64 * 100.0 };
+        println!(
+            "  可达面 {}：合格 {:.1}% / 过切 {:.1}% / 残料 {:.1}%",
+            r.0,
+            pct(r.1, r.0),
+            pct(r.2, r.0),
+            pct(r.3, r.0)
+        );
+        println!(
+            "  不可达面 {}：合格 {:.1}% / 过切 {:.1}% / 残料 {:.1}%（只能翻面或换工艺）",
+            u.0,
+            pct(u.1, u.0),
+            pct(u.2, u.0),
+            pct(u.3, u.0)
+        );
+    }
+
+    if let Some(path) = export_path_from_args() {
+        // 自动降 LOD：h 小的时候 LOD 1 也能到几十万三角形，预览面板会卡
+        let mut lod = 1;
+        let mut mesh = out.grid.extract_surface_lod(lod);
+        while mesh.indices.len() / 3 > 400_000 && lod < 4 {
+            lod += 1;
+            mesh = out.grid.extract_surface_lod(lod);
+        }
+        let title = format!(
+            "多方向 CAM：{}",
+            model.file_name().unwrap_or_default().to_string_lossy()
+        );
+        match cncsim_render::preview::write_html(&path, &mesh, &title) {
+            Ok(s) => println!(
+                "预览：{}（{} 顶点 / {} 三角形 / {} MB）",
+                path.display(),
+                s.vertices,
+                s.triangles,
+                s.bytes / (1 << 20)
+            ),
+            Err(e) => eprintln!("写预览失败：{e}"),
+        }
+    }
+}
+
 /// `--cam <model.stl> --rotary`：A/C 回转 + RTCP 的外轮廓加工。
 ///
 /// 和 3 轴高度场是两条工艺：这里把工件转起来，刀轴沿外法向，程序用
@@ -1314,7 +1845,8 @@ fn run_cam_rotary(model: &std::path::Path, tris: &[cncsim_cam::Tri], stock: cncs
         stock_size: domain,
         design: None, // 这道工序只做外轮廓，内腔不在验收范围
         collide: false,
-        creator_sub: 1,
+        creator_sub: 4,
+        colorize: args_flag("--color"),
         // 切下来还挂着的碎块按"掉成切屑"丢掉，否则预览里会浮着一层小方块
         drop_chips: true,
         ..Default::default()
@@ -1588,8 +2120,17 @@ fn run_cam_rotary(model: &std::path::Path, tris: &[cncsim_cam::Tri], stock: cncs
 
     if let Some(path) = export_path_from_args() {
         // 回转件的曲面是主特征，LOD 3（8 mm 粗格）会把波浪面抽成一块块疙瘩，
-        // 换成 LOD 1（2 mm）看得清表面质量。
-        let mesh = out.grid.extract_surface_lod(1);
+        // 所以从 LOD 1 起抽。但 h 变小后 LOD 1 也能到百万三角形（36 MB HTML），
+        // 预览面板会卡——超过 40 万三角形自动再降一级。
+        let mut lod = 1;
+        let mut mesh = out.grid.extract_surface_lod(lod);
+        while mesh.indices.len() / 3 > 400_000 && lod < 3 {
+            lod += 1;
+            mesh = out.grid.extract_surface_lod(lod);
+        }
+        if lod > 1 {
+            println!("预览用 LOD {lod}（LOD 1 三角形过多）");
+        }
         match cncsim_render::preview::write_html(&path, &mesh, "CAM rotary RTCP") {
             Ok(s) => println!(
                 "预览：{}（{} 顶点 / {} 三角形 / {} MB）",
@@ -1608,6 +2149,77 @@ fn rotary_from_args() -> bool {
 }
 
 /// `--no-rough`：跳过粗加工，只跑精加工（对照用：隔离过切来源）。
+/// `--axis x,y,z`：**定轴 3+2**（把旋转轴锁到该方向，走普通三轴刀路）。
+///
+/// 这就是"立铣刀 + 定旋转轴三轴加工"：程序里 A/C 固定，只有 XYZ 在动；
+/// 侧向加工时刀轴不再是世界 +Z，所以仍走 `G43.4`（刀尖跟随）。
+fn axis_from_args() -> Option<cncsim_math::DVec3> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw = if let Some(v) = args.iter().position(|a| a == "--axis") {
+        args.get(v + 1)?.clone()
+    } else {
+        // 也接受 `--axis=x,y,z`
+        args.iter().find_map(|a| a.strip_prefix("--axis="))?.to_string()
+    };
+    let raw = raw.as_str();
+    let p: Vec<f64> = raw
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    if p.len() != 3 {
+        eprintln!("--axis 需要三个数，例如 --axis -1,0,0（当前给的是 {raw}）");
+        std::process::exit(1);
+    }
+    let d = cncsim_math::DVec3::new(p[0], p[1], p[2]);
+    if d.length() < 1e-9 {
+        eprintln!("--axis 不能是零向量");
+        std::process::exit(1);
+    }
+    Some(d.normalize())
+}
+
+/// `--slope <度>`：精加工允许的最大坡度（默认 45）。
+///
+/// 放宽它只多走路：drop-cutter 的刀心取刀盘内最高点，坡再陡也不会多切
+/// （实测 45→70 残料一点没降、时间 3.4×，所以默认仍是 45）。
+fn slope_deg() -> f64 {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--slope")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(45.0)
+}
+
+/// `--finish-step <mm>`：精加工行距（默认 0.4×刀径）。
+fn finish_step_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--finish-step")
+        .and_then(|(_, v)| v.parse().ok())
+}
+
+/// `--tilt <度> --tilt-n <条>`：斜向精加工的倾角与条数（默认 54.7° × 4）。
+///
+/// 角度不受"必须 90° 的倍数"约束——只要 A 轴能摆到（≤ 机床行程）就是合法工序。
+fn tilt_from_args() -> Option<(f64, usize)> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let take = |key: &str| -> Option<String> {
+        let v = args.iter().position(|a| a == key)?;
+        args.get(v + 1).cloned().or_else(|| {
+            args.iter()
+                .find_map(|a| a.strip_prefix(&format!("{key}=")).map(str::to_string))
+        })
+    };
+    let t = take("--tilt")?;
+    let deg: f64 = t.parse().ok()?;
+    let n: usize = take("--tilt-n")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    Some((deg, n.max(1)))
+}
+
 /// `--h <mm>`：强制体素边长（默认按刀半径自动定）。
 fn h_from_args() -> Option<f64> {
     std::env::args()

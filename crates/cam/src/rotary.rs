@@ -118,6 +118,8 @@ pub struct RotaryProfile {
     pub dz: f64,
     /// 刀路采样网格上的半径（每个值都来自细网格）。
     pub r: Vec<f64>,
+    /// 每行的 z 坐标（**不等距**：按子午线弧长排布，见 `profile_of`）。
+    zs: Vec<f64>,
     /// 细网格（真值）：`f_r[iz * f_nt + it]`。
     f_nt: usize,
     f_nz: usize,
@@ -132,7 +134,7 @@ impl RotaryProfile {
     }
 
     pub fn z(&self, iz: usize) -> f64 {
-        self.z0 + iz as f64 * self.dz
+        self.zs[iz.min(self.zs.len() - 1)]
     }
 
     /// 该格的半径；0 / 非有限 = 没有轮廓。
@@ -488,7 +490,7 @@ fn rough_stage(
     let n_per_rev = ((360.0 / rough.step_deg).round() as usize).max(8);
     let dth = std::f64::consts::TAU / n_per_rev as f64;
     let dz_step = rough.pitch_mm / n_per_rev as f64;
-    let z_top = profile.z0 + (profile.n_z - 1) as f64 * profile.dz;
+    let z_top = profile.z(profile.n_z - 1);
     let n_steps = (((z_top - profile.z0) / dz_step).ceil() as usize).max(1);
 
     let mut count = 0usize;
@@ -634,7 +636,8 @@ pub fn rotationality(mesh: &[Tri]) -> f64 {
         let it = ((th.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU * nt as f64)
             .round() as usize)
             % nt;
-        let iz = (((c.z - p.z0) / p.dz).round() as i64).clamp(0, nz as i64 - 1) as usize;
+        // zs 不等距，用二分找最近行
+        let iz = p.zs.partition_point(|v| *v < c.z).min(nz - 1);
         let env = p.r[iz * nt + it];
         if env <= 0.0 {
             continue;
@@ -751,11 +754,55 @@ fn profile_of(mesh: &[Tri], center: DVec2, step_deg: f64, step_z: f64) -> Rotary
 
     // ── 刀路网格：每个格点去细网格上查真值 ──
     let n_theta = ((360.0 / step_deg).round() as usize).max(8);
-    let n_z = (((zmax - zmin) / step_z).ceil() as usize).max(2) + 1;
-    let dz = (zmax - zmin) / (n_z - 1) as f64;
+
+    // 行距按**子午线弧长**排，不是按 z。
+    //
+    // 等 z 分行在近水平面上会把径向步距放大：半球顶部 dr/dz → ∞，
+    // step_z=0.6 对应径向 4 mm，Ø2 球头跨不过去 → 顶盖过切/残料。
+    // 实测（解析半球）A<30° 平均偏差 0.329 mm，而 A 30..90° 只有 0.02。
+    // 改成沿轮廓等弧长后，近水平处的行自动变密。
+    let mut rmax = vec![0.0f64; f_nz];
+    for (j, slot) in rmax.iter_mut().enumerate() {
+        for i in 0..f_nt {
+            let v = f_r[j * f_nt + i];
+            if v > *slot {
+                *slot = v;
+            }
+        }
+    }
+    let mut arc = vec![0.0f64; f_nz];
+    for j in 1..f_nz {
+        let dr = rmax[j] - rmax[j - 1];
+        arc[j] = arc[j - 1] + (dr * dr + f_dz * f_dz).sqrt();
+    }
+    let total = arc[f_nz - 1];
+    let n_z = if total > 1e-9 {
+        ((total / step_z).ceil() as usize).max(2) + 1
+    } else {
+        (((zmax - zmin) / step_z).ceil() as usize).max(2) + 1
+    };
+    let mut zs = Vec::with_capacity(n_z);
+    if total > 1e-9 {
+        let stride = total / (n_z - 1) as f64;
+        for k in 0..n_z {
+            let target = k as f64 * stride;
+            let j1 = arc.partition_point(|v| *v < target).clamp(1, f_nz - 1);
+            let (j0, span) = (j1 - 1, arc[j1] - arc[j1 - 1]);
+            let t = if span > 1e-12 {
+                ((target - arc[j0]) / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            zs.push(zmin + (j0 as f64 + t) * f_dz);
+        }
+    } else {
+        for k in 0..n_z {
+            zs.push(zmin + k as f64 * (zmax - zmin) / (n_z - 1) as f64);
+        }
+    }
+    let dz = (zmax - zmin) / (n_z - 1) as f64; // 仅作参考值，行距以 `zs` 为准
     let mut r = vec![0.0f64; n_theta * n_z];
-    for iz in 0..n_z {
-        let z = zmin + iz as f64 * dz;
+    for (iz, z) in zs.iter().copied().enumerate() {
         for it in 0..n_theta {
             let th = it as f64 / n_theta as f64 * std::f64::consts::TAU;
             let fit = ((th / std::f64::consts::TAU * f_nt as f64).round() as usize) % f_nt;
@@ -790,6 +837,7 @@ fn profile_of(mesh: &[Tri], center: DVec2, step_deg: f64, step_z: f64) -> Rotary
         z0: zmin,
         dz,
         r,
+        zs,
         f_nt,
         f_nz,
         f_z0: zmin,
@@ -849,7 +897,10 @@ fn fill_holes(r: &mut [f64], n_theta: usize, n_z: usize) {
 }
 
 /// 外法向 → (A, C) 度（Head 约定）。
-fn ac_of(n: DVec3) -> (f64, f64) {
+/// 单位方向 → (A, C) 度（Head 约定 `axis = (sinA·sinC, −sinA·cosC, cosA)`）。
+///
+/// 也用于多方向开粗：那里传的是"工序的 +Z"（= 刀轴指向），不是曲面法向。
+pub fn ac_of(n: DVec3) -> (f64, f64) {
     let a = n.z.clamp(-1.0, 1.0).acos().to_degrees();
     let c = n.x.atan2(-n.y).to_degrees();
     (a, c)

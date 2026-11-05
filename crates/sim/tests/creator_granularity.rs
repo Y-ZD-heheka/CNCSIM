@@ -32,6 +32,8 @@ fn run_slot(cut_z: f64, sub: u8) -> (cncsim_voxel::MeshData, usize, usize, f64) 
         stock_size: [300, 300, 120],
         design: None,
         creator_sub: sub,
+        // 这条测试就是量染色粒度的，必须显式打开（默认关）
+        colorize: true,
         ..Default::default()
     };
     let t0 = std::time::Instant::now();

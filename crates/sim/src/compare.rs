@@ -226,8 +226,13 @@ pub fn compare_with_design(
     let t_vox = t0.elapsed().as_secs_f64() * 1e3;
 
     let t1 = std::time::Instant::now();
+    // 过切包围盒外扩一格 + 容差：最深点可能落在相邻体素里
+    let hint = gouge_region.map(|(lo, hi)| {
+        let m = DVec3::new(grid.config.h + tol, grid.config.h + tol, grid.config.h + tol);
+        (lo - m, hi + m)
+    });
     let (gouge_max_depth, gouge_at, gouge_block, gouge_line, gouge_t, design_points) =
-        analytic_gouge(segments, tools, design, step, tol);
+        analytic_gouge(segments, tools, design, step, tol, hint);
     if std::env::var_os("CNCSIM_PROF").is_some() {
         println!(
             "  [cmp] 体素积分 {t_vox:.1} ms | 解析过切 {:.1} ms（{} 段 / {} 设计点）",
@@ -370,12 +375,87 @@ fn voxel_compare(
 /// 预筛：点在段扫掠 AABB（外扩 tol）之外 ⟹ 到扫掠体距离 ≥ 到 AABB 距离 > tol，
 /// 不可能是过切，跳过昂贵的 `sd_sweep`。
 #[allow(clippy::type_complexity)]
+/// 段的空间索引：设计面上的采样点只查**自己所在格**里的段。
+///
+/// 原来是对每个点扫全部段（110 万点 × 5.5 万段 = 5.5e10 次 AABB 比较），
+/// 实测这件活 158 s 里 **135 s 花在这里**。按格子分桶后每点只比几十段。
+struct SegGrid {
+    lo: DVec3,
+    inv: f64,
+    n: [usize; 3],
+    buckets: Vec<Vec<u32>>,
+}
+
+impl SegGrid {
+    fn build(lo: DVec3, hi: DVec3, boxes: &[(DVec3, DVec3)]) -> Option<Self> {
+        let ext = hi - lo;
+        let longest = ext.x.max(ext.y).max(ext.z);
+        if !(longest > 1e-9) || !longest.is_finite() {
+            return None;
+        }
+        // 目标 ~5 万格：格子太粗桶里段太多，太细建表本身变慢
+        let mut cell = (longest / 36.0).max(1e-6);
+        let mut n;
+        loop {
+            n = [
+                ((ext.x / cell).ceil() as usize + 1).max(1),
+                ((ext.y / cell).ceil() as usize + 1).max(1),
+                ((ext.z / cell).ceil() as usize + 1).max(1),
+            ];
+            if n[0] * n[1] * n[2] <= 60_000 || cell > longest {
+                break;
+            }
+            cell *= 1.35;
+        }
+        let cells = n[0] * n[1] * n[2];
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); cells];
+        let inv = 1.0 / cell;
+        let at = |v: f64, i: usize| -> usize {
+            (((v - lo.component(i)) * inv).floor() as i64).clamp(0, n[i] as i64 - 1) as usize
+        };
+        for (si, (blo, bhi)) in boxes.iter().enumerate() {
+            let (i0, i1) = (at(blo.x, 0), at(bhi.x, 0));
+            let (j0, j1) = (at(blo.y, 1), at(bhi.y, 1));
+            let (k0, k1) = (at(blo.z, 2), at(bhi.z, 2));
+            for k in k0..=k1 {
+                for j in j0..=j1 {
+                    let base = (k * n[1] + j) * n[0];
+                    for i in i0..=i1 {
+                        buckets[base + i].push(si as u32);
+                    }
+                }
+            }
+        }
+        Some(Self {
+            lo,
+            inv,
+            n,
+            buckets,
+        })
+    }
+
+    fn cell_of(&self, p: DVec3) -> Option<usize> {
+        let i = ((p.x - self.lo.x) * self.inv).floor();
+        let j = ((p.y - self.lo.y) * self.inv).floor();
+        let k = ((p.z - self.lo.z) * self.inv).floor();
+        if i < 0.0 || j < 0.0 || k < 0.0 {
+            return None;
+        }
+        let (i, j, k) = (i as usize, j as usize, k as usize);
+        if i >= self.n[0] || j >= self.n[1] || k >= self.n[2] {
+            return None;
+        }
+        Some((k * self.n[1] + j) * self.n[0] + i)
+    }
+}
+
 fn analytic_gouge(
     segments: &[CutSegment],
     tools: &ToolTable,
     design: &DesignModel,
     step: f64,
     tol: f64,
+    hint: Option<(DVec3, DVec3)>,
 ) -> (f64, DVec3, u32, u32, f64, usize) {
     // 段 AABB 预先算一遍（每点每段重算是 78k×110 次纯浪费）。**每段用自己那把刀**
     // 的母线：粗加工的 φ6 和精加工的 R0.5 扫掠体差着数量级。
@@ -406,53 +486,136 @@ fn analytic_gouge(
         })
     });
 
-    let mut max_depth = 0.0f64;
-    let mut at = DVec3::ZERO;
-    let mut block = 0u32;
-    let mut line = 0u32;
-    let mut t_seg = 0.0f64;
-    let mut points = 0usize;
+    // 段索引：只在 `whole` 有界时建，退化情形（单段/空）走原来的直扫
+    let grid = whole.and_then(|(lo, hi)| SegGrid::build(lo, hi, &boxes));
+    let all_segs: Vec<u32> = (0..segments.len() as u32).collect();
 
-    for p in design_surface_points(design, step) {
-        points += 1;
-        if let Some((lo, hi)) = whole
+    // ── 两段扫描 ──
+    //
+    // ① **全局粗扫**：全设计面，步距放大 `coarse_k` 倍。只负责"别漏掉区域外的
+    //    深点"——体素比对在 h 较大时抓不住亚体素深度的浅切（实测 h=3 时
+    //    0.26 mm 的过切在体素上完全消失）。
+    // ② **区域细扫**：只在体素比对报出的过切包围盒里用原始步距，负责定位与量深。
+    //
+    // 全用细步距是 110 万点 × 5.5 万段（158 s 里 135 s）；只做 ② 会漏掉区域外的
+    // 深点（实测最深从 0.2647 掉到 0.0647）；两段一起 ~15 s 且两者都保住。
+    let coarse_k = 8.0f64;
+    let mut best = GougeBest::default();
+    scan_gouge(
+        design_surface_points_strided(design, step * coarse_k, coarse_k as usize),
+        None,
+        segments,
+        &boxes,
+        &cutters,
+        grid.as_ref(),
+        &all_segs,
+        tol,
+        &mut best,
+    );
+    scan_gouge(
+        design_surface_points(design, step),
+        hint,
+        segments,
+        &boxes,
+        &cutters,
+        grid.as_ref(),
+        &all_segs,
+        tol,
+        &mut best,
+    );
+    (
+        best.depth,
+        best.at,
+        best.block,
+        best.line,
+        best.t,
+        best.points,
+    )
+}
+
+/// 过切扫描的累加器。
+#[derive(Default)]
+struct GougeBest {
+    depth: f64,
+    at: DVec3,
+    block: u32,
+    line: u32,
+    t: f64,
+    points: usize,
+}
+
+/// 在内层循环里维护"最深过切"。
+#[allow(clippy::too_many_arguments)]
+fn scan_gouge(
+    pts: impl Iterator<Item = DVec3>,
+    hint: Option<(DVec3, DVec3)>,
+    segments: &[CutSegment],
+    boxes: &[(DVec3, DVec3)],
+    cutters: &[&Profile],
+    grid: Option<&SegGrid>,
+    all_segs: &[u32],
+    tol: f64,
+    best: &mut GougeBest,
+) {
+    for p in pts {
+        best.points += 1;
+        // 区域细扫只在这个盒子里做；全局粗扫传 None
+        if let Some((lo, hi)) = hint
             && (p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z)
         {
             continue;
         }
-        for (si, s) in segments.iter().enumerate() {
+        let candidates: &[u32] = match grid {
+            Some(g) => match g.cell_of(p) {
+                Some(k) => &g.buckets[k],
+                None => continue,
+            },
+            None => all_segs,
+        };
+        for &si in candidates {
+            let si = si as usize;
+            let s = &segments[si];
             let (lo, hi) = boxes[si];
             if p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z {
                 continue;
             }
             let sd = sd_sweep(p, &s.from, &s.to, cutters[si]);
-            if sd < -tol && -sd > max_depth {
-                max_depth = -sd;
-                at = p;
-                block = s.block;
-                line = s.line;
-                t_seg = s.t_start;
+            if sd < -tol && -sd > best.depth {
+                best.depth = -sd;
+                best.at = p;
+                best.block = s.block;
+                best.line = s.line;
+                best.t = s.t_start;
                 if std::env::var_os("CNCSIM_PROF").is_some() {
                     println!(
-                        "  [gouge] {:.3} @ ({:.3},{:.3},{:.3}) 段 {si} tool T{} 第 {} 行 from {:?} to {:?}",
-                        max_depth, p.x, p.y, p.z, s.tool, s.line, s.from.tip, s.to.tip
+                        "  [gouge] {:.3} @ ({:.3},{:.3},{:.3}) 段 {si} tool T{} 第 {} 行",
+                        best.depth, p.x, p.y, p.z, s.tool, s.line
                     );
                 }
             }
         }
     }
-    (max_depth, at, block, line, t_seg, points)
 }
 
 /// 设计面采样点（扁平迭代器）。
 ///
 /// 盒体：6 个面按 `step` 铺面片中心网格——不收集成 Vec（30 mm 盒 @0.2 步距
 /// 有 7.8 万个点）。场体：加载时按同样步距预采样好的表面点，直接给。
-fn design_surface_points(
+fn design_surface_points(design: &DesignModel, step: f64) -> Box<dyn Iterator<Item = DVec3> + '_> {
+    design_surface_points_strided(design, step, 1)
+}
+
+/// 同上，但允许对**预采样**的设计面（`Field`）按 `stride` 抽稀。
+///
+/// `Field` 的点是加载时按固定步距铺好的，`step` 对它不起作用——粗扫若只放大
+/// `step`，点数一点没少（实测 107 万点原样走两遍，114 s）。所以粗扫要显式抽稀。
+fn design_surface_points_strided(
     design: &DesignModel,
     step: f64,
+    stride: usize,
 ) -> Box<dyn Iterator<Item = DVec3> + '_> {
     let step = step.max(1e-6);
+    let stride = stride.max(1);
     match design {
         DesignModel::Box { min, max } => box_faces(*min, *max, step),
         DesignModel::Cavity { min, max, center, radius } => {
@@ -480,7 +643,9 @@ fn design_surface_points(
                     .chain(hemisphere_points(c, r, step, true)),
             )
         }
-        DesignModel::Field { surface, .. } => Box::new(surface.iter().copied()),
+        DesignModel::Field { surface, .. } => {
+            Box::new(surface.iter().copied().step_by(stride))
+        }
     }
 }
 
@@ -748,7 +913,7 @@ mod tests {
         }];
         let design = box_design((0.0, 0.0, 0.0), (10.0, 10.0, 5.0));
         let (depth, at, block, line, _t, n) =
-            analytic_gouge(&segments, &tools, &design, 0.5, 0.005);
+            analytic_gouge(&segments, &tools, &design, 0.5, 0.005, None);
 
         assert!(n > 100, "设计面应有大量采样点：{n}");
         assert!((depth - 0.4).abs() < 0.002, "过切深度应为 0.4：{depth}");
@@ -775,7 +940,7 @@ mod tests {
         }];
         let design = box_design((0.0, 0.0, 0.0), (10.0, 10.0, 5.0));
         let (depth, _at, _b, _l, _t, _n) =
-            analytic_gouge(&segments, &tools, &design, 0.5, 0.005);
+            analytic_gouge(&segments, &tools, &design, 0.5, 0.005, None);
         assert_eq!(depth, 0.0, "恰好切到设计面不算过切");
     }
 

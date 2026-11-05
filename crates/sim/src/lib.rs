@@ -10,6 +10,7 @@ pub mod demo;
 pub mod hemisphere;
 pub mod job;
 pub mod playback;
+pub mod reach;
 pub mod run;
 pub mod stock;
 pub mod surface_dev;

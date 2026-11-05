@@ -77,6 +77,11 @@ pub struct RunConfig {
     ///
     /// 大毛坯只关心形状时可显式调小；`set_creator(0)` 会完全关闭溯源。
     pub creator_sub: u8,
+    /// 是否记录**切割颜色**（溯源）。**默认关**：关掉时不分配 `creator` 数组、
+    /// 不写子块位图、`changed_mask` 走 `count_changed` 快路径——大件上省几十 MB
+    /// 内存，切削时间与"没有溯源功能"的版本一致。要彩色预览就显式打开
+    /// （CLI 是 `--color`）。
+    pub colorize: bool,
     /// 跑完丢掉与主体不连通的材料块（**悬浮碎屑**）。
     ///
     /// 体素 CSG 只做去除、不管"切下来的那块还连着没有"：真实切削里它会掉下来
@@ -89,6 +94,7 @@ impl Default for RunConfig {
     fn default() -> Self {
         Self {
             creator_sub: 8,
+            colorize: false,
             grid: GridConfig::default(),
             stock_origin: DVec3::ZERO,
             // 20×20×20 mm，h=0.1
@@ -231,6 +237,7 @@ pub fn run_tools_observed(
     // ── 毛坯 ──
     let mut grid = SparseGrid::<i8>::new(cfg.grid, cfg.stock_origin);
     // 溯源粒度必须在建场之前定：`creator` 是与 `leaves` 平行的数组
+    grid.set_colorize(cfg.colorize);
     grid.set_creator_sub(cfg.creator_sub);
     grid.fill_box([0, 0, 0], cfg.stock_size, i8::MIN);
     // 折叠整叶同值：`fill_box` 会把内部写成 tile，但边界叶还是 Dense，
@@ -308,7 +315,9 @@ pub fn run_tools_observed(
         if is_cut {
             let done = cuts_done.get(&block.tool).copied().unwrap_or(0);
             let total = cuts_total.get(&block.tool).copied().unwrap_or(1);
-            grid.set_creator(cncsim_voxel::creator_of_tool_segment(block.tool, done, total));
+            if cfg.colorize {
+                grid.set_creator(cncsim_voxel::creator_of_tool_segment(block.tool, done, total));
+            }
             *cuts_done.entry(block.tool).or_insert(0) += 1;
         }
 
@@ -892,7 +901,12 @@ mod tests {
     fn run_src(src: &str) -> RunOutput {
         let ic = InterpConfig::default();
         let prog = interpret(src, &ic);
-        run(&prog, &tool(), &cfg())
+        // 这条测试专门验"颜色跟着块走"，所以必须显式开染色（默认是关的）
+        let c = RunConfig {
+            colorize: true,
+            ..cfg()
+        };
+        run(&prog, &tool(), &c)
     }
 
     /// 端到端：仿真按块盖的溯源标记，必须原样出现在提取出来的网格里，

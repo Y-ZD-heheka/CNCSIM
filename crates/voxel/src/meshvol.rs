@@ -311,6 +311,44 @@ pub fn surface_points_with_normals(tris: &[Tri], step: f64) -> Vec<(DVec3, DVec3
     out
 }
 
+/// 设计面采样点 + 单位外法向 + **该样本代表的面积**（mm²）。
+///
+/// 面积是给"占比"用的：可达性分析要报"多少面积够不到"，按点数平均会偏向
+/// 三角形密的区域（STL 的细分密度和真实面积无关）。
+pub fn surface_samples(tris: &[Tri], step: f64) -> Vec<(DVec3, DVec3, f64)> {
+    let step = step.max(1e-6);
+    let mut out = Vec::new();
+    for &[a, b, c] in tris {
+        let cr = (b - a).cross(c - a);
+        let l = cr.length();
+        if l <= 1e-12 {
+            continue; // 退化三角形：没法向、没面积
+        }
+        let n = cr * (1.0 / l);
+        let area = 0.5 * l;
+        let e1 = b - a;
+        let e2 = c - a;
+        let nu = (e1.length() / step).ceil().max(1.0) as usize;
+        let nv = (e2.length() / step).ceil().max(1.0) as usize;
+        let mut local: Vec<DVec3> = Vec::with_capacity(nu * nv);
+        for iu in 0..nu {
+            for iv in 0..nv {
+                let u = (iu as f64 + 0.5) / nu as f64;
+                let v = (iv as f64 + 0.5) / nv as f64;
+                if u + v > 1.0 {
+                    continue;
+                }
+                local.push(a + e1 * u + e2 * v);
+            }
+        }
+        let share = area / local.len() as f64;
+        for p in local {
+            out.push((p, n, share));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

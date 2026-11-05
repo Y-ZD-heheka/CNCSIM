@@ -18,6 +18,8 @@ fn run_facing() -> cncsim_voxel::MeshData {
         stock_size: [300, 300, 120],
         // 不做设计比对：这里只关心切面颜色，比对会让运行慢一倍
         design: None,
+        // 这条测试量的是"每一刀一条色带"，必须显式开染色（默认关）
+        colorize: true,
         ..Default::default()
     };
     let out = run(&prog, &demo::tool(), &cfg);

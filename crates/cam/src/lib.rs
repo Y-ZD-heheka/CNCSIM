@@ -34,6 +34,7 @@
 //! 生成 → `cncsim_gcode::interpret` → `cncsim_sim::run` → 设计比对，
 //! 断言不过切、残留有界。生成器与验证器不互相依赖，避免"自己验自己"。
 
+pub mod multi;
 pub mod rotary;
 use cncsim_math::{DVec2, DVec3};
 use cncsim_tool::{
@@ -61,6 +62,70 @@ impl Stock {
 
     pub fn size(&self) -> DVec3 {
         self.max - self.min
+    }
+}
+
+/// **工序坐标系**：把"局部 +Z 向上"的刀路变换到世界。
+///
+/// 3 轴高度场只会沿 +Z 加工。要"从 −X 开粗"，不必再写一套 CAM：把模型转进
+/// 该方向的局部坐标系，照常出刀路，再用这个 `Frame` 把点变回世界即可。
+/// 这样多方向开粗 = 多次调用同一条 3 轴链路。
+#[derive(Clone, Copy, Debug)]
+pub struct Frame {
+    /// 行优先，`world = rot · local`（正交阵，列是局部的 x/y/z 在世界里的方向）。
+    pub rot: [[f64; 3]; 3],
+    pub t: DVec3,
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl Frame {
+    pub const IDENTITY: Frame = Frame {
+        rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        t: DVec3::ZERO,
+    };
+
+    /// 让**局部 +Z 指向世界方向 `dir`**。x/y 的取法只要求右手系：优先让局部 X
+    /// 落在世界 XZ 平面里，避免绕 Z 自转（否则同一个方向会有无数个解）。
+    pub fn from_dir(dir: DVec3) -> Self {
+        let z = dir.normalize();
+        let helper = if z.z.abs() < 0.9 {
+            DVec3::new(0.0, 0.0, 1.0)
+        } else {
+            DVec3::new(0.0, 1.0, 0.0)
+        };
+        let x = helper.cross(z).normalize();
+        let y = z.cross(x);
+        Self {
+            rot: [
+                [x.x, y.x, z.x],
+                [x.y, y.y, z.y],
+                [x.z, y.z, z.z],
+            ],
+            t: DVec3::ZERO,
+        }
+    }
+
+    pub fn apply(&self, p: DVec3) -> DVec3 {
+        DVec3::new(
+            self.rot[0][0] * p.x + self.rot[0][1] * p.y + self.rot[0][2] * p.z + self.t.x,
+            self.rot[1][0] * p.x + self.rot[1][1] * p.y + self.rot[1][2] * p.z + self.t.y,
+            self.rot[2][0] * p.x + self.rot[2][1] * p.y + self.rot[2][2] * p.z + self.t.z,
+        )
+    }
+
+    /// 世界 → 局部（正交阵转置即逆）。
+    pub fn unapply(&self, p: DVec3) -> DVec3 {
+        let q = p - self.t;
+        DVec3::new(
+            self.rot[0][0] * q.x + self.rot[1][0] * q.y + self.rot[2][0] * q.z,
+            self.rot[0][1] * q.x + self.rot[1][1] * q.y + self.rot[2][1] * q.z,
+            self.rot[0][2] * q.x + self.rot[1][2] * q.y + self.rot[2][2] * q.z,
+        )
     }
 }
 
@@ -198,6 +263,22 @@ pub struct Process {
     pub plunge_mm_min: f64,
     /// 主轴转速（rpm）。
     pub spindle_rpm: u32,
+    /// 规划时检查**刀杆**（刃长以上那一段）会不会撞到工件。
+    ///
+    /// 高度场只保证"刀刃"不侵入：球头/平底刀的 drop-cutter 取的是刀盘内的最高点，
+    /// 刀刃以上同半径的那段柱体自然也在外面。真正会撞的是 ① 锥度刀的锥颈比尖端粗、
+    /// ② 零件有倒扣（高度场根本没表示出来的料）。所以这里按**三角网格**逐点算
+    /// 刀轴到工件的距离，撞到就把该点判为不可达、留料。
+    pub check_shank: bool,
+    /// 刀杆与工件的最小间隙（mm）。
+    pub shank_clearance_mm: f64,
+    /// 遇到多层（中空/孔洞/倒扣）时**不拒收**，只把够不到的部分留在料里。
+    ///
+    /// 3 轴高度场天然只能加工"每个 XY 列的上表面"：孔、内腔、倒扣的背面它切不到。
+    /// 严格模式（默认）直接拒收，避免用户拿到一份"看起来做了、其实只切了外壳"
+    /// 的程序；多方向/定轴模式（用户明确要求"尽最大努力、做不了的跳过"）打开它，
+    /// 让这一道把它看得见的面都切了，够不到的留料并如实报告。
+    pub allow_undercut: bool,
 }
 
 impl Default for Process {
@@ -213,6 +294,9 @@ impl Default for Process {
             feed_mm_min: 800.0,
             plunge_mm_min: 200.0,
             spindle_rpm: 8000,
+            check_shank: true,
+            shank_clearance_mm: 0.5,
+            allow_undercut: false,
         }
     }
 }
@@ -229,6 +313,8 @@ pub struct Job<'a> {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
+    /// 因为**刀杆会撞工件**而放弃的刀点数。
+    pub shank_skips: usize,
     /// 高度场列数。
     pub samples: usize,
     /// 粗加工层数。
@@ -304,6 +390,13 @@ impl std::error::Error for CamError {}
 
 /// 生成刀路与 G 代码。
 pub fn generate(job: &Job<'_>) -> Result<Program, CamError> {
+    generate_in(job, None)
+}
+
+/// 带**工序坐标系**的生成：刀路在局部坐标系里算，输出的 G 代码是世界坐标。
+///
+/// 多方向开粗就是换不同 `Frame` 反复调用它（模型要先 `unapply` 到该坐标系）。
+pub fn generate_in(job: &Job<'_>, frame: Option<Frame>) -> Result<Program, CamError> {
     validate(job)?;
     let p = &job.process;
     let map = HeightMap::build(job.mesh, job.stock, p.sample_mm);
@@ -330,7 +423,12 @@ pub fn generate(job: &Job<'_>) -> Result<Program, CamError> {
     // 阈值 2%：允许少量重复三角形/小孔造成的偶发 3 次命中。
     let total = map.z.iter().filter(|z| z.is_finite()).count();
     let under = map.layers.iter().filter(|&&h| h > 2).count();
-    if total > 0 && under * 50 > total {
+    let undercut_frac = if total > 0 {
+        under as f64 / total as f64
+    } else {
+        0.0
+    };
+    if total > 0 && under * 50 > total && !p.allow_undercut {
         return Err(CamError::Undercut {
             columns: under,
             total,
@@ -343,7 +441,17 @@ pub fn generate(job: &Job<'_>) -> Result<Program, CamError> {
         p.safe_z_mm
     };
 
-    let mut e = Emit::new();
+    // 刀杆检查只在这种情况才必要：零件**有倒扣**（高度场没表示的料），或者
+    // 锥度刀的**锥颈比尖端粗**。否则 drop-cutter 已经保证整根刀柱在几何之外
+    // （球心以上是半径 R 的柱体，而刀盘内没有任何点在球内 → 柱体也在外）。
+    let neck_wider = |t: &ToolSpec| t.top_radius() > t.radius() + 1e-6;
+    let need_shank = p.check_shank
+        && (undercut_frac > 0.02
+            || neck_wider(&job.finish)
+            || job.rough.as_ref().is_some_and(neck_wider));
+    let index = need_shank.then(|| MeshIndex::build(job.mesh, job.stock));
+
+    let mut e = Emit::new(frame);
     e.raw(&format!(
         "(CAM 3-axis height-map  stock {:.3}x{:.3}x{:.3})",
         job.stock.size().x,
@@ -354,6 +462,12 @@ pub fn generate(job: &Job<'_>) -> Result<Program, CamError> {
         "(part z {part_min:.3}..{part_max:.3}  samples {} x {} @ {:.3} mm)",
         map.nx, map.ny, p.sample_mm
     ));
+    if undercut_frac > 0.02 {
+        e.raw(&format!(
+            "(WARN undercut {:.1}% columns multi-layer: 这些面的背面本道够不到，留料)",
+            undercut_frac * 100.0
+        ));
+    }
     e.raw("G21 G90 G17 G94");
     e.rapid_z(safe);
 
@@ -388,16 +502,16 @@ pub fn generate(job: &Job<'_>) -> Result<Program, CamError> {
         "(FINISH T{} D{:.1} BALL  stepover {:.3})",
         job.finish.number, job.finish.diameter, p.finish_stepover_mm
     ));
-    let finish_radius = job.finish.radius();
     e.tool_change(&job.finish, p.spindle_rpm);
     finish_pass(
         &mut e,
         &map,
         job.stock,
-        finish_radius,
+        &job.finish,
         p,
         safe,
         part_min,
+        index.as_ref(),
         &mut stats,
     );
     e.rapid_z(safe);
@@ -468,13 +582,18 @@ fn validate(job: &Job<'_>) -> Result<(), CamError> {
         Ok(())
     };
     check_tool(&job.finish, "精加工刀")?;
-    if job.finish.kind != ToolKind::Ball {
-        return Err(CamError::BadTool("精加工必须是球头刀（高度场按法向偏置）"));
-    }
-    if p.finish_stepover_mm > job.finish.radius() {
-        return Err(CamError::BadParam(
-            "finish_stepover 超过球头半径（残高会大于半径）",
-        ));
+    // 平底刀走 drop-cutter（刀盘碰到最高点就停），球头走法向偏置；两种都允许。
+    let max_stepover = if job.finish.kind == ToolKind::Flat {
+        job.finish.diameter * 0.95
+    } else {
+        job.finish.radius()
+    };
+    if p.finish_stepover_mm > max_stepover {
+        return Err(CamError::BadParam(if job.finish.kind == ToolKind::Flat {
+            "finish_stepover 超过平底刀直径的 95%（会留大台阶）"
+        } else {
+            "finish_stepover 超过球头半径（残高会大于半径）"
+        }));
     }
     if let Some(t) = &job.rough {
         check_tool(t, "粗加工刀")?;
@@ -498,6 +617,149 @@ fn descend(from: f64, to: f64, step: f64) -> Vec<f64> {
     }
     out.push(to);
     out
+}
+
+// ─────────────────────────── 刀杆碰撞 ───────────────────────────
+
+/// 三角网格的 XY 分桶索引：查"某点到工件表面的最近距离"。
+///
+/// 高度场只能保证**刀刃**不侵入（drop-cutter 的几何保证），刀刃以上那一段柱体
+/// 在"零件有倒扣"时仍可能插进高度场没表示出来的料里。这里按真实三角形算距离。
+struct MeshIndex {
+    cell: f64,
+    lo: DVec3,
+    nx: usize,
+    ny: usize,
+    buckets: Vec<Vec<u32>>,
+    tris: Vec<Tri>,
+}
+
+impl MeshIndex {
+    fn build(mesh: &[Tri], stock: Stock) -> Self {
+        let cell = (stock.size().x.max(stock.size().y) / 48.0).clamp(0.5, 5.0);
+        let nx = ((stock.size().x / cell).ceil() as usize + 1).max(1);
+        let ny = ((stock.size().y / cell).ceil() as usize + 1).max(1);
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny];
+        for (ti, t) in mesh.iter().enumerate() {
+            let (mut x0, mut x1) = (f64::INFINITY, f64::NEG_INFINITY);
+            let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
+            for v in t {
+                x0 = x0.min(v.x);
+                x1 = x1.max(v.x);
+                y0 = y0.min(v.y);
+                y1 = y1.max(v.y);
+            }
+            let i0 = (((x0 - stock.min.x) / cell).floor() as i64).clamp(0, nx as i64 - 1) as usize;
+            let i1 = (((x1 - stock.min.x) / cell).floor() as i64).clamp(0, nx as i64 - 1) as usize;
+            let j0 = (((y0 - stock.min.y) / cell).floor() as i64).clamp(0, ny as i64 - 1) as usize;
+            let j1 = (((y1 - stock.min.y) / cell).floor() as i64).clamp(0, ny as i64 - 1) as usize;
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    buckets[j * nx + i].push(ti as u32);
+                }
+            }
+        }
+        Self {
+            cell,
+            lo: stock.min,
+            nx,
+            ny,
+            buckets,
+            tris: mesh.to_vec(),
+        }
+    }
+
+    /// 到 `reach` 范围内最近三角形的距离（无符号）。附近没有三角形 → `∞`。
+    fn min_dist(&self, p: DVec3, reach: f64) -> f64 {
+        let i0 = (((p.x - reach - self.lo.x) / self.cell).floor() as i64)
+            .clamp(0, self.nx as i64 - 1) as usize;
+        let i1 = (((p.x + reach - self.lo.x) / self.cell).floor() as i64)
+            .clamp(0, self.nx as i64 - 1) as usize;
+        let j0 = (((p.y - reach - self.lo.y) / self.cell).floor() as i64)
+            .clamp(0, self.ny as i64 - 1) as usize;
+        let j1 = (((p.y + reach - self.lo.y) / self.cell).floor() as i64)
+            .clamp(0, self.ny as i64 - 1) as usize;
+        let mut best = f64::INFINITY;
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                for &ti in &self.buckets[j * self.nx + i] {
+                    let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
+                    if d2 < best {
+                        best = d2;
+                    }
+                }
+            }
+        }
+        best.sqrt()
+    }
+}
+
+/// 点到三角形的最近距离平方（Ericson《Real-Time Collision Detection》5.1.5）。
+fn pt_tri_dist2(p: DVec3, t: &Tri) -> f64 {
+    let (a, b, c) = (t[0], t[1], t[2]);
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (p - a).length_squared();
+    }
+    let bp = p - b;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return (p - b).length_squared();
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return (p - (a + ab * v)).length_squared();
+    }
+    let cp = p - c;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return (p - c).length_squared();
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return (p - (a + ac * w)).length_squared();
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (p - (b + (c - b) * w)).length_squared();
+    }
+    let den = 1.0 / (va + vb + vc);
+    let v = vb * den;
+    let w = vc * den;
+    (p - (a + ab * v + ac * w)).length_squared()
+}
+
+/// 刀杆（刃长以上、刀尖以上整段）会不会碰到工件。
+///
+/// 局部坐标系里刀轴恒为 +Z：沿轴取样，逐点问到三角网格的最近距离。
+fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance: f64) -> bool {
+    let r = tool.radius();
+    let flute = tool.flute_mm.max(r);
+    let shank_r = tool.top_radius().max(r);
+    let len = flute + 20.0;
+    let step = (shank_r * 0.8).clamp(0.5, 2.0);
+    // **只从刃长以上开始查**：刀刃段（球 + 同半径柱）由 drop-cutter 保证不侵入，
+    // 而且它本来就贴着曲面（球心和切点只差一个 R），拿"离工件 ≥ 间隙"去要求它，
+    // 会把每一个刀点都判成碰撞——实测一次就误杀了 42858 个点。
+    let mut z = flute;
+    while z <= len {
+        let need = shank_r + clearance;
+        let p = tip + DVec3::new(0.0, 0.0, z);
+        if ix.min_dist(p, need) < need {
+            return true;
+        }
+        z += step;
+    }
+    false
 }
 
 // ─────────────────────────── 高度场 ───────────────────────────
@@ -641,6 +903,44 @@ impl HeightMap {
         z.is_finite().then(|| (z, self.n[k]))
     }
 
+    /// 球头刀的**刀心高度**：刀盘范围内 `z + √(R²−d²)` 的最大值。
+    ///
+    /// 这就是球头刀的 drop-cutter：球不能与刀盘内的任何一点相交，因此刀心高度
+    /// 取所有约束里最高的那个。它在**凹角**处会把球抬起来——`tip = p + R·n` 那种
+    /// 局部法向偏置做不到这一点，球会贴着墙面啃进去（实测桌腿件过切 1.35 mm，
+    /// 正好一个刀半径）。凸面/平面处两者等价。
+    fn ball_center(&self, x: f64, y: f64, r: f64) -> Option<f64> {
+        let k = (r / self.step).ceil() as i64;
+        let ci = ((x - self.x0) / self.step).round() as i64;
+        let cj = ((y - self.y0) / self.step).round() as i64;
+        let mut best = f64::NEG_INFINITY;
+        for dj in -k..=k {
+            let j = cj + dj;
+            if j < 0 || j >= self.ny as i64 {
+                continue;
+            }
+            for di in -k..=k {
+                let i = ci + di;
+                if i < 0 || i >= self.nx as i64 {
+                    continue;
+                }
+                let d2 = ((di * di + dj * dj) as f64) * self.step * self.step;
+                if d2 > r * r {
+                    continue;
+                }
+                let z = self.z[j as usize * self.nx + i as usize];
+                if !z.is_finite() {
+                    continue;
+                }
+                let v = z + (r * r - d2).sqrt();
+                if v > best {
+                    best = v;
+                }
+            }
+        }
+        best.is_finite().then_some(best)
+    }
+
     /// 半径 `r` 圆盘内的最高表面。无命中 = `-inf`。
     fn max_within(&self, x: f64, y: f64, r: f64) -> f64 {
         let k = (r / self.step).ceil() as i64;
@@ -771,12 +1071,15 @@ fn finish_pass(
     e: &mut Emit,
     map: &HeightMap,
     stock: Stock,
-    r: f64,
+    tool: &ToolSpec,
     p: &Process,
     safe: f64,
     part_min: f64,
+    index: Option<&MeshIndex>,
     stats: &mut Stats,
 ) {
+    let r = tool.radius();
+    let flat = tool.kind == ToolKind::Flat;
     let dz_min = (p.max_finish_slope_deg.to_radians().cos()).max(1e-3);
     let step = p.finish_stepover_mm;
     // 行距是 step，但**沿走刀方向的采样要更密**：球头在两点之间走直线，
@@ -792,13 +1095,38 @@ fn finish_pass(
         for i in 0..=((stock.size().x / dx).ceil() as usize) {
             let x = stock.min.x + (i as f64 * dx).min(stock.size().x);
             let tip = map.at(x, y).and_then(|(z, n)| {
-                if n[2] < dz_min {
-                    return None; // 太陡：球头法向偏置会把刀尖甩到零件下方
+                if flat {
+                    // **平底刀（立铣刀）的落刀高度 = 刀盘范围内最高点**。
+                    //
+                    // 平底刀没有球心可沿法向偏，正确的 CL 点是 drop-cutter：
+                    // 刀具降到刀盘刚好碰到最高点为止。它天然不过切（刀底是平面，
+                    // 只会切到 z 以上的材料），代价是陡壁/凹坑处留台阶——那些
+                    // 面交给侧向工序去精加工。
+                    let zm = map.max_within(x, y, r);
+                    if !zm.is_finite() {
+                        return None;
+                    }
+                    return (zm > part_min - 3.0 * r).then_some(DVec3::new(x, y, zm));
                 }
-                let n = DVec3::new(n[0], n[1], n[2]);
-                let tip = DVec3::new(x, y, z) + n * r - DVec3::new(0.0, 0.0, r);
+                // 太陡的面本道不做：高度场表达不了竖直壁，drop-cutter 只会沿壁
+                // 留一条 R 的圆角；交给侧向工序去精加工更靠谱。
+                if n[2] < dz_min {
+                    return None;
+                }
+                // 球头：drop-cutter。`z` 只用来判"这里有没有面"，高度由刀盘决定。
+                let _ = z;
+                let zc = map.ball_center(x, y, r)?;
+                let tip = DVec3::new(x, y, zc - r);
                 (tip.z > part_min - 3.0 * r).then_some(tip)
             });
+            // 刀杆撞工件的点直接放弃：宁可留料，也不能撞
+            let tip = match tip {
+                Some(t) if index.is_some_and(|ix| shank_hits(ix, t, tool, p.shank_clearance_mm)) => {
+                    stats.shank_skips += 1;
+                    None
+                }
+                other => other,
+            };
             match tip {
                 Some(t) => pts.push(t),
                 None => {
@@ -836,6 +1164,8 @@ fn finish_pass(
 
 struct Emit {
     s: String,
+    /// 局部 → 世界。`None` = 恒等（99% 的调用）。
+    frame: Option<Frame>,
     last: Option<DVec3>,
     cut_mm: f64,
     rapid_mm: f64,
@@ -843,9 +1173,10 @@ struct Emit {
 }
 
 impl Emit {
-    fn new() -> Self {
+    fn new(frame: Option<Frame>) -> Self {
         Self {
             s: String::with_capacity(1 << 16),
+            frame,
             last: None,
             cut_mm: 0.0,
             rapid_mm: 0.0,
@@ -864,22 +1195,43 @@ impl Emit {
         self.raw(&format!("S{rpm} M3"));
     }
 
+    /// 出点。**`last` 一律存局部坐标**，只在写字符串时做一次 `frame` 变换。
+    ///
+    /// 这条很关键：`rapid_xy` / `feed_z` / `feed_xy` 都会拿 `last.z` / `last.x`
+    /// 去拼下一个点。早版本把变换后的世界坐标存进 `last`，换坐标系后就成了
+    /// "用世界 z 拼局部 x,y"——侧向工序会疯狂重复下刀，实测单方向过切 524 mm³
+    /// （零件总共才 864 mm³）。
     fn axis_words(&mut self, p: DVec3) -> (String, f64) {
+        let wp = match &self.frame {
+            Some(f) => f.apply(p),
+            None => p,
+        };
         let mut w = String::new();
         let mut d = 0.0;
         if let Some(l) = self.last {
-            if (p.x - l.x).abs() > 1e-7 {
-                w.push_str(&format!(" X{:.4}", p.x));
+            // **判断写哪个轴，必须看世界坐标的变化**；拼点、量行程用局部坐标。
+            //
+            // 这两件事不能混：坐标系一转置，局部 z 的变化就落到世界 Y 上。早先
+            // 用局部差值判断、却写世界值，`(0,-1,0)` 这种置换下"局部 y 没变 → 不写 Y"，
+            // 于是那条 Y 指令被整个吞掉——±Y 侧向刀路的刀尖全停在安全高度，
+            // 一个体素都没切到（G 代码里表现为 `G0 X-12` 紧跟 `G1 Z0.0000`，
+            // 该有的 `Y-10.5000` 不见了）。
+            let wl = match &self.frame {
+                Some(f) => f.apply(l),
+                None => l,
+            };
+            if (wp.x - wl.x).abs() > 1e-7 {
+                w.push_str(&format!(" X{:.4}", wp.x));
             }
-            if (p.y - l.y).abs() > 1e-7 {
-                w.push_str(&format!(" Y{:.4}", p.y));
+            if (wp.y - wl.y).abs() > 1e-7 {
+                w.push_str(&format!(" Y{:.4}", wp.y));
             }
-            if (p.z - l.z).abs() > 1e-7 {
-                w.push_str(&format!(" Z{:.4}", p.z));
+            if (wp.z - wl.z).abs() > 1e-7 {
+                w.push_str(&format!(" Z{:.4}", wp.z));
             }
             d = (p - l).length();
         } else {
-            w = format!(" X{:.4} Y{:.4} Z{:.4}", p.x, p.y, p.z);
+            w = format!(" X{:.4} Y{:.4} Z{:.4}", wp.x, wp.y, wp.z);
         }
         self.last = Some(p);
         (w, d)
@@ -941,6 +1293,135 @@ impl Emit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 合成一个高度场：`z[j*nx+i]`，`x = i*step`、`y = j*step`。
+    fn map_of(nx: usize, ny: usize, step: f64, z: Vec<f64>) -> HeightMap {
+        HeightMap {
+            x0: 0.0,
+            y0: 0.0,
+            step,
+            nx,
+            ny,
+            n: vec![[0.0, 0.0, 1.0]; nx * ny],
+            layers: vec![2; nx * ny],
+            z,
+        }
+    }
+
+    /// **球头 drop-cutter 的不变量**：刀心放到算出来的高度后，球不得与刀盘内
+    /// 任何采样点相交。这条是"凹角不啃墙"的几何保证。
+    #[test]
+    fn ball_center_never_intersects_the_height_field() {
+        // 台阶：y<2 一侧高 10，另一侧是 0 的地面
+        let mut z = vec![0.0; 64];
+        for j in 0..2 {
+            for i in 0..8 {
+                z[j * 8 + i] = 10.0;
+            }
+        }
+        let map = map_of(8, 8, 1.0, z);
+        let r = 2.5;
+        for j in [0.0, 1.0, 2.0, 3.0, 4.5] {
+            for i in [0.0, 1.0, 3.5, 6.0] {
+                let Some(zc) = map.ball_center(i, j, r) else {
+                    continue;
+                };
+                let k = (r / map.step).ceil() as i64;
+                let (ci, cj) = (i.round() as i64, j.round() as i64);
+                for dj in -k..=k {
+                    for di in -k..=k {
+                        let (ii, jj) = (ci + di, cj + dj);
+                        if ii < 0 || jj < 0 || ii >= 8 || jj >= 8 {
+                            continue;
+                        }
+                        let d2 = ((di * di + dj * dj) as f64) * map.step * map.step;
+                        if d2 > r * r {
+                            continue;
+                        }
+                        let surf = map.z[jj as usize * 8 + ii as usize];
+                        let clear = zc - surf;
+                        assert!(
+                            clear >= (r * r - d2).sqrt() - 1e-9,
+                            "({i},{j}) 处球心 {zc:.3} 与格点 ({ii},{jj}) 相交：                             间距 {clear:.3} < {:.3}",
+                            (r * r - d2).sqrt()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 平面上 drop-cutter 与"刀尖贴面"等价（不能因为改了算法把平的地方抬高）。
+    #[test]
+    fn ball_center_matches_the_surface_on_a_flat_plane() {
+        let map = map_of(6, 6, 0.5, vec![7.0; 36]);
+        for (i, j) in [(0.0, 0.0), (1.5, 1.0), (2.5, 2.0)] {
+            let zc = map.ball_center(i, j, 1.5).unwrap();
+            assert!(
+                (zc - (7.0 + 1.5)).abs() < 1e-9,
+                "平面上刀心应为 z+R = 8.5，实际 {zc:.4}"
+            );
+        }
+    }
+
+    /// 点—三角形距离：正上方、边上、顶点外三种情况。
+    #[test]
+    fn point_triangle_distance_is_exact() {
+        let t = [
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(4.0, 0.0, 0.0),
+            DVec3::new(0.0, 4.0, 0.0),
+        ];
+        // 正上方 3 mm
+        let d = pt_tri_dist2(DVec3::new(1.0, 1.0, 3.0), &t).sqrt();
+        assert!((d - 3.0).abs() < 1e-9, "{d}");
+        // 边的外侧 2 mm
+        let d = pt_tri_dist2(DVec3::new(2.0, -2.0, 0.0), &t).sqrt();
+        assert!((d - 2.0).abs() < 1e-9, "{d}");
+        // 顶点外 5 mm
+        let d = pt_tri_dist2(DVec3::new(-3.0, -4.0, 0.0), &t).sqrt();
+        assert!((d - 5.0).abs() < 1e-9, "{d}");
+    }
+
+    /// **刀杆碰撞**：顶上有一块"天花板"时，短刃刀在下面会被判碰撞；
+    /// 抬高到天花板以上就没事。
+    #[test]
+    fn shank_hits_a_ceiling_and_clears_when_lifted() {
+        // 一块 z = 10 的平板（当作倒扣面）
+        let mesh = vec![[
+            DVec3::new(-5.0, -5.0, 10.0),
+            DVec3::new(5.0, -5.0, 10.0),
+            DVec3::new(5.0, 5.0, 10.0),
+        ]];
+        let st = Stock {
+            min: DVec3::new(-6.0, -6.0, 0.0),
+            max: DVec3::new(6.0, 6.0, 12.0),
+        };
+        let ix = MeshIndex::build(&mesh, st);
+        let tool = ToolSpec::ball(1, 3.0, 6.0); // 刃长 6、半径 1.5
+        assert!(
+            shank_hits(&ix, DVec3::new(0.0, 0.0, 0.0), &tool, 0.5),
+            "刀杆会穿过 z=10 的板，应判碰撞"
+        );
+        assert!(
+            !shank_hits(&ix, DVec3::new(0.0, 0.0, 20.0), &tool, 0.5),
+            "抬到板上方 20 mm 不该判碰撞"
+        );
+    }
+
+    /// 平底刀（立铣刀）在墙边被抬到墙顶：drop-cutter 天然不过切。
+    #[test]
+    fn flat_tool_lifts_to_the_wall_top() {
+        let mut z = vec![0.0; 36];
+        for i in 0..6 {
+            z[i] = 9.0; // j=0 那一排是墙顶
+        }
+        let map = map_of(6, 6, 1.0, z);
+        // 离墙 1 mm、刀半径 2 → 刀盘压到墙，落刀高度必须是墙顶
+        assert!((map.max_within(2.0, 1.0, 2.0) - 9.0).abs() < 1e-9);
+        // 离墙 3 mm（> R）就够不着墙了，落刀高度回到地面
+        assert!(map.max_within(2.0, 3.0, 2.0).abs() < 1e-9);
+    }
 
     fn plane(z: f64, size: f64) -> Vec<Tri> {
         vec![
@@ -1009,12 +1490,41 @@ mod tests {
         assert!(matches!(e, CamError::OutsideStock { .. }), "{e:?}");
     }
 
+    /// 平底刀（立铣刀）也能精加工：走 drop-cutter，刀尖落在刀盘内最高点上。
+    ///
+    /// 这是"立铣刀 + 定轴三轴"的几何基础——球头那套法向偏置对平底刀不成立。
     #[test]
-    fn rejects_non_ball_finish() {
+    fn flat_finish_uses_drop_cutter() {
         let m = plane(2.0, 20.0);
         let mut j = job(&m);
         j.finish = ToolSpec::flat(2, 4.0, 20.0);
-        assert!(matches!(generate(&j).unwrap_err(), CamError::BadTool(_)));
+        let prog = generate(&j).unwrap();
+        assert!(prog.gcode.contains("(FINISH T2 D4.0"));
+        // 平面上 drop-cutter 就是"刀尖贴面"：精加工段所有 XY 走刀的 Z 都等于 2.0
+        // （Z 是模态的，行里不重复写，所以要自己跟）
+        let mut z = f64::NAN;
+        let mut in_finish = false;
+        let mut n = 0usize;
+        for line in prog.gcode.lines() {
+            if line.contains("(FINISH") {
+                in_finish = true;
+                continue;
+            }
+            if !in_finish {
+                continue;
+            }
+            if let Some(v) = line.split(" Z").nth(1) {
+                z = v.split_whitespace().next().unwrap().parse().unwrap();
+            }
+            if line.starts_with("G1 X") {
+                assert!(
+                    (z - 2.0).abs() < 1e-6,
+                    "平底刀精加工刀尖应贴面（z=2.0），实际 {z:.4}：{line}"
+                );
+                n += 1;
+            }
+        }
+        assert!(n > 10, "没扫到平底刀精加工点：{n}");
     }
 
     #[test]

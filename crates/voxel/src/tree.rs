@@ -569,6 +569,9 @@ pub struct SparseGrid<S: Scalar> {
     /// 用**平行数组**而不是给 `Leaf` 加字段：`Leaf` 是 `Dense(Box<[S;512]>)` 的
     /// 枚举，加字段会让每片叶多一个 padding 字节、并改动所有 `match` 分支。
     pub(crate) creator: Vec<u8>,
+    /// 是否记录溯源（切割颜色）。**关掉时 `creator` 一个字节都不分配**，
+    /// `stamp_leaf` 也不会被调用——省的不只是显示，是每片叶 1~512 字节的写。
+    pub(crate) colorize: bool,
     /// 每片叶切成 `creator_sub³` 个子块。只能是 1 / 2 / 4 / 8。
     pub(crate) creator_sub: u8,
     /// 接下来这一刀盖的标记。0 表示不盖（建模/填充走这个值）。
@@ -617,6 +620,7 @@ impl<S: Scalar> SparseGrid<S> {
             root: FxHashMap::default(),
             bounds: None,
             creator: Vec::new(),
+            colorize: true,
             creator_sub: 1,
             pending_creator: 0,
         }
@@ -661,9 +665,35 @@ impl<S: Scalar> SparseGrid<S> {
         self.creator.len()
     }
 
-    /// 新建一片叶时把 `creator` 补齐到同样的叶数。
+    /// 打开/关闭溯源着色。**必须在建场之前调用**（和 `set_creator_sub` 同理：
+    /// `creator` 是平行数组，建场后再改长度就对不上了）。
+    ///
+    /// 关掉后：不分配 `creator`（大件上是几十 MB）、不写子块位图、
+    /// `changed_mask` 直接走 `count_changed` 的快路径。切削时间与"没有溯源功能"
+    /// 的版本一致——不是"画的时候不显示"，是那一份工作根本不发生。
+    pub fn set_colorize(&mut self, on: bool) {
+        assert!(
+            self.leaves.is_empty(),
+            "set_colorize 必须在建场之前调用（已有 {} 片叶）",
+            self.leaves.len()
+        );
+        self.colorize = on;
+        if !on {
+            self.creator = Vec::new();
+            self.pending_creator = 0;
+        }
+    }
+
+    pub fn colorize(&self) -> bool {
+        self.colorize
+    }
+
+    /// 新建一片叶时把 `creator` 补齐到同样的叶数。关掉着色时一个字节都不分配。
     #[inline]
     fn grow_creator(&mut self) {
+        if !self.colorize {
+            return;
+        }
         let n = self.creator_stride();
         self.creator.resize(self.creator.len() + n, 0);
     }
@@ -740,6 +770,9 @@ impl<S: Scalar> SparseGrid<S> {
     ///
     /// `mask` 的第 i 位对应子块 i（按 `sub_index` 的编号）。`sub = 1` 时只看第 0 位。
     pub(crate) fn stamp_leaf(&mut self, leaf: usize, mask: &[u64]) {
+        if !self.colorize {
+            return;
+        }
         let c = self.pending_creator;
         if c == 0 {
             return;

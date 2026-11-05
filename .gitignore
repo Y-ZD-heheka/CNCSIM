@@ -35,3 +35,6 @@ Thumbs.db
 # agent / 编辑器工具的元数据，不属于项目本身
 /.workbuddy/
 /.workbuddy-ai/
+
+# 回归运行时生成的偏差图（assets/models/relief.stl 的副产物）
+/assets/models/*.diff.html

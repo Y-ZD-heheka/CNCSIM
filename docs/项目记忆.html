@@ -373,6 +373,48 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </li>
 <li><a href="#30-11-05">30. 多线程利用率：批量切削（11-05 凌晨）</a></li>
+<li><a href="#31-11-05">31. 解析基准 + 多方向开粗（11-05 晚）</a><ul>
+<li><a href="#_49">半球基准：先分清"刀路错"还是"仿真错"</a></li>
+<li><a href="#z">行距：从"等 z"改成"等子午线弧长"</a></li>
+<li><a href="#frame-pass">多方向开粗：Frame + Pass</a></li>
+</ul>
+</li>
+<li><a href="#32-32-drop-cutter11-05">32. 多方向开粗 / 定轴 3+2 / drop-cutter（11-05 晚）</a><ul>
+<li><a href="#_50">三层坑，逐层都是"看起来对、其实错"</a></li>
+<li><a href="#32-axis-xyz">定轴 3+2：--axis x,y,z</a></li>
+<li><a href="#mrr">开粗：按 MRR 给参数</a></li>
+<li><a href="#_51">数字</a></li>
+</ul>
+</li>
+<li><a href="#33-11-05">33. 任意刀轴角度 + 刀杆碰撞（11-05 深夜）</a><ul>
+<li><a href="#90">任意角度：不是"凑 90° 的倍数"</a></li>
+<li><a href="#g54-g53">G54 / G53</a></li>
+<li><a href="#_52">刀杆碰撞：按三角网格查，不是按高度场</a></li>
+</ul>
+</li>
+<li><a href="#34-11-05">34. 切割染色做成开关（11-05 深夜）</a><ul>
+<li><a href="#_53">实测</a></li>
+</ul>
+</li>
+<li><a href="#35-27-4111-05">35. 解析过切提速 27×，总仿真 4.1×（11-05 深夜）</a><ul>
+<li><a href="#_54">三处改法</a></li>
+<li><a href="#9-h3">结果（桌腿件 9 道，h=3）</a></li>
+</ul>
+</li>
+<li><a href="#36-11-05">36. 多方向链路加逐点偏差 + 两个"调了也没用"的旋钮（11-05 深夜）</a><ul>
+<li><a href="#54-h06">基准（桌腿件 5+4 道，h=0.6）</a></li>
+<li><a href="#_55">两个旋钮，实测都不划算</a></li>
+<li><a href="#_56">结论：这时候的瓶颈是验证分辨率，不是刀路</a></li>
+</ul>
+</li>
+<li><a href="#37-11-05">37. 可达性 + 工序编排：让几何自己决定用几道（11-05 深夜）</a><ul>
+<li><a href="#_57">做法：一次可见性矩阵 + 贪心集合覆盖</a></li>
+<li><a href="#h06">结果（桌腿固定器，h=0.6）</a></li>
+<li><a href="#_58">但形状指标一点没动，这才是这轮最值得记的</a></li>
+<li><a href="#_59">交叉表：把"够不到"和"没切好"分开</a></li>
+<li><a href="#_60">三个踩过的坑（都写进代码注释了）</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -3368,6 +3410,410 @@ AABB 从"一段"变成"一批"，体积上去后自动走并行路径。</p>
 <li><strong>开碰撞时要冲批次</strong>：<code>check_shank</code> 拿当前毛坯场判刀杆，批次没切完就查会漏判。
   关碰撞（CAM 链）时不用冲。</li>
 </ul>
+<h2 id="31-11-05">31. 解析基准 + 多方向开粗（11-05 晚）</h2>
+<h3 id="_49">半球基准：先分清"刀路错"还是"仿真错"</h3>
+<p>用户问"怎么把合格率提到 90%"。先别调参数——拿<strong>解析半球</strong>（球面曲率已知）跑完整
+回转链路，按所需 A 角分组看：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>区间</th>
+<th>tilt 0°</th>
+<th>tilt 35°</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A 0..30°（近水平顶）</td>
+<td>平均 0.329 / 合格 42.9%</td>
+<td>0.186 / 63.3%</td>
+</tr>
+<tr>
+<td>A 30..90°（球面主体）</td>
+<td><strong>0.010–0.032 / 100%</strong></td>
+<td>同左</td>
+</tr>
+</tbody>
+</table></div>
+<p>结论：<strong>刀路→解释→扫掠→SDF 这条链在曲面上是 0.02 mm 级</strong>。花瓶的 0.3 mm 不是
+仿真精度，得回去改刀路。这个基准留在 <code>crates/cam/tests/hemisphere_accuracy.rs</code>，
+以后任何刀路改动都先过它。</p>
+<h3 id="z">行距：从"等 z"改成"等子午线弧长"</h3>
+<p>半球顶部 <code>dr/dz → ∞</code>，step_z=0.6 对应<strong>径向 4 mm</strong>，球头跨不过去。改成沿轮廓
+弧长等距（<code>RotaryProfile.zs</code> 不再等距，<code>z(iz)</code> 从表里取）。</p>
+<p>注意：半球顶部<strong>没救回来</strong>（0.352 vs 0.329）。病根在<strong>细网格的 z 分桶</strong>——0.25 mm
+一个桶，在顶点处跨 2.7 mm 半径，<code>max</code> 直接变成包络。要治得让细网格在近水平处
+也按弧长加密，这是下一步。</p>
+<h3 id="frame-pass">多方向开粗：<code>Frame</code> + <code>Pass</code></h3>
+<ul>
+<li><code>Frame { rot, t }</code>：局部 → 世界。<code>Frame::from_dir(d)</code> 让局部 +Z 指向 <code>d</code>。</li>
+<li><code>Emit</code> 里<strong>只有 <code>axis_words</code> 一处</strong>做变换，其余生成代码不用改。</li>
+<li><strong>踩了一个真坑</strong>：<code>Emit.last</code> 原本存的是变换后的世界坐标，而 <code>rapid_xy</code>/<code>feed_z</code>
+  又拿 <code>last.z</code> 去拼局部点——换坐标系后就成了"世界 z 拼局部 x,y"，侧向工序疯狂
+  重复下刀，单方向过切 <strong>524 mm³</strong>（零件总共 864 mm³）。改成 <code>last</code> 一律存<strong>局部</strong>
+  坐标后，过切降到 22 mm³。</li>
+<li><code>multi::generate_plan</code>：多道工序串成一份程序，刀号全局唯一（第 i 道 <code>2i+1</code>/<code>2i+2</code>），
+  只留一个 <code>M30</code>。</li>
+</ul>
+<p><strong>已知未完成</strong>：±Y 两个方向<strong>切不到料</strong>。侧向高度场里「零件 footprint 之外的列」
+没有表面，现在被当成"切到底"，于是 <code>part_min</code> 落到了毛坯顶面，一层都不降。
+修法：给 <code>HeightMap</code> 加显式「无表面列」标记，按方向重算 <code>part_min</code>。
+对应验收 <code>five_directions_remove_material_without_gouging</code> 暂时 <code>#[ignore]</code>。</p>
+<h2 id="32-32-drop-cutter11-05">32. 多方向开粗 / 定轴 3+2 / drop-cutter（11-05 晚）</h2>
+<p>要求：<strong>开粗方向不固定、可以多次、从 XYZ 任意方向；精加工也可以多次、每次换刀</strong>，
+后来又补了两条：<strong>开粗要最大效率去料、留足留量</strong>，<strong>立铣刀要支持定旋转轴三轴</strong>。</p>
+<h3 id="_50">三层坑，逐层都是"看起来对、其实错"</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>现象</th>
+<th>根因</th>
+<th>处置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>±Y 两道刀点全停在安全高度，一个体素没切</td>
+<td><code>Emit::axis_words</code> 用<strong>局部</strong>坐标差值决定"写不写这个轴"，却写<strong>世界</strong>坐标的值。坐标系一转置，局部 z 的变化落到世界 Y 上，判断看的是局部 y 没变 → 那条 <code>Y</code> 被整个吞掉</td>
+<td>判断按<strong>世界</strong>变化，拼点用<strong>局部</strong>（<code>last</code> 只存局部）</td>
+</tr>
+<tr>
+<td>修好后每道稳定过切 105 mm³，过切带正好 1.5 mm 深 = 刀半径</td>
+<td>程序仍是<strong>纯 XYZ</strong>。控制器按"刀轴 = 世界 +Z"扫，Ø3 球头的<strong>刀杆</strong>（半径 1.5、长 10）从上方垂直插进工件</td>
+<td>侧向工序输出 <code>G43.4 H1</code> + A/C，真的把刀轴摆到 <code>pass.dir</code></td>
+</tr>
+<tr>
+<td>摆好刀轴后 5 道合计过切 <strong>7387 mm³</strong>、深 1.35 mm</td>
+<td>球头精加工用"刀尖 = 曲面 + R·n"。这是<strong>局部</strong>近似，在<strong>凹角</strong>处球会贴着墙面啃进去</td>
+<td>换成<strong>球头 drop-cutter</strong>：刀心 = 刀盘范围内 <code>max(z + √(R²−d²))</code>。几何上保证不侵入</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>Table</code>（双转台）那套约定表达不了任意刀轴：<code>axis = Rx(−A)Z</code>，C 角对刀轴没有影响。
+多方向/定轴一律按 <strong>Head（双摆头）</strong> 生成，解释必须配 <code>RotaryConvention::Head</code>。</p>
+<h3 id="32-axis-xyz">定轴 3+2：<code>--axis x,y,z</code></h3>
+<p>锁死旋转轴、只走 XYZ —— 这就是"立铣刀 + 定旋转轴三轴"。平底刀精加工单独支持：
+刀盘内最高点就是落刀高度（<code>max_within</code>），天然不过切，代价是陡壁留台阶，
+那些面交给侧向工序。测试 <code>flat_finish_uses_drop_cutter</code> 锁住"平面上刀尖贴面"。</p>
+<h3 id="mrr">开粗：按 MRR 给参数</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>ap = 1.0×D（平底刀每层切出一个平面，这是它相对球头的优势）
+ae = 0.7×D（再大中心会留下未切芯，反而要跑第二遍）
+vf = 600 + 120×D，夹到 [700, 1500]
+MRR = ap × ae × vf  →  Ø6 时 33.3 cm³/min
+</code></pre></div>
+
+<p>留量 <code>stock_allowance_mm = 0.3</code>（<strong>法向</strong>余量），粗加工把每个面留在这个高度，
+精加工只削这一层。<code>allow_undercut</code>（多方向/定轴默认开）让孔、内腔、倒扣的背面
+不再整道拒收，而是"切得到就切、切不到留料"，程序头写一行
+<code>(WARN undercut xx% columns multi-layer)</code> 如实报告。</p>
+<h3 id="_51">数字</h3>
+<p>合成件（12×12×6 方块，毛坯 24×24×8，5 方向）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>单方向(+Z)：去料 927 mm³ / 过切 0
+五方向    ：去料 3744 mm³ / 过切 0     ← 3744 = 毛坯 4608 − 零件 864，即全去干净
+</code></pre></div>
+
+<p>真实件 <code>桌腿固定器.stl</code>（794 三角形，毛坯 27×62×62，h=0.3）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>5 道全做 / 0 跳过；22 层；46158 块 / 44789 段
+去料 62173.7 mm³ / 丢碎屑 355 格 / 97 s
+过切 377.8 mm³（深 0.200 mm）/ 残留 780.9 mm³（最厚 1.350 mm）
+</code></pre></div>
+
+<p>修复前同一件：过切 <strong>7524 mm³（深 1.35 mm）</strong>。残留那 1.35 mm 是 drop-cutter
+在凹角/陡壁让出来的圆角，属于"这一道够不到"，不是过切。</p>
+<h2 id="33-11-05">33. 任意刀轴角度 + 刀杆碰撞（11-05 深夜）</h2>
+<p>两条要求：<strong>「加工角度只要满足机床运动学限制、G54/G53 要求，就可以任意角度」</strong>、
+<strong>「刀路规划还要考虑刀杆与切割中工件的碰撞」</strong>。</p>
+<h3 id="90">任意角度：不是"凑 90° 的倍数"</h3>
+<p>轴向 5 道（±X/±Y/±Z）配 45° 坡度门槛，覆盖的是「法向与某根轴夹角 ≤45°」的面；
+<strong>剩下的洞在体对角线附近</strong>。补的斜向道可以取任意倾角：</p>
+<div class="codehilite" data-lang="bash"><pre style="line-height: 125%;"><span></span><code>--tilt<span style="color: #ABB2BF"> </span><span style="color: #D19A66">40</span><span style="color: #ABB2BF"> </span>--tilt-n<span style="color: #ABB2BF"> </span><span style="color: #D19A66">8</span><span style="color: #ABB2BF">     </span><span style="color: #7F848E"># 40° 倾角、8 个方位</span>
+<span style="color: #7F848E"># 默认 --tilt 54.7356 --tilt-n 4 = 四条体对角线</span>
+</code></pre></div>
+
+<p>唯一约束是机床：<code>A = acos(dir.z)</code> 必须 ≤ <code>A_LIMIT_DEG</code>（110°），超了直接丢掉并报
+<code>A&gt;110° 运动学挡掉 N 道</code>。约定上仍走 <strong>Head</strong>（双摆头）——<code>Table</code> 那套里 C 角对
+刀轴没有影响，表达不了任意方向。</p>
+<h3 id="g54-g53">G54 / G53</h3>
+<ul>
+<li>程序头 <code>(WORK OFFSET G54)</code> + <code>G54</code>：所有坐标都在工件坐标系里。</li>
+<li>程序尾 <code>G49</code> → <code>G53 Z{毛坯顶+30}</code> → <code>M5</code> → <code>M30</code>：<strong>回参考点必须用机床坐标</strong>，
+  工件坐标系在换装夹/换工序后会变。数值按「G54 的 Z 偏置 = 0」给，机床偏置不同时
+  按机床改（注释里写明了，没有假装通用）。</li>
+</ul>
+<h3 id="_52">刀杆碰撞：按三角网格查，不是按高度场</h3>
+<p>高度场只能保证<strong>刀刃</strong>不侵入——drop-cutter 的几何证明是：球心以上是半径 R 的柱体，
+而刀盘内没有任何点在球内 ⇒ 柱体也在外。所以：</p>
+<ul>
+<li>普通球头/平底刀 + 无倒扣 ⇒ <strong>不需要查</strong>（<code>need_shank</code> 直接 false，零开销）；</li>
+<li>锥度刀（锥颈比尖端粗）或零件有倒扣（<code>undercut &gt; 2%</code>）⇒ 建 <code>MeshIndex</code>
+  （XY 分桶 + 点—三角形距离，Ericson 5.1.5），沿刀轴取样，刃长以上每点要求
+  <code>距离 ≥ 刀杆半径 + 间隙</code>，撞到就<strong>放弃该刀点、留料</strong>并计入 <code>Stats::shank_skips</code>。</li>
+</ul>
+<p><strong>踩的坑</strong>：第一版从 <code>z = R</code>（球心）开始查，还要求「离工件 ≥ R + 间隙」——球心本来
+就贴着曲面 1.5 mm，于是每个刀点都被判碰撞（一次性误杀 <strong>42858</strong> 点，精加工直接
+全空）。改成<strong>只从刃长以上查</strong>，一个零件只剩 2~6 个点真的需要避让。</p>
+<h2 id="34-11-05">34. 切割染色做成开关（11-05 深夜）</h2>
+<p>要求：<strong>把切割颜色渲染改成开关，关闭后完全不影响性能。</strong></p>
+<p>关键在"完全"两个字。如果只是"画的时候不显示"，那 <code>creator</code> 数组照样分配、每片叶
+照样盖章、<code>changed_mask</code> 照样算子块位图——大件上就是几十 MB + 每刀几十微秒。
+所以开关必须<strong>关在数据生成那一侧</strong>：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>关掉后不做什么</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>不分配 <code>creator</code>（每叶 <code>sub³</code> 字节）</td>
+<td><code>SparseGrid::grow_creator</code> 直接 return</td>
+</tr>
+<tr>
+<td>不写子块位图、不盖章</td>
+<td><code>stamp_leaf</code> 首行 return；<code>changed_mask</code> 走 <code>pending_creator == 0</code> 的 <code>count_changed</code> 快路径</td>
+</tr>
+<tr>
+<td>不调 <code>set_creator</code></td>
+<td><code>run_tools</code> 里 <code>if cfg.colorize { … }</code></td>
+</tr>
+<tr>
+<td>读出来全是 0（= 单色）</td>
+<td><code>creator_of_voxel*</code> 在空数组上自然返回 0</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>set_colorize</code> 和 <code>set_creator_sub</code> 一样<strong>必须在建场之前调用</strong>（<code>creator</code> 是与
+<code>leaves</code> 平行的数组，建好场再改长度就对不上了），已有叶时 panic。</p>
+<h3 id="_53">实测</h3>
+<p>同一份刀路（桌腿件，9 道，h=2），几何结果逐项一致（去料 71280.0、过切 192.0、
+残留 352.0 完全相同）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>仿真</th>
+<th>creator</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>开</td>
+<td>286.6 s</td>
+<td>按叶分配</td>
+</tr>
+<tr>
+<td>关</td>
+<td><strong>241.5 s</strong></td>
+<td><strong>0 B</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>微基准（<code>crates/voxel/tests/color_switch.rs</code>，200 刀，每体素一个 creator）：
+开 <strong>8.7 ms / 262144 B</strong>，关 <strong>7.2 ms / 0 B</strong>。</p>
+<p>三条验收：
+- <code>geometry_is_identical_with_color_off</code>：逐体素比 <code>get()</code>，开/关必须完全一致；
+- <code>color_off_allocates_nothing</code>：<code>creator_bytes() == 0</code>，且读出来全是 0；
+- <code>color_off_does_not_add_work</code>：200 刀计时，关掉不能更慢（硬门槛 1.10×）。</p>
+<p><strong>默认关</strong>（<code>RunConfig::colorize = false</code>）。要彩色预览就显式开：CLI <code>--color</code>
+（早先是 <code>--no-color</code> 关掉，反过来更符合"默认不吃这份开销"）。程序输出多一行
+<code>切割染色：开/关（creator x KB）</code>。</p>
+<p>注意：微基准里 200 刀开/关的耗时只差 0.1 ms（6.1 vs 6.0，5 次取最小）——<strong>每片叶
+盖章本身很便宜</strong>，真正贵的是"分配 + 每刀算子块位图"在细粒度、大件上累积。所以
+这条开关的价值主要是<strong>内存</strong>（每叶 <code>sub³</code> 字节）与细粒度下的稳定开销，别夸大成
+"关掉快一倍"。</p>
+<h2 id="35-27-4111-05">35. 解析过切提速 27×，总仿真 4.1×（11-05 深夜）</h2>
+<p><code>--multi --h 3</code> 一件活跑 158.8 s。开 <code>CNCSIM_PROF=1</code> 一看：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>[cmp] 体素积分 0.2 ms | 解析过切 135761.8 ms（55623 段 / 1071325 设计点）
+</code></pre></div>
+
+<p><strong>仿真本体只有 23 s，135 s 全花在"解析过切"的比对里</strong>——这是量测，不是切削。</p>
+<h3 id="_54">三处改法</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>改法</th>
+<th>效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>段按 AABB 分桶（<code>SegGrid</code>，~6 万格）</td>
+<td>每点只比桶里的几十段，不再扫 5.5 万段 → 135.8 → 88.9 s</td>
+</tr>
+<tr>
+<td>解析只在<strong>体素已报过切的包围盒</strong>里细扫（外扩一格）</td>
+<td>→ 4.9 s，但最深从 0.2647 掉到 <strong>0.0647</strong>：h=3 的体素抓不住 0.26 mm 的浅切，最深点落在区域外</td>
+</tr>
+<tr>
+<td>再加一趟<strong>全局粗扫</strong>（步距 ×8，<code>Field</code> 必须显式 <code>step_by</code> 抽稀）</td>
+<td>深度回到 <strong>0.2598</strong>，总 16.0 s</td>
+</tr>
+</tbody>
+</table></div>
+<p>第三点是个坑：<code>DesignModel::Field</code> 的表面点是加载时<strong>预采样</strong>好的，<code>design_surface_points(design, step*8)</code>
+对它完全无效——点数一点没少（107 万点原样走两遍，114 s）。必须 <code>step_by(stride)</code>。</p>
+<h3 id="9-h3">结果（桌腿件 9 道，h=3）</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>仿真：158.8 s → 38.5 s（4.1×，两次一致）
+     其中 解析过切 135.8 → 16.0 s（8.5×）、体素积分 0.3 ms
+指标：去料 58023.0 / 过切 216.0 mm³（0.2598 mm，真值 0.2647）/ 残留 135.0 mm³
+</code></pre></div>
+
+<p><code>gouge_max_depth</code> 现在是"区域按 <code>design_step</code> 细采 + 全局按 8× 步距粗采"的较大者，
+所以它比逐点精确值低百分之几（0.2598 vs 0.2647），但不会再漏掉区域外的深点。</p>
+<h2 id="36-11-05">36. 多方向链路加逐点偏差 + 两个"调了也没用"的旋钮（11-05 深夜）</h2>
+<p>要求：<strong>优化刀路生成，让加工结果更接近原版模型</strong>。先把"接近"变成可量的数：
+多方向链路（<code>--multi</code>）补上和回转链路同一套<strong>名义曲面逐点有符号偏差</strong>
+（<code>sim::surface_dev</code>，设计面按 0.8 mm 采点），报告平均 |d| / P95 / 合格率 /
+过切占比 / 残料占比 / 最大过切。</p>
+<h3 id="54-h06">基准（桌腿件 5+4 道，h=0.6）</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>名义曲面：158745 点 / 平均 |d| 0.132 / P95 0.607 / 合格(≤0.15) 81.6%
+          过切 5.6% / 残料 12.8% / 最大过切 +1.55
+</code></pre></div>
+
+<h3 id="_55">两个旋钮，实测都不划算</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>旋钮</th>
+<th>结果</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>精加工行距 1.2 → 0.5 mm</td>
+<td>平均 0.132→<strong>0.108</strong>、合格 81.6→<strong>83.6%</strong>、残料 12.8→9.3%，但仿真 142→<strong>339 s</strong>（2.4×）</td>
+<td>收益只有 2 个点，说明误差不由行距主导</td>
+</tr>
+<tr>
+<td>坡度门槛 45° → 70°</td>
+<td>残料<strong>一点没降</strong>（135 → 135 mm³ @h=3），仿真 38→130 s（3.4×）</td>
+<td>drop-cutter 已经保证不过切，放宽只多走路</td>
+</tr>
+</tbody>
+</table></div>
+<p>两条都留成了 CLI 旋钮（<code>--finish-step</code>、<code>--slope</code>），默认不启用更贵的那档。</p>
+<h3 id="_56">结论：这时候的瓶颈是<strong>验证分辨率</strong>，不是刀路</h3>
+<p>h=0.6 时 ±0.15 mm 的判据只有半个体素宽，SDF 量化本身就贡献了大半读数；
+把行距减半只换来 2 个点，正是"量化噪声盖住了刀路误差"的表现。要让"更像原版"
+再上一个台阶，只有两条路：</p>
+<ol>
+<li><strong>降 h</strong>（h=0.3 时判据才等于一个体素，读数才有分辨力）——代价是仿真时间 ×4；</li>
+<li><strong>处理够不到的面</strong>：残料集中在底面附近的凹角（<code>(-6, 9.5, -28.5)</code>），
+   那是 5 个轴向 + 4 条斜向都看不到的区域，只能靠五轴联动或翻面装夹。</li>
+</ol>
+<p>所以这一轮真正的改动是"把接近程度变成可量的数 + 两个旋钮 + 明确的结论"，
+没有假装把 81.6% 调成 95%。</p>
+<h2 id="37-11-05">37. 可达性 + 工序编排：让几何自己决定用几道（11-05 深夜）</h2>
+<p>要求：<strong>不要限定加工方式，三轴 / 3+2 / 五轴 RTCP，只要能让结果更接近原版都可以用。</strong>
+上一轮已经能从"残料"里看出够不到的面；这一轮把它变成<strong>决策依据</strong>。</p>
+<h3 id="_57">做法：一次可见性矩阵 + 贪心集合覆盖</h3>
+<p><code>crates/sim/src/reach.rs</code>：</p>
+<ol>
+<li><code>visibility(design, samples, dirs, cfg)</code> — 对<strong>每个设计面采样点</strong>、每个候选方向，
+   判两件事：<strong>面朝</strong>（<code>n·d ≥ cos45°</code>）和<strong>射线不被挡</strong>（沿 <code>d</code> 球体追踪，每步
+   <code>0.8·sdf</code>）。两个位图分别存 <code>facing</code> 和 <code>masks</code>。</li>
+<li><code>Visibility::greedy(base, max_extra, min_gain)</code> — 带权集合覆盖，每次挑"新覆盖
+   面积最大"的方向，新增不足总面积 0.4% 就停。<strong>这一层才是"用哪种工艺"的判据</strong>：
+   3 轴就是 <code>+Z</code>，3+2 就是任意倾角定轴，两者是同一套高度场，只是方向不同。</li>
+<li><code>report_with(vis, mask)</code> — 按最终方向集出报告，够不到的面按<strong>空间连通块</strong>分组
+   （并查集，格距 = 2.5×采样间距），每片给建议方向、A/C 角、区域 bbox。</li>
+</ol>
+<p>RTCP 的位置：真正的五轴（刀轴逐点跟法向）只在回转件上有实现（<code>--rotary</code>），判据是
+<code>rotationality ≥ 0.85</code>。<code>--multi</code> 现在会先打印这条判断，回转件直接告诉你该走 RTCP；
+非回转件用<strong>足够密的方向集逼近</strong>，本质区别是每一刀仍是定轴，没有"沿法向恒接触"的
+光洁度优势。这句话写在输出里，不含糊。</p>
+<h3 id="h06">结果（桌腿固定器，h=0.6）</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>工序编排：候选 25 个方向（A≤110°）→ 现有 9 道覆盖 78.6%
+  ├ 上限 86.4%：另有 328 mm² 被遮挡 + 1732 mm² 是背面，任何方向都够不到
+  ├ +1 道 --axis=0.38,-0.91,-0.19（A101° C23°）覆盖 78.6% → 82.5%（新增 589 mm²）
+  ├ +1 道 --axis=0.38, 0.91,-0.19（A101° C158°）覆盖 82.5% → 86.4%（新增 588 mm²）
+</code></pre></div>
+
+<p><strong>86.4% 正好等于上限</strong>——不是"又调了一版参数"，是把可达面积吃干了。剩下 13.6%
+是几何/机床限制：背面 1732 mm²（要翻面装夹）、遮挡 328 mm²（封闭/半封闭特征）。</p>
+<h3 id="_58">但形状指标一点没动，这才是这轮最值得记的</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>9 道（无编排）</th>
+<th>11 道（编排后）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>可达面积</td>
+<td>78.6%</td>
+<td><strong>86.4%</strong></td>
+</tr>
+<tr>
+<td>平均 |d|</td>
+<td>0.132</td>
+<td>0.129</td>
+</tr>
+<tr>
+<td>P95</td>
+<td>0.607</td>
+<td>0.607</td>
+</tr>
+<tr>
+<td>合格(≤0.15)</td>
+<td>81.6%</td>
+<td><strong>81.6%</strong></td>
+</tr>
+<tr>
+<td>过切 / 残料</td>
+<td>5.6% / 12.8%</td>
+<td>5.8% / 12.6%</td>
+</tr>
+</tbody>
+</table></div>
+<p>新覆盖的 1177 mm² 里，绝大部分<strong>依然是残料</strong>。原因就是本模块文档第一句写的：
+<strong>"可达"是必要条件，不是充分条件</strong>——Ø3 球头在那些窄深特征里仍然放不进去，
+看得见不等于切得到。这条不能靠"再加方向"解决，只能换小刀（残料重切）。</p>
+<h3 id="_59">交叉表：把"够不到"和"没切好"分开</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>名义曲面：158745 点 / 平均 |d| 0.129 / P95 0.607 / 合格 81.6% / 过切 5.8% / 残料 12.6%
+  可达面 42476：合格 86.0% / 过切 6.4% / 残料 7.6%
+  不可达面 6842：合格 41.3% / 过切 7.1% / 残料 51.6%
+</code></pre></div>
+
+<ul>
+<li>残料 12.6%（总体）≈ 不可达面积 13.4%：<strong>残料几乎全在够不到的地方</strong>，可达面上
+  只有 7.6%。所以"残料多"不是刀路不好，是这道工序到不了。</li>
+<li>不可达面里 41.3% 显示"合格"是个<strong>读数陷阱</strong>：毛坯底面和设计底面重合
+  （<code>stock.min.z == 模型 zmin</code>），那些点从没被切过但偏差恰好为 0。别把它当"加工到位"。</li>
+<li>真正还能动的是<strong>可达面上 6.4% 的过切</strong>（最大 +1.55 mm，最深处在
+  <code>(12.50, 23.62, 2.32)</code>，贴近 <code>x = 12.5</code> 的侧壁）。下一轮该查这个。</li>
+</ul>
+<h3 id="_60">三个踩过的坑（都写进代码注释了）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>现象</th>
+<th>根因</th>
+<th>处置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>封闭内腔被报成"背面"</td>
+<td>只用一张位图，<code>mask == 0</code> 既可能是"被挡"也可能是"没方向面朝"</td>
+<td>拆成 <code>facing</code>（只判面朝）+ <code>masks</code>（面朝且通），报告用 <code>facing != 0 &amp;&amp; masks == 0</code> 判遮挡</td>
+</tr>
+<tr>
+<td>9 个连成一片的点碎成 9 片</td>
+<td>连通块格距（0.58 mm）比采样间距（1 mm）还小</td>
+<td>格距 = <code>max(2.5×采样间距, 最长边/48)</code>，上限 <code>最长边/6</code></td>
+</tr>
+<tr>
+<td>封闭内腔整片消失</td>
+<td>球面法向各向同性，面积加权平均后是零向量，被"方向必须非零"过滤掉</td>
+<td>加 <code>dir_conf</code>（一致性 0..1）；抵消时如实报"没有单一方向"，而不是丢片</td>
+</tr>
+</tbody>
+</table></div>
 </main>
 </div>
 <script>

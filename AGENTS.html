@@ -272,7 +272,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <h1 id="agentsmd">AGENTS.md</h1>
 <blockquote>
 <p>给 AI agent / 新接手者的入口。<strong>先读这一页，再读 <code>docs/项目记忆.md</code>。</strong></p>
-<p>最后更新：2026-11-04 · 14 crate / <strong>494 测试全绿</strong> / 5 个外部依赖全最新
+<p>最后更新：2026-11-05 · 14 crate / <strong>518 测试全绿</strong> / 5 个外部依赖全最新
 （<code>cargo clippy</code> 有 8 条历史遗留告警，见 §2 注）</p>
 </blockquote>
 <hr />
@@ -304,6 +304,16 @@ cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </spa
 cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span><span style="color: #98C379">"C:/path/流云花瓶.stl"</span><span style="color: #ABB2BF"> </span>--stock<span style="color: #ABB2BF"> </span><span style="color: #D19A66">112</span>,112,250<span style="color: #ABB2BF"> </span>--rotary<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/vase.nc<span style="color: #ABB2BF"> </span>--diff<span style="color: #ABB2BF"> </span>out/vase.diff.html<span style="color: #ABB2BF"> </span>--export<span style="color: #ABB2BF"> </span>out/vase.html
 <span style="color: #7F848E"># CAM（A/C 回转 + RTCP）：粗（径向让刀螺旋）+ 精（法向摆角）→ G43.4 → 外轮廓 Δr</span>
 cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span><span style="color: #98C379">"C:/path/流云花瓶.stl"</span><span style="color: #ABB2BF"> </span>--stock<span style="color: #ABB2BF"> </span><span style="color: #D19A66">112</span>,112,250<span style="color: #ABB2BF"> </span>--rotary<span style="color: #ABB2BF"> </span>--no-rough<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/nr.nc
+<span style="color: #7F848E"># 多方向开粗（+Z / ±X / ±Y，每道自带粗+精），一份程序</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span>stls/桌腿固定器.stl<span style="color: #ABB2BF"> </span>--multi<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/leg.nc
+<span style="color: #7F848E"># 定轴 3+2：把旋转轴锁到 -X，走普通三轴刀路（`--flat-finish` 用立铣刀精加工）</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span>stls/桌腿固定器.stl<span style="color: #ABB2BF"> </span>--axis<span style="color: #56B6C2">=</span>-1,0,0<span style="color: #ABB2BF"> </span>--flat-finish<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/32.nc
+<span style="color: #7F848E"># 任意倾角的斜向精加工（只要 A 轴够得到）：40° 倾角 × 8 个方位</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span>stls/桌腿固定器.stl<span style="color: #ABB2BF"> </span>--multi<span style="color: #ABB2BF"> </span>--tilt<span style="color: #ABB2BF"> </span><span style="color: #D19A66">40</span><span style="color: #ABB2BF"> </span>--tilt-n<span style="color: #ABB2BF"> </span><span style="color: #D19A66">8</span><span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/t40.nc
+<span style="color: #7F848E"># 关掉切割染色（不分配 creator、不写位图；几何结果完全一致，大件省几十 MB）</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span>stls/桌腿固定器.stl<span style="color: #ABB2BF"> </span>--multi<span style="color: #ABB2BF"> </span>--color<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/color.nc
+<span style="color: #7F848E"># 工序编排（默认开）：按可达覆盖率自动补方向，并把"够不到/没切好"分开报</span>
+cargo<span style="color: #ABB2BF"> </span>run<span style="color: #ABB2BF"> </span>--release<span style="color: #ABB2BF"> </span>--<span style="color: #ABB2BF"> </span>--cam<span style="color: #ABB2BF"> </span>stls/桌腿固定器.stl<span style="color: #ABB2BF"> </span>--multi<span style="color: #ABB2BF"> </span>--h<span style="color: #ABB2BF"> </span><span style="color: #D19A66">0</span>.6<span style="color: #ABB2BF"> </span>--gcode<span style="color: #ABB2BF"> </span>out/orch.nc
 <span style="color: #7F848E"># 对照实验：跳过粗加工，隔离"过切是粗加工留下的还是精加工造成的"</span>
 python<span style="color: #ABB2BF"> </span>tools/check_mesh.py<span style="color: #ABB2BF"> </span>out/dome.html<span style="color: #ABB2BF"> </span>--ref-sphere<span style="color: #ABB2BF"> </span><span style="color: #D19A66">25</span>,25,24,15<span style="color: #ABB2BF">   </span><span style="color: #7F848E"># 网格体检：几何/拓扑/法线/颜色（连通分量按**位置**判，不受拆顶点副本干扰）</span>
 </code></pre></div>
@@ -405,13 +415,13 @@ testdata/         golden CSV + design_box.stl
 <tbody>
 <tr>
 <td><code>voxel</code></td>
-<td>156</td>
+<td>159</td>
 <td><code>gcode</code></td>
 <td>117</td>
 </tr>
 <tr>
 <td><code>sim</code></td>
-<td>82</td>
+<td>88</td>
 <td><code>collide</code></td>
 <td>34</td>
 </tr>
@@ -423,7 +433,7 @@ testdata/         golden CSV + design_box.stl
 </tr>
 <tr>
 <td><code>cam</code></td>
-<td>13</td>
+<td>28</td>
 <td><code>tool</code></td>
 <td>10</td>
 </tr>
@@ -534,6 +544,46 @@ testdata/         golden CSV + design_box.stl
 <td>✅ <code>--rotary</code>：0.5°×0.25 mm 细网格取真值轮廓（<strong>双线性查询，不取 3×3 最大</strong>——取最大等于跟着包络走，刀永远进不了凹谷）→ 粗加工（<strong>平头 Ø16</strong>，径向让刀螺旋，竖直刀轴，可证不啃伤，顺带车掉方料四角）+ 精加工（<strong>Ø2 锥度球头</strong> 尖端 R1/10° 锥颈，<strong>A/C 沿外法向</strong>，<code>G43.4 H1</code> 刀尖跟随）；A 超 110° 时<strong>限位 + 沿法向抬刀 <code>R(1−cosδ)</code></strong>（不跳过，跳过会连出穿件的弦）；比对两套——<strong>亚体素 SDF 零点二分</strong>（窗 ±3.5 mm，精度 0.01 mm）出 θ×z 的 Δr 热力图，<strong>名义曲面逐点有符号偏差</strong>（<code>sim::surface_dev</code>，1.08 M 点）出深度分布 + 按所需 A 角分组</td>
 </tr>
 <tr>
+<td>CAM（多方向 / 3+2）</td>
+<td>✅ <code>--multi</code>：五道工序（+Z/±X/±Y）各带粗+精，串成一份程序；<code>--axis x,y,z</code> = <strong>定轴 3+2</strong>（锁旋转轴走三轴）。侧向工序用 <code>G43.4 H1</code> + A/C 真的摆刀轴（只转坐标不改刀轴会让刀杆垂直插进工件，实测每道过切 105 mm³）；单道做不了就跳过并报原因（<code>PlanOutput::skipped</code>）；<code>allow_undercut</code> 让孔/内腔/倒扣"切得到就切、切不到留料"</td>
+</tr>
+<tr>
+<td>任意刀轴角度</td>
+<td>✅ 斜向精加工可用 <code>--tilt &lt;度&gt; --tilt-n &lt;条&gt;</code> 取<strong>任意</strong>倾角（默认 54.7°×4 体对角线）；唯一约束是机床 <code>A = acos(dir.z) ≤ 110°</code>，超了直接丢并报数。程序头 <code>G54</code>（工件坐标）、尾 <code>G49</code>→<code>G53 Z…</code>（机床坐标回退）→<code>M5</code>→<code>M30</code></td>
+</tr>
+<tr>
+<td>切割染色开关</td>
+<td>✅ <strong>默认关</strong>，<code>--color</code> 显式开（<code>RunConfig::colorize</code>）：关掉时 <code>creator</code> <strong>一个字节都不分配</strong>、不写子块位图、<code>changed_mask</code> 走 <code>count_changed</code> 快路径——不是"不显示"，是那份工作根本不发生。几何逐体素一致（有测试），creator 0 B</td>
+</tr>
+<tr>
+<td>可达性分析</td>
+<td>✅ <code>sim::reach</code>：对每个设计面采样点判「面朝 + 射线不被挡」（球体追踪），存 <code>facing</code>/<code>masks</code> 两张位图；够不到的面按空间连通块分组并给建议方向、A/C、bbox。封闭内腔（法向各向抵消）如实报「没有单一方向」而不是丢掉</td>
+</tr>
+<tr>
+<td>工序编排</td>
+<td>✅ <code>--multi</code> 把<strong>整个可达半球</strong>（A≤110°、25 个候选方向）当候选集，用带权集合覆盖贪心选方向：3 轴与 3+2 在这里只是"方向不同"，用哪种由覆盖面积决定。桌腿件 78.6% → <strong>86.4%</strong>（= 几何上限）。<code>--no-auto-pass</code> 关掉</td>
+</tr>
+<tr>
+<td>多方向保真度口径</td>
+<td>✅ <code>--multi</code> 也报<strong>名义曲面逐点偏差</strong>（设计面 0.8 mm 采点）：桌腿件 h=0.6 时平均 |d| 0.132 / P95 0.607 / 合格(≤0.15) 81.6%。实测行距减半只换 2 个点（142→339 s）、坡度放宽 45→70° 残料不降（38→130 s），两个旋钮都留成 <code>--finish-step</code> / <code>--slope</code> 但不默认启用</td>
+</tr>
+<tr>
+<td>比对性能</td>
+<td>✅ 解析过切加段空间索引 + 两段扫描（区域细扫 + 全局 8× 粗扫）：桌腿件 9 道 h=3 的仿真 158.8 → <strong>38.5 s</strong>（4.1×），其中解析过切 135.8 → 16.0 s；<code>gouge_max_depth</code> 与逐点值差 2%</td>
+</tr>
+<tr>
+<td>刀杆碰撞</td>
+<td>✅ <code>Process::check_shank</code>：普通球头/平底刀 + 无倒扣时<strong>不需要查</strong>（drop-cutter 已保证整根刀柱在外）；锥度刀或有倒扣时建 <code>MeshIndex</code>（XY 分桶 + 点—三角形距离），沿刀轴<strong>从刃长以上</strong>取样，<code>距离 &lt; 刀杆半径 + 间隙</code> 就放弃该点、留料，计入 <code>Stats::shank_skips</code></td>
+</tr>
+<tr>
+<td>落刀几何</td>
+<td>✅ 球头/平底刀都是 <strong>drop-cutter</strong>：球头刀心 = <code>max(z + √(R²−d²))</code>，平底刀 = <code>max_within</code>。替代原来的"刀尖 = 曲面 + R·n"——后者在凹角处会让球贴墙啃进去（实测 1.35 mm ≈ 一个刀半径）</td>
+</tr>
+<tr>
+<td>开粗效率</td>
+<td>✅ <code>ap = 1.0×D</code>、<code>ae = 0.7×D</code>、<code>vf = 600+120D</code>，MRR 打印出来（Ø6 时 33.3 cm³/min）；法向留量 0.3 mm 给精加工</td>
+</tr>
+<tr>
 <td>形状保真度度量</td>
 <td>✅ 三层口径：① 单向几何量（<code>Δz</code> / <code>Δr</code>）② 整实体体积（<code>compare_with_design</code>，过切/残料体积 + 定位回 G 代码行）③ 名义曲面逐点（<code>surface_dev</code>，正=过切深度、负=残料厚度）；口径与盲区见 <code>docs/项目记忆.md</code> §27</td>
 </tr>
@@ -582,13 +632,20 @@ testdata/         golden CSV + design_box.stl
 <hr />
 <h2 id="6">6. 下一步（按价值排序）</h2>
 <ol start="0">
-<li><strong>回转件还差最后一层：中段过切</strong>。换刀（平头开粗 + Ø2 锥度球头）并把刀路从
-   "包络"改成"真值"之后，<code>流云花瓶.stl</code> 从 24.9% → <strong>61.0%</strong> 落在 ±0.15 mm，
-   残料 23.7% → 1.6%，超窄带 24492 → 0。<strong>但 A 60..110° 这一段仍有过切</strong>
-   （平均 0.39 / 0.52，而 A 30..60° 与 &gt;110° 只有 0.16 / 0.22）——嫌疑是锥颈在中等
-   摆角扫到对面的壁，以及 1.25°/0.6 mm 步距下的弦高。下一步：把颈长/锥角做成参数
-   扫一遍（注意 §28 记的坑：单纯缩短颈长不成立），以及试"沿纹理走刀"（streamline）
-   替掉当前的 θ 栅格——当前走刀方向与漩涡成 ~45°，每个谷都被横切。</li>
+<li><strong>可达面上的过切</strong>（现在最该动的一处）。工序编排已把可达面积吃到几何上限
+   （桌腿件 78.6% → 86.4%），交叉表把剩下的问题切成了两半：
+   可达面 42476 点里 <strong>合格 86.0% / 过切 6.4% / 残料 7.6%</strong>；不可达面 6842 点里
+   残料 51.6%（那是翻面才能解决的）。所以残料基本不是刀路问题，
+   <strong>真正能改的是可达面上那 6.4% 的过切</strong>（最大 +1.55 mm，最深处
+   <code>(12.50, 23.62, 2.32)</code>，贴着 <code>x = 12.5</code> 的侧壁）。下一步先定位它属于
+   ① 设计场边界符号翻转（<code>mesh_to_field</code> 的窄带在 bbox 边缘）还是
+   ② 侧向工序 drop-cutter 在凸棱处抬刀不足，两者处置完全不同。</li>
+<li><strong>二次装夹（翻面）</strong>：桌腿件 13.6% 的面积在单次装夹下几何不可达
+   （背面 1732 mm² + 遮挡 328 mm²）。<code>reach</code> 已经把每片的 bbox 和建议方向算出来，
+   缺的是"翻面后重新以新的 −Z 为基准规划"这一步——<code>Frame</code> 已支持任意方向，
+   主要工作在装夹建模（毛坯改形、基准面重定位）。</li>
+<li><strong>残料重切（小刀）</strong>：新覆盖的 1177 mm² 里大部分仍是残料，Ø3 球头放不进去。
+   需要"仿真后读残料 → 聚类 → 换 Ø1.5 补一道"，即真正的一轮闭环。</li>
 <li><strong>剖切平面进 Bevy</strong>——HTML 预览版已有（HUD 滑块 + <code>discard</code>），窗口里还没接。五轴件的内腔不剖开根本看不见。</li>
 <li><strong>点选面 → 反查 creator</strong>（ADR-005 §交互）。溯源数据已经有了，缺的是拾取 + 图例面板。</li>
 <li><strong><code>TileCache</code> 增量上传进窗口</strong>（<code>render</code> 侧 11× 已实测，差 Bevy 那一步）。</li>
