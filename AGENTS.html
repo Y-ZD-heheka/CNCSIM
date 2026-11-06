@@ -600,6 +600,10 @@ testdata/         golden CSV + design_box.stl
 <td>✅ <code>ap = 1.0×D</code>、<code>ae = 0.7×D</code>、<code>vf = 600+120D</code>，MRR 打印出来（Ø6 时 33.3 cm³/min）；法向留量 0.3 mm 给精加工</td>
 </tr>
 <tr>
+<td>能力边界（叶轮实测）</td>
+<td>✅ 两个真叶轮（Ø100×40 / 5.1 万面、Ø80×41 / 15.5 万面）跑通全链路：解析合格 61.7% / 47.3%，<strong>过切只 1.3% / 0.3%</strong>（失败模式是"留料"不是"切坏"）。第二个件可达 86.3% 但可达面只 15.4% 合格——<code>HeightMap</code> 每列只认最上面那层，叶片侧壁在任何方向都不是最高面。<strong>叶轮要五轴侧刃铣，本链路已到上限</strong>，见 <code>docs/项目记忆.md</code> §40</td>
+</tr>
+<tr>
 <td>形状保真度度量</td>
 <td>✅ 三层口径：① 单向几何量（<code>Δz</code> / <code>Δr</code>）② 整实体体积（<code>compare_with_design</code>，过切/残料体积 + 定位回 G 代码行）③ 名义曲面逐点（<code>surface_dev</code>，正=过切深度、负=残料厚度）；口径与盲区见 <code>docs/项目记忆.md</code> §27</td>
 </tr>
@@ -648,6 +652,10 @@ testdata/         golden CSV + design_box.stl
 <hr />
 <h2 id="6">6. 下一步（按价值排序）</h2>
 <ol start="0">
+<li><strong>五轴侧刃铣（叶轮类件的唯一出路）</strong>。两个叶轮的实测把上限钉死了：定轴/3+2
+   在叶片通道里只能贴"每列最高面"，可达面合格 15.4%。要加工叶片侧壁必须让刀轴
+   沿直纹面走（侧刃铣），这是新增刀路生成器，不是加方向。做了它，叶轮类件才进
+   能力范围；不做就明确排除。</li>
 <li><strong>凹角清根（小刀只走残料）</strong>——现在最该动的一处。解析口径把问题定死了：
    可达面上 8.3% 残料里 <strong>3308 点是"刀走过了但切不到"</strong>（凹角圆角），
    只有 232 点是覆盖漏洞；&gt;1 mm 的 8305 点全在不可达面。刀径实验给出上限：
