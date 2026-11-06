@@ -1603,6 +1603,32 @@ fn run_cam_multi(
         }
     }
 
+    // ── 翻面装夹（第二套）：把件翻过来，从**下面**再加工一遍 ──
+    //
+    // 一次装夹里够不到的面，绝大多数是朝下的（`reach` 报"纯背面，建议 --axis=0,0,-1
+    // （A180°）"）。A 轴摆不到 180°，但**把件翻过来**是等价的：翻面后刀还是竖直的，
+    // 相对运动恰好等于"从 −Z 加工"。所以仿真里就是一道 `dir = -Z` 的工序，
+    // 世界坐标不变、网格不用转——只有出厂程序要按翻面后的坐标系另出一份。
+    let flip = args_flag("--flip");
+    let flip_idx = if flip {
+        let i = passes.len();
+        passes.push(Pass {
+            dir: cncsim_math::DVec3::new(0.0, 0.0, -1.0),
+            // 翻面后要开粗：凹腔/悬伸下面的料整块还在
+            rough: Some(rough.clone()),
+            finish: finish.clone(),
+            rest: None,
+            process: None,
+        });
+        println!(
+            "翻面装夹：追加第 {} 道（dir -Z，A 轴摆不到 180°，实机是把件翻过来重新装夹）",
+            i + 1
+        );
+        Some(i)
+    } else {
+        None
+    };
+
     let t0 = std::time::Instant::now();
     let plan = match generate_plan(tris, stock, &process, &passes) {
         Ok(p) => p,
@@ -1636,7 +1662,82 @@ fn run_cam_multi(
     }
 
     let nc = gcode_path_from_args().unwrap_or_else(|| model.with_extension("multi.nc"));
-    if let Err(e) = std::fs::write(&nc, &plan.program.gcode) {
+    // 有翻面道时：出厂程序要拆成两套——程序里那道 `A180` 机床摆不到，实机是
+    // **把件翻过来重新装夹**，第二套的坐标要按翻面后的坐标系给（G55）。
+    if let Some(fi) = flip_idx {
+        let mark = format!("(PASS {} dir", fi + 1);
+        match plan.program.gcode.find(&mark) {
+            Some(pos) => {
+                let mut s1 = String::from(&plan.program.gcode[..pos]);
+                s1.push_str("(SETUP 1 END: 松开压板，把件翻面)
+");
+                s1.push_str(&format!("G49
+G53 Z{:.3}
+M5
+M30
+", stock.max.z + 30.0));
+                if let Err(e) = std::fs::write(&nc, &s1) {
+                    eprintln!("写 G 代码失败：{e}");
+                } else {
+                    println!("G 代码（第 1 套）：{}", nc.display());
+                }
+                // 第二套：翻面坐标系（+Z 就是机床的竖直方向），另出一份
+                let f = cncsim_cam::Frame::from_dir(cncsim_math::DVec3::new(0.0, 0.0, -1.0));
+                let flip_mesh: Vec<cncsim_cam::Tri> = tris
+                    .iter()
+                    .map(|t| [f.unapply(t[0]), f.unapply(t[1]), f.unapply(t[2])])
+                    .collect();
+                let mut lo2 = cncsim_math::DVec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+                let mut hi2 = cncsim_math::DVec3::new(
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
+                );
+                for t in &flip_mesh {
+                    for v in t {
+                        lo2 = cncsim_math::DVec3::new(lo2.x.min(v.x), lo2.y.min(v.y), lo2.z.min(v.z));
+                        hi2 = cncsim_math::DVec3::new(hi2.x.max(v.x), hi2.y.max(v.y), hi2.z.max(v.z));
+                    }
+                }
+                let pad = cncsim_math::DVec3::new(1.0, 1.0, 0.0);
+                let fstock = cncsim_cam::Stock {
+                    min: lo2 - pad,
+                    max: hi2 + pad,
+                };
+                let fpass = Pass {
+                    dir: cncsim_math::DVec3::new(0.0, 0.0, 1.0),
+                    rough: Some(rough.clone()),
+                    finish: finish.clone(),
+                    rest: None,
+                    process: None,
+                };
+                match generate_plan(&flip_mesh, fstock, &process, &[fpass]) {
+                    Ok(p2) => {
+                        let p2p = nc.with_extension("setup2.nc");
+                        let txt = p2.program.gcode.replace("G54", "G55");
+                        let txt = format!(
+                            "(SETUP 2: 翻面装夹 / G55 / 原点在翻面后的毛坯上表面中心)
+{txt}"
+                        );
+                        if let Err(e) = std::fs::write(&p2p, &txt) {
+                            eprintln!("写第二套 G 代码失败：{e}");
+                        } else {
+                            println!(
+                                "G 代码（第 2 套，翻面 / G55）：{}（{} 行 / 工具 T1/T2）",
+                                p2p.display(),
+                                txt.lines().count()
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("第二套（翻面）CAM 失败：{e}"),
+                }
+            }
+            None => {
+                eprintln!("翻面道在程序里找不到，出厂程序按整份写出（含 A180，**实机跑不了**）");
+                let _ = std::fs::write(&nc, &plan.program.gcode);
+            }
+        }
+    } else if let Err(e) = std::fs::write(&nc, &plan.program.gcode) {
         eprintln!("写 G 代码失败：{e}");
     } else {
         println!("G 代码：{}", nc.display());
@@ -1696,6 +1797,19 @@ fn run_cam_multi(
             if cfg.colorize { "开" } else { "关" },
             out.grid.creator_bytes() as f64 / 1024.0
         );
+        // 墙钟拆成"切削 / 比对 / 其它"。**其它**里是解释、逐段位姿、线段表、
+        // 观察者回调这些**串行**开销——多线程利用率不高时，先看这一项占多少。
+        let wall = t0.elapsed().as_secs_f64();
+        let cut = out.stats.cut_ms / 1e3;
+        let cmp = out.stats.compare_ms / 1e3;
+        println!(
+            "  ├ 切削 {cut:.1} s（{:.0}%）/ 比对 {cmp:.1} s / 其它 {:.1} s（{:.0}%）/ 线程 {} / 单批并行片数 {}",
+            cut / wall * 100.0,
+            (wall - cut - cmp).max(0.0),
+            (wall - cut - cmp).max(0.0) / wall * 100.0,
+            cncsim_voxel::par::worker_count(),
+            out.stats.max_par_slices
+        );
         println!(
             "  过切 {:.3} mm³ / {:.4} mm @ ({:.2},{:.2},{:.2})；残留 {:.3} mm³ / {:.4} mm @ ({:.2},{:.2},{:.2})",
             r.gouge_volume_mm3,
@@ -1739,20 +1853,29 @@ fn run_cam_multi(
             g.hi.z
         );
         if g.has_direction() {
-            // 整片朝同一个方向：补一道那个方向的定轴工序就能覆盖
-            println!(
-                "{head}  → 加一道 --axis={:.2},{:.2},{:.2}（A{:.0}° C{:.0}°）{}",
-                g.dir.x,
-                g.dir.y,
-                g.dir.z,
-                g.a_deg(),
-                g.c_deg(),
-                if g.backfacing_frac > 0.8 {
-                    "，当前是纯背面"
-                } else {
-                    ""
-                }
-            );
+            // 整片朝同一个方向：补一道那个方向的定轴工序就能覆盖。
+            // 但 A 超行程的方向补不了——那种只能把件翻过来（`--flip`）。
+            if g.a_deg() > cncsim_cam::rotary::A_LIMIT_DEG + 1e-9 {
+                println!(
+                    "{head}  → 需要 A{:.0}°，超出行程 {:.0}°：只能**翻面装夹**（`--flip`）",
+                    g.a_deg(),
+                    cncsim_cam::rotary::A_LIMIT_DEG
+                );
+            } else {
+                println!(
+                    "{head}  → 加一道 --axis={:.2},{:.2},{:.2}（A{:.0}° C{:.0}°）{}",
+                    g.dir.x,
+                    g.dir.y,
+                    g.dir.z,
+                    g.a_deg(),
+                    g.c_deg(),
+                    if g.backfacing_frac > 0.8 {
+                        "，当前是纯背面"
+                    } else {
+                        ""
+                    }
+                );
+            }
         } else {
             println!("{head}  → 封闭/多向：没有单一方向能进去，需翻面或五轴联动");
         }

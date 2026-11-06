@@ -443,6 +443,20 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#414">41.4 剩下的</a></li>
 </ul>
 </li>
+<li><a href="#42-136-11-06">42. 翻面装夹：把"够不到"的那 13.6% 吃回来（11-06 深夜）</a><ul>
+<li><a href="#_70">关键的一句话</a></li>
+<li><a href="#_71">做法</a></li>
+<li><a href="#h06_1">数字（桌腿件 h=0.6，解析口径）</a></li>
+<li><a href="#_72">没做的（别当成已经做了）</a></li>
+</ul>
+</li>
+<li><a href="#43-11-06">43. 多线程利用率：一半的墙钟在单线程里（11-06 深夜）</a><ul>
+<li><a href="#_73">诊断</a></li>
+<li><a href="#_74">三个修复</a></li>
+<li><a href="#22-154-148-h06">结果（桌腿件，22 道工序 / 15.4 万块 / 14.8 万段，h=0.6）</a></li>
+<li><a href="#_75">试过没用的</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -4194,6 +4208,156 @@ h 不再卡验收（h=0.6 与 h=1.0 的解析数字完全一致），只影响�
 <p>可达面 5.1% 残料里，&gt;0.15 mm 的那部分已经压到 1.5% 左右；剩下的是
 <strong>刀径与公差的结构关系</strong>：90° 凹角要落进 ±0.15 得 R ≤ 0.36（Ø0.72），
 再小就断刀。要继续往上只能翻面（不可达面仍 42% 残料）或五轴侧刃。</p>
+<h2 id="42-136-11-06">42. 翻面装夹：把"够不到"的那 13.6% 吃回来（11-06 深夜）</h2>
+<p>前几轮一直写着"不可达面只能翻面"，这轮把它做了。</p>
+<h3 id="_70">关键的一句话</h3>
+<p><strong>"翻面后从下往上加工" ≡ "零件不动、刀具从 −Z 来"。</strong> 相对运动一样，所以：
+仿真里就是一道 <code>dir = (0,0,-1)</code> 的工序，<strong>世界坐标不变、体素网格不用转</strong>。
+只有<strong>出厂程序</strong>要按翻面后的坐标系另出一份（G55，刀仍然竖直）。</p>
+<p>这一句省掉了整个"网格旋转 + 两次仿真 + 结果合并"的工程量——那是原本以为
+必须做的（180° 绕 X 是精确的体素索引置换，但根本不需要转）。</p>
+<h3 id="_71">做法</h3>
+<ul>
+<li><code>--flip</code>：在工序表末尾追加一道 <code>dir = -Z</code>（带开粗），走完整的粗+精。</li>
+<li>出厂程序拆两份：<code>*.multi.nc</code>（第 1 套，G54）与 <code>*.multi.setup2.nc</code>
+  （第 2 套，翻面坐标系、G55、T1/T2）。<strong>绝不把 A180 发给机床</strong>——
+  程序里那道 <code>A180</code> 只用于仿真。</li>
+<li>可达性报告里，A 超行程的片区原来建议 <code>--axis=0,0,-1（A180°）</code>（机床做不到），
+  现在改成"只能<strong>翻面装夹</strong>（<code>--flip</code>）"。</li>
+</ul>
+<h3 id="h06_1">数字（桌腿件 h=0.6，解析口径）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>清根</th>
+<th>清根 + 翻面</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>合格</td>
+<td>93.7%</td>
+<td><strong>96.5%</strong></td>
+</tr>
+<tr>
+<td>过切</td>
+<td>1.2%</td>
+<td>1.2%</td>
+</tr>
+<tr>
+<td>残料</td>
+<td>5.1%</td>
+<td><strong>2.3%</strong></td>
+</tr>
+<tr>
+<td>不可达面合格</td>
+<td>63.0%</td>
+<td><strong>80.9%</strong></td>
+</tr>
+<tr>
+<td>切长</td>
+<td>108 m</td>
+<td>111.5 m（+3%）</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>只多切 3%，因为翻面那道只真的去切背面的料</strong>——不是把整个件再跑一遍。</p>
+<h3 id="_72">没做的（别当成已经做了）</h3>
+<ul>
+<li>翻面那道<strong>没有再走一轮清根</strong>：清根目标点是第一套之前算的。</li>
+<li>翻面后的<strong>毛坯状态</strong>用的是原始长方体，不是"第一套切完的样子"——
+  第二套会多切一些空气（刀路正确，只是空行程）。真实装夹还要考虑
+  第一套留下的基准面、压板位置和让刀。</li>
+<li>第二套的<strong>装夹基准</strong>只给了 G55 和"原点在翻面后毛坯上表面中心"的注释，
+  实际对刀要按机床/夹具改。</li>
+</ul>
+<h2 id="43-11-06">43. 多线程利用率：一半的墙钟在单线程里（11-06 深夜）</h2>
+<p>"多线程利用率不高"——先给报告加了五项拆分，然后照着数据改。</p>
+<h3 id="_73">诊断</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>仿真：271.5 s / 139527 块 / 135153 段
+  ├ 切削 121.3 s（45%）/ 比对 150.1 s / 其它 0.0 s（0%）/ 线程 24
+</code></pre></div>
+
+<p><strong>55% 的墙钟花在解析过切扫描上，而它当时是纯串行的</strong>——24 个线程只有 1 个在跑。
+切削那 45% 也没吃满：<code>CNCSIM_THREADS=1</code> 时切削 171 s，24 线程 122 s，<strong>只快 1.4×</strong>。</p>
+<h3 id="_74">三个修复</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>问题</th>
+<th>处置</th>
+<th>证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>解析扫描串行</td>
+<td><code>scan_gouge</code> / <code>sweep_deviation</code> 按块并行（<code>par::map_indexed</code>，按块号归位）</td>
+<td>比对 150 → <strong>19.5 s</strong>（7.7×），1 线程 151 s 对拍</td>
+</tr>
+<tr>
+<td>2</td>
+<td>细长批次永远不进池</td>
+<td><code>MIN_PAR_WORK</code> 改判<strong>各段 AABB 的体积和</strong>，不是整批 AABB 的体积：256 段沿走刀排开时整批 AABB 是 133×1×1=133 体素，而真活是 13 万体素</td>
+<td>单批并行片数 1 → 7</td>
+</tr>
+<tr>
+<td>3</td>
+<td>只沿一个轴切片</td>
+<td>三轴按<strong>叶层</strong>切，片数按<strong>乘积</strong>控制在 2×线程</td>
+<td>片数 7 → <strong>60</strong>（h=0.6 一度到 1014，那是按"加刀次数"控制的 bug）</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="22-154-148-h06">结果（桌腿件，22 道工序 / 15.4 万块 / 14.8 万段，h=0.6）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>之前</th>
+<th>之后</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>仿真墙钟</td>
+<td>339.3 s</td>
+<td><strong>76.5 s</strong>（最好）／113 s（中位）／184 s（机器忙时）</td>
+</tr>
+<tr>
+<td>切削</td>
+<td>—</td>
+<td>53.9 s（71%）</td>
+</tr>
+<tr>
+<td>比对</td>
+<td>~150 s（单线程）</td>
+<td>22.5 s</td>
+</tr>
+<tr>
+<td>单批并行片数</td>
+<td>1</td>
+<td>60</td>
+</tr>
+<tr>
+<td>去料 / 合格率</td>
+<td>64528.7 mm³ / 96.5%</td>
+<td><strong>逐位一致</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>墙钟抖动 ±50%（机器负载），所以"3~4.4×"这个区间比单次数值可信。
+<strong>结果逐位不变</strong>是有保证的：并行只按块号摊平，<code>tests/parallel.rs</code> 拿分块数当旋钮对拍。</p>
+<h3 id="_75">试过没用的</h3>
+<ul>
+<li><strong>加密段索引 8 倍</strong>（5 万格 → 40 万格）：比对 59.6 → 64.2 s，更慢。
+  瓶颈不在"桶里有多少段"，而在<strong>每段 <code>sd_sweep</code> 本身</strong>。已回退。</li>
+<li>下一步真要再快，得在数学上做：比如按段分块求值（每段只在自己 AABB 里
+  算一遍，而不是每个设计点重算一遍附近所有段），那是另一套数据结构。</li>
+</ul>
 </main>
 </div>
 <script>

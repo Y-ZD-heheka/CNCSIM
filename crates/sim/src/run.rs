@@ -166,6 +166,9 @@ pub struct RunStats {
     pub compare_ms: f64,
     /// 观察者取消了这次仿真。**结果只覆盖到取消时的块**——体积/报警反映部分状态。
     pub cancelled: bool,
+    /// 整份程序里**单批并行片数的最大值**：1 说明切削一直走串行路径，
+    /// 那是"多线程利用率低"的直接证据（见 `CutStats::par_slices`）。
+    pub max_par_slices: usize,
 }
 
 /// 一条进度事件（观察者）。**只观察，不参与计算**——回调做什么都不影响结果，
@@ -428,7 +431,8 @@ pub fn run_tools_observed(
         if pending_tool != Some(tool.number) {
             if !pending.is_empty() {
                 let t0 = std::time::Instant::now();
-                grid.cut_batch(&pending, &tool.cutter);
+                let cs = grid.cut_batch(&pending, &tool.cutter);
+                stats.max_par_slices = stats.max_par_slices.max(cs.par_slices);
                 cut_ms += t0.elapsed().as_secs_f64() * 1e3;
                 pending.clear();
             }
@@ -461,7 +465,8 @@ pub fn run_tools_observed(
                     pending.push((cur, next));
                     if pending.len() >= cut_batch {
                         let t0 = std::time::Instant::now();
-                        grid.cut_batch(&pending, &tool.cutter);
+                        let cs = grid.cut_batch(&pending, &tool.cutter);
+                        stats.max_par_slices = stats.max_par_slices.max(cs.par_slices);
                         cut_ms += t0.elapsed().as_secs_f64() * 1e3;
                         pending.clear();
                     }
@@ -477,7 +482,8 @@ pub fn run_tools_observed(
             // 网格状态严格等于"这一段之前"。关碰撞时（CAM 链）不用冲。
             if !pending.is_empty() && bodies[tool_idx].is_some() {
                 let t0 = std::time::Instant::now();
-                grid.cut_batch(&pending, &tool.cutter);
+                let cs = grid.cut_batch(&pending, &tool.cutter);
+                stats.max_par_slices = stats.max_par_slices.max(cs.par_slices);
                 cut_ms += t0.elapsed().as_secs_f64() * 1e3;
                 pending.clear();
             }
@@ -519,7 +525,8 @@ pub fn run_tools_observed(
         if let Some(tn) = pending_tool
             && let Some(td) = tools.by_number(tn)
         {
-            grid.cut_batch(&pending, &td.cutter);
+            let cs = grid.cut_batch(&pending, &td.cutter);
+            stats.max_par_slices = stats.max_par_slices.max(cs.par_slices);
         }
         cut_ms += t0.elapsed().as_secs_f64() * 1e3;
         pending.clear();

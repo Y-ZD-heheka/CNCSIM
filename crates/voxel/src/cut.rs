@@ -111,6 +111,8 @@ pub struct CutStats {
     pub changed: usize,
     /// 裁剪后的 AABB 尺寸（体素）
     pub box_size: [i32; 3],
+    /// 这一批实际切成了几片（1 = 走的串行路径）。诊断"多线程用不上"用。
+    pub par_slices: usize,
 }
 
 /// 检测"沿单轴走刀"：返回走刀轴（0=x, 1=y）。
@@ -496,6 +498,20 @@ impl<S: Scalar> SparseGrid<S> {
         let band = self.config.band_mm();
         let volume =
             stats.box_size[0] as usize * stats.box_size[1] as usize * stats.box_size[2] as usize;
+        // **真正的"活有多少"是各段 AABB 的并，不是整批 AABB 的体积。**
+        // 一批 256 段沿走刀方向排开时，整批 AABB 是一条又长又薄的条
+        // （h=1.2 实测 133×1×1 = 133 体素），按它判"活太小"就永远不进池——
+        // 实测 24 线程下切削只比单线程快 1.4×（171 → 122 s），根因就在这。
+        // 每段自己的 AABB（含刀半径 + 窄带外扩）才是要算的体素，求和即可
+        // （重叠会重复计，那只会让"该并行"更容易成立，方向是安全的）。
+        let work: usize = segs
+            .iter()
+            .map(|s| {
+                (0..3)
+                    .map(|a| (s.hi[a] - s.lo[a]).max(0) as usize)
+                    .product::<usize>()
+            })
+            .sum();
 
         // 小活不开线程：一次 24 线程 fork-join 实测 ~0.5 ms，体积不到 2 万体素时
         // 光分摊开销就吃掉收益。
@@ -504,59 +520,97 @@ impl<S: Scalar> SparseGrid<S> {
         // 而预创建要付每刀约 750 次三级查找。叶不存在的那些块留给串行的
         // `blit_leaf` 就地创建，反而更快。
 
-        // ── 分片策略 ──
+        // ── 分片策略：**三轴都切** ──
         //
-        // 两个约束互相拉扯：
-        //
-        // 1. **边界要落在叶边界上**：片内的叶才是完整的，整块写回才生效
-        //    （按体素层切会把每片的叶都切成残块，实测整块路径一次都走不到）。
-        // 2. **片数要够喂满线程**：片数受限于"分片轴上有多少个叶层"。
-        //
-        // 所以选**叶层最多的那个轴**来切。铣光的 AABB 是 284×34×38 体素：
-        // x 方向 36 个叶层、y/z 各只有 5 个——死按 z 切，片数被 clamp 到 5，
-        // 24 线程只有 5 个在跑（实测求值只加速 4.9×）。按 x 切就能切满。
+        // 约束没变：片边界要落在叶边界上（片内的叶才完整，整块写回才生效）。
+        // 变的是"只沿一个轴切"→"三轴按叶层切"：桌腿件 h=1.2 实测单批最大
+        // 并行片数只有 **7**（24 线程只有 7 个在跑，利用率 29%），因为一个轴
+        // 上的叶层数就那么多。三轴切之后片数是三个方向叶层数的乘积，
+        // 按 2×线程数封顶。
         let nleaf = [
             ((hi[0] + LEAF_DIM - 1) >> LEAF_LOG2) - (lo[0] >> LEAF_LOG2),
             ((hi[1] + LEAF_DIM - 1) >> LEAF_LOG2) - (lo[1] >> LEAF_LOG2),
             ((hi[2] + LEAF_DIM - 1) >> LEAF_LOG2) - (lo[2] >> LEAF_LOG2),
         ];
-        let axis = (0..3).max_by_key(|&a| nleaf[a]).unwrap_or(0);
-        let nleaf_axis = nleaf[axis] as usize;
-        let l0_axis = lo[axis] >> LEAF_LOG2;
+        let l0 = [lo[0] >> LEAF_LOG2, lo[1] >> LEAF_LOG2, lo[2] >> LEAF_LOG2];
 
-        let slices = if slices > 0 {
-            slices.min(nleaf_axis).max(1)
-        } else if volume >= crate::par::MIN_PAR_WORK && crate::par::worker_count() > 1 {
-            // 片数取 2× 线程数：工作量并不均匀（大量体素因 `d_cur >= band` 跳过），
-            // 片比线程多，动态领号才能把尾巴吃掉。
-            (crate::par::worker_count() * 2).min(nleaf_axis).max(1)
-        } else {
-            1
-        };
-
-        if slices > 1 {
-            let per = nleaf_axis.div_ceil(slices);
+        let threads = crate::par::worker_count();
+        let big_enough = work.max(volume) >= crate::par::MIN_PAR_WORK && threads > 1;
+        // 每轴切几片：按叶层数的几何平均分，贪心往"每片叶层最多"的轴加刀
+        let mut splits = [1usize; 3];
+        if slices > 0 {
+            // 对拍入口：强制 1D（沿叶层最多的轴）
+            let axis = (0..3).max_by_key(|&a| nleaf[a]).unwrap_or(0);
+            splits = [1, 1, 1];
+            splits[axis] = slices.min(nleaf[axis] as usize).max(1);
+        } else if big_enough {
+            // 目标是**片数乘积** ≈ 2×线程，不是"加几刀"。按次数加会乘出上千片
+            // （h=0.6 实测 1014 片），而每片都要过一遍 14.7 万段的段表——
+            // 那是 O(片数×段数) 的白活。
+            let want = threads * 2;
+            loop {
+                let total = splits[0] * splits[1] * splits[2];
+                if total >= want {
+                    break;
+                }
+                let mut best = usize::MAX;
+                let mut best_v = 0.0f64;
+                for a in 0..3 {
+                    let room = nleaf[a] as usize;
+                    if splits[a] >= room || room == 0 {
+                        continue;
+                    }
+                    let v = room as f64 / splits[a] as f64;
+                    if v > best_v {
+                        best_v = v;
+                        best = a;
+                    }
+                }
+                if best == usize::MAX {
+                    break;
+                }
+                splits[best] += 1;
+            }
+        }
+        let slices_total = splits[0] * splits[1] * splits[2];
+        if slices_total > 1 {
             let grid: &Self = self;
             let t_eval = std::time::Instant::now();
-            let parts = crate::par::map_indexed(slices, |i| {
-                // 叶层范围 → 体素范围，再与 AABB 求交（对齐后首尾片会越界）
-                let w0 = ((l0_axis + (i * per) as i32) << LEAF_LOG2).max(lo[axis]);
-                let w1 = ((l0_axis + ((i + 1) * per) as i32) << LEAF_LOG2)
-                    .min(hi[axis])
-                    .max(w0);
-                if w0 >= w1 {
-                    return CutPart::empty();
-                }
+            let parts = crate::par::map_indexed(slices_total, |k| {
+                // k → 三轴的下标（先 x 后 y 后 z，顺序固定 → 结果与线程数无关）
+                let iy = k / splits[2] % splits[1];
+                let iz = k % splits[2];
+                let ix = k / (splits[1] * splits[2]);
+                let idx = [ix, iy, iz];
                 let mut a = lo;
                 let mut b = hi;
-                a[axis] = w0;
-                b[axis] = w1;
-                // 只把**真的碰到这一片**的段带进去：铣光一片 2 个叶层（3.2 mm），
-                // 而一段的 z 跨度是刃长 6 mm——200 段里只有二十来段落在这一片。
+                for ax in 0..3 {
+                    let n = nleaf[ax] as usize;
+                    if n == 0 {
+                        return CutPart::empty();
+                    }
+                    // 把 n 个叶层尽量均分成 splits[ax] 段（余数摊到前几段）
+                    let q = n / splits[ax];
+                    let r = n % splits[ax];
+                    let start = l0[ax]
+                        + (idx[ax] * q + idx[ax].min(r)) as i32;
+                    let len = q + usize::from(idx[ax] < r);
+                    // 叶层 → 体素，再与 AABB 求交（首尾片会越界）
+                    let w0 = (start << LEAF_LOG2).max(lo[ax]);
+                    let w1 = ((start + len as i32) << LEAF_LOG2).min(hi[ax]).max(w0);
+                    if w0 >= w1 {
+                        return CutPart::empty();
+                    }
+                    a[ax] = w0;
+                    b[ax] = w1;
+                }
+                // 只把**真的碰到这一块**的段带进去
                 let sub: Vec<Seg> = segs
                     .iter()
                     .copied()
-                    .filter(|s| s.lo[axis] < w1 && s.hi[axis] > w0)
+                    .filter(|s| {
+                        (0..3).all(|ax| s.lo[ax] < b[ax] && s.hi[ax] > a[ax])
+                    })
                     .collect();
                 if sub.is_empty() {
                     return CutPart::empty();
@@ -564,6 +618,7 @@ impl<S: Scalar> SparseGrid<S> {
                 grid.cut_box(a, b, &sub, profile, band)
             });
             let eval_ns = t_eval.elapsed().as_nanos() as u64;
+            stats.par_slices = slices_total;
             let t_write = std::time::Instant::now();
             self.write_parts(parts, &mut stats);
             if prof_enabled() {

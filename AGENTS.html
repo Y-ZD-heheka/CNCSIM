@@ -584,6 +584,10 @@ testdata/         golden CSV + design_box.stl
 <td>✅ <code>--dry</code>（<code>RunConfig::dry_run</code>）：只走刀路不切材料，解析口径的数字一模一样（测试钉住段数/端点/刀号逐段一致）。桌腿件 139527 块 424 s → <strong>51 s</strong>（8.3×），调刀路时用它，最后再跑一次全量仿真出体积/预览</td>
 </tr>
 <tr>
+<td>多线程利用率</td>
+<td>✅ 报告加五项拆分（切削/比对/其它/线程/单批并行片数）。三处修复：解析扫描并行（150 → 22.5 s，1 线程 151 s 对拍）、<code>MIN_PAR_WORK</code> 改判<strong>各段 AABB 体积和</strong>（细长批以前永远不进池）、分片从 1D 改<strong>三轴</strong>并按片数乘积控制（片数 1 → 60）。桌腿件 22 道 h=0.6：<strong>339 → 76.5 s</strong>（最好）/113 s（中位），结果逐位一致</td>
+</tr>
+<tr>
 <td>比对性能</td>
 <td>✅ 解析过切加段空间索引 + 两段扫描（区域细扫 + 全局 8× 粗扫）：桌腿件 9 道 h=3 的仿真 158.8 → <strong>38.5 s</strong>（4.1×），其中解析过切 135.8 → 16.0 s；<code>gouge_max_depth</code> 与逐点值差 2%</td>
 </tr>

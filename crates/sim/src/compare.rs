@@ -385,7 +385,9 @@ impl SegGrid {
         if longest <= 1e-9 || !longest.is_finite() {
             return None;
         }
-        // 目标 ~5 万格：格子太粗桶里段太多，太细建表本身变慢
+        // 目标 ~5 万格：格子太粗桶里段太多，太细建表本身变慢。
+        // 实测把格子加密 8 倍（40 万格）反而更慢（比对 59.6 → 64.2 s）：
+        // 瓶颈不在桶里的段数，而在**每段 sd_sweep 本身**。已回退。
         let mut cell = (longest / 36.0).max(1e-6);
         let mut n;
         loop {
@@ -605,7 +607,22 @@ pub fn sweep_deviation(
     margin: f64,
 ) -> Vec<f64> {
     let ix = SweepIndex::new(segments, tools, margin);
-    points.iter().map(|p| ix.nearest(*p).0).collect()
+    let n = cncsim_voxel::par::worker_count();
+    let chunks = (points.len() / 4000).clamp(1, n * 2).max(1);
+    if chunks == 1 {
+        return points.iter().map(|p| ix.nearest(*p).0).collect();
+    }
+    let per = points.len().div_ceil(chunks);
+    // 按块号归位：`map_indexed` 保证输出顺序与串行一致，换线程数结果逐位相同
+    let parts = cncsim_voxel::par::map_indexed(chunks, |i| {
+        let a = (i * per).min(points.len());
+        let b = ((i + 1) * per).min(points.len());
+        points[a..b]
+            .iter()
+            .map(|p| ix.nearest(*p).0)
+            .collect::<Vec<f64>>()
+    });
+    parts.concat()
 }
 
 /// 解析口径的偏差统计（`+∞` 统一按 `far` 封顶）。
@@ -715,21 +732,18 @@ fn analytic_gouge(
     // 全用细步距是 110 万点 × 5.5 万段（158 s 里 135 s）；只做 ② 会漏掉区域外的
     // 深点（实测最深从 0.2647 掉到 0.0647）；两段一起 ~15 s 且两者都保住。
     let coarse_k = 8.0f64;
-    let mut best = GougeBest::default();
-    scan_gouge(
-        design_surface_points_strided(design, step * coarse_k, coarse_k as usize),
-        None,
-        &ix,
-        tol,
-        &mut best,
-    );
-    scan_gouge(
-        design_surface_points(design, step),
-        hint,
-        &ix,
-        tol,
-        &mut best,
-    );
+    // 两个口径的点先收成 Vec 再并行扫。**这是 55% 墙钟**：桌腿件 h=1.2 实测
+    // 仿真 271 s 里切削 121 s（已在池里）、这段解析扫描 150 s（原来纯串行，
+    // 24 线程只用得上 1 个）。收点本身是 158 万次浮点，几十毫秒。
+    let coarse: Vec<DVec3> =
+        design_surface_points_strided(design, step * coarse_k, coarse_k as usize).collect();
+    let fine: Vec<DVec3> = design_surface_points(design, step).collect();
+    let n_coarse = coarse.len();
+    let n_fine = fine.len();
+    let a = scan_gouge(&coarse, None, &ix, tol);
+    let b = scan_gouge(&fine, hint, &ix, tol);
+    let mut best = if b.depth > a.depth { b } else { a };
+    best.points = n_coarse + n_fine;
     (
         best.depth,
         best.at,
@@ -751,15 +765,45 @@ struct GougeBest {
     points: usize,
 }
 
-/// 在内层循环里维护"最深过切"。
+/// 并行扫描一批设计面点，返回最深的那一处（深度并列时取**下标最小**的，
+/// 分块顺序固定 → 结果与线程数无关）。
 fn scan_gouge(
-    pts: impl Iterator<Item = DVec3>,
+    pts: &[DVec3],
     hint: Option<(DVec3, DVec3)>,
     ix: &SweepIndex<'_>,
     tol: f64,
-    best: &mut GougeBest,
-) {
-    for p in pts {
+) -> GougeBest {
+    // 每块至少 4000 点：再碎就是拿 5 µs 的池往返换几十微秒的活
+    let n = cncsim_voxel::par::worker_count();
+    let chunks = (pts.len() / 4000).clamp(1, n * 2).max(1);
+    if chunks == 1 {
+        return scan_range(pts, hint, ix, tol);
+    }
+    let per = pts.len().div_ceil(chunks);
+    let parts = cncsim_voxel::par::map_indexed(chunks, |i| {
+        let a = (i * per).min(pts.len());
+        let b = ((i + 1) * per).min(pts.len());
+        scan_range(&pts[a..b], hint, ix, tol)
+    });
+    let mut best = GougeBest::default();
+    for p in parts {
+        if p.depth > best.depth {
+            best = p;
+        }
+    }
+    best.points = pts.len();
+    best
+}
+
+/// 单块的扫描本体。
+fn scan_range(
+    pts: &[DVec3],
+    hint: Option<(DVec3, DVec3)>,
+    ix: &SweepIndex<'_>,
+    tol: f64,
+) -> GougeBest {
+    let mut best = GougeBest::default();
+    for &p in pts {
         best.points += 1;
         // 区域细扫只在这个盒子里做；全局粗扫传 None
         if let Some((lo, hi)) = hint
@@ -784,6 +828,7 @@ fn scan_gouge(
             }
         }
     }
+    best
 }
 
 /// 设计面采样点（扁平迭代器）。
