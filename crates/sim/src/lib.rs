@@ -7,12 +7,14 @@
 
 pub mod compare;
 pub mod demo;
+pub mod form;
 pub mod hemisphere;
 pub mod job;
 pub mod playback;
 pub mod reach;
 pub mod run;
 pub mod stock;
+pub mod similarity;
 pub mod surface_dev;
 
 use cncsim_math::DVec3;

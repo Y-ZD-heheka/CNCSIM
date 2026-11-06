@@ -88,6 +88,12 @@ pub struct RunConfig {
     /// 变成切屑，场里却原地飘着，预览上就是一层莫名其妙的小方块。打开后做一次
     /// 6 邻域连通块标记，只留最大块。代价约 O(毛坯域体素)，花瓶中 h=1 约 0.3 s。
     pub drop_chips: bool,
+    /// **只走刀路、不切材料**：产出 `cut_segs` 后跳过切削 / 丢碎屑 / 设计比对。
+    ///
+    /// 存在的理由是一个数量级的差别：解析口径（`compare::sweep_deviation`）
+    /// 只依赖 `cut_segs`，与体素 `h` 无关。调刀路时不必为每个方案等整套体素
+    /// 仿真——桌腿件 h=0.6 是 424 s，"体检"是 2 s（只差在切不切材料）。
+    pub dry_run: bool,
 }
 
 impl Default for RunConfig {
@@ -110,6 +116,7 @@ impl Default for RunConfig {
             gouge_tol: DEFAULT_GOUGE_TOL_MM,
             nonlinear_samples: 32,
             drop_chips: false,
+            dry_run: false,
         }
     }
 }
@@ -450,14 +457,16 @@ pub fn run_tools_observed(
                 // 够不到并行阈值——12 万段全串行，多核利用率极低。
                 // `cut_batch` 与逐段 `cut_segment` **逐位等价**（CSG 是 max，
                 // 交换律/结合律 + 量化幂等），攒够一批再切，AABB 变大就能并行。
-                pending.push((cur, next));
-                stats.cut_segments += 1;
-                if pending.len() >= cut_batch {
-                    let t0 = std::time::Instant::now();
-                    grid.cut_batch(&pending, &tool.cutter);
-                    cut_ms += t0.elapsed().as_secs_f64() * 1e3;
-                    pending.clear();
+                if !cfg.dry_run {
+                    pending.push((cur, next));
+                    if pending.len() >= cut_batch {
+                        let t0 = std::time::Instant::now();
+                        grid.cut_batch(&pending, &tool.cutter);
+                        cut_ms += t0.elapsed().as_secs_f64() * 1e3;
+                        pending.clear();
+                    }
                 }
+                stats.cut_segments += 1;
             } else if matches!(block.motion, MotionKind::Rapid) {
                 stats.rapid_segments += 1;
             }
@@ -519,7 +528,7 @@ pub fn run_tools_observed(
     // ── 悬浮碎屑：切下来却还挂着的那几块，按"掉成切屑"处理 ──
     // 必须在体积统计和设计比对**之前**做，否则它们会被算成残留。
     let mut chips = 0usize;
-    if cfg.drop_chips {
+    if cfg.drop_chips && !cfg.dry_run {
         chips = grid.drop_floating_islands();
     }
     stats.volume_after = grid.material_volume();
@@ -528,7 +537,9 @@ pub fn run_tools_observed(
 
     // ── 设计模型比对（过切 / 残留）──
     let mut cmp = compare::DesignComparison::default();
-    if let Some(design) = &cfg.design {
+    if let Some(design) = &cfg.design
+        && !cfg.dry_run
+    {
         let t0 = std::time::Instant::now();
         cmp = compare::compare_with_design(
             &grid,
@@ -1114,6 +1125,37 @@ M30
             a.report.programmed_time_s,
             b.report.programmed_time_s
         );
+    }
+
+    #[test]
+    fn dry_run_keeps_the_same_cut_segments_and_touches_no_material() {
+        // `--dry` 只跳过切削：刀路段（解析口径的唯一输入）必须逐段一致，
+        // 否则"刀路体检"和真跑测的不是同一份刀路。
+        let prog = interpret(SAFE, &InterpConfig::default());
+        let mut c = cfg();
+        c.design = Some(DesignModel::Box {
+            min: DVec3::ZERO,
+            max: DVec3::new(20.0, 20.0, 10.0),
+        });
+        let full = run(&prog, &tool(), &c);
+        let mut dc = c.clone();
+        dc.dry_run = true;
+        let dry = run(&prog, &tool(), &dc);
+
+        assert!(!full.cut_segs.is_empty());
+        assert_eq!(full.cut_segs.len(), dry.cut_segs.len(), "段数必须一致");
+        for (a, b) in full.cut_segs.iter().zip(&dry.cut_segs) {
+            assert_eq!((a.tool, a.block, a.line), (b.tool, b.block, b.line));
+            assert!((a.from.tip - b.from.tip).length() < 1e-12);
+            assert!((a.to.tip - b.to.tip).length() < 1e-12);
+        }
+        // 真跑切了料；dry 一克没动
+        assert!(full.report.removed_volume_mm3 > 0.0);
+        assert_eq!(dry.report.removed_volume_mm3, 0.0);
+        assert_eq!(dry.stats.volume_after, dry.stats.volume_before);
+        // dry 不做设计比对（场没变，比出来的数只会是假的）
+        assert_eq!(dry.report.gouge_volume_mm3, 0.0);
+        assert_eq!(dry.report.residual_volume_mm3, 0.0);
     }
 
     #[test]

@@ -259,6 +259,13 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#6-float">6. 一个容易忽略的坑：不要用 float 当索引</a></li>
 <li><a href="#7">7. 验收口径（修正）</a></li>
 <li><a href="#8">8. 一句话</a></li>
+<li><a href="#9-cam">9. CAM 侧的精度预算：刀路、仿真、判据三段，是三个数量级</a><ul>
+<li><a href="#91">9.1 三段一览</a></li>
+<li><a href="#92-002003-mm">9.2 实测：整链在光滑曲面上是 0.02–0.03 mm</a></li>
+<li><a href="#93">9.3 怎么用这三个数</a></li>
+<li><a href="#94">9.4 一句话</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -754,6 +761,152 @@ h=0.1、R_c=3 时总误差从 2.0 µm 降到 <strong>0.42 µm</strong>（插值�
 <hr />
 <h2 id="8">8. 一句话</h2>
 <p><strong>float 够用，但问题问错了方向</strong>：精度瓶颈在 <code>i8</code> 量化（3.15 µm/档）与三线性重建（<code>h²/(8R_c)</code>），都不在 float 宽度。换 f64 对 SDF 精度零收益；要提精度先降 h（插值项 ∝h²、量化 ∝h），再考虑换 <code>i16</code>（2× 内存换 258× 量化精度）。而标量路径用 f64 是<strong>免费</strong>的——因为标量 double 和 float 在 x86-64 上同速。</p>
+<hr />
+<h2 id="9-cam">9. CAM 侧的精度预算：刀路、仿真、判据三段，是三个数量级</h2>
+<p>上面 §1–§8 谈的是<strong>内核</strong>（float 宽度、<code>i8</code> 量化）。被问到"CAM 的计算精度是多少"时，
+真正要回答的是<strong>整链</strong>——而它由三段完全不同的东西决定，混在一起说就会得出错的结论。</p>
+<h3 id="91">9.1 三段一览</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>段</th>
+<th>误差源</th>
+<th>量级</th>
+<th>依据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>① 刀位数学</strong></td>
+<td>f64 解析式</td>
+<td><strong>&lt; 1e-9 mm</strong></td>
+<td><code>ball_center_matches_the_surface_on_a_flat_plane</code>（平面上刀心 = z+R，断言 1e-9）</td>
+</tr>
+<tr>
+<td>回转轮廓</td>
+<td>0.5°×0.25 mm 细网格 + 双线性</td>
+<td><strong>0.005 mm</strong></td>
+<td>花瓶：<code>rd</code> 与解析半径差（§26）</td>
+</tr>
+<tr>
+<td>G 代码输出</td>
+<td><code>{:.4}</code></td>
+<td><strong>0.1 µm</strong>（XYZ）/ <strong>0.0001°</strong>（A/C，R=100 处 ≈ 0.17 µm）</td>
+<td><code>Emit</code> / <code>rotary</code> 的格式串</td>
+</tr>
+<tr>
+<td><strong>② 刀路离散</strong></td>
+<td>沿程直线插值（<code>sample_mm</code>）</td>
+<td><strong>0.022 mm</strong></td>
+<td>relief 精加工实测过切（改成沿路径密采样后从 0.032 降下来）</td>
+</tr>
+<tr>
+<td>行距残留（scallop）</td>
+<td><code>p²/(8R)</code></td>
+<td>Ø3 + 1.2 mm → <strong>0.12 mm</strong>；Ø2 尖 R1 + 0.5 mm → <strong>0.031 mm</strong></td>
+<td>公式；multi 默认 <code>0.4×D</code></td>
+</tr>
+<tr>
+<td><strong>③ 仿真测量</strong></td>
+<td><code>i8</code> 量化 <code>4h/127</code></td>
+<td><strong>0.019 mm</strong> @h=0.6；0.031 @h=1.0</td>
+<td><code>to_distance</code>：<code>v/127 × band_mm</code></td>
+</tr>
+<tr>
+<td>三线性重建</td>
+<td><code>h²/(8R_c)</code>，棱边 h/2</td>
+<td>0.02–0.25 mm</td>
+<td>§2.2</td>
+</tr>
+<tr>
+<td>面提取（Surface Nets）</td>
+<td>顶点落在符号变化边上再平均</td>
+<td><strong>0.35h</strong>（实测 H 0.177 @ h=0.5）</td>
+<td>同一网格自比</td>
+</tr>
+<tr>
+<td><strong>判据分辨率</strong></td>
+<td><code>tol</code> 与 <code>h</code> 的关系</td>
+<td><code>tol ≥ 2h</code> 才有意义</td>
+<td>h=3 时 31% 过切全是量化噪声</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="92-002003-mm">9.2 实测：整链在光滑曲面上是 0.02–0.03 mm</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>试件</th>
+<th>口径</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>解析半球（A 30..90°）</td>
+<td>名义面逐点</td>
+<td>平均 <strong>0.010–0.032 mm</strong>，100% 落在 ±0.15</td>
+</tr>
+<tr>
+<td>圆柱闭环</td>
+<td>沿半径二分</td>
+<td>最差 <strong>0.12 mm</strong>，P95 <strong>0.067</strong>，100% ≤0.15</td>
+</tr>
+<tr>
+<td>同一网格自比（h=0.5）</td>
+<td><code>sim::similarity</code></td>
+<td>Hausdorff <strong>0.177</strong> / Chamfer <strong>0.006</strong> / IoU <strong>1.0000</strong> / F1 <strong>0.9989</strong> / 法向一致 <strong>1.000</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>第三行是<strong>测量系统的底噪</strong>：同一块料自己比自己，读数却不是 0——峰值 0.177 mm
+全部来自棱边处的离散化，平均值只有 6 µm。<strong>任何小于这个底噪的结论都不成立。</strong></p>
+<h3 id="93">9.3 怎么用这三个数</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>能信到</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>光滑自由曲面（球、圆柱、放样面）</td>
+<td><strong>0.02–0.03 mm</strong></td>
+<td>与刀路离散同级</td>
+</tr>
+<tr>
+<td>尖角 / 棱边 / 陡壁</td>
+<td><strong>≈0.35h</strong></td>
+<td>被面提取主导，别用 0.15 的判据</td>
+</tr>
+<tr>
+<td>判据 <code>tol = 0.15</code> 配 <code>h = 0.6</code></td>
+<td>勉强够</td>
+<td>已经接近底噪（0.177），置信度低</td>
+</tr>
+<tr>
+<td>判据 <code>tol = 0.15</code> 配 <code>h = 3</code></td>
+<td><strong>无意义</strong></td>
+<td>量化 0.094 mm、棱边 1 mm，读数全是噪声</td>
+</tr>
+<tr>
+<td>想要 0.05 mm 级判据</td>
+<td>需 <code>h ≤ 0.25</code></td>
+<td>体素 ×8、仿真时间 ×8 起</td>
+</tr>
+<tr>
+<td>想要 µm 级（粗糙度 Sa/Sq）</td>
+<td><strong>做不到</strong></td>
+<td>h 比粗糙度尺度大 2–3 个数量级；ISO 25178 那套在这层没有意义</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="94">9.4 一句话</h3>
+<p><strong>刀位是 0.1 µm（输出量化），刀路是 0.03–0.12 mm（离散），仿真是 0.02–0.35h（体素）。</strong>
+答题时说的是哪一段，比报一个数字重要——把"仿真底噪 0.18 mm"当成"CAM 算不准"是错的，
+反过来把"刀位 0.1 µm"当成"结果能到 0.1 µm"也是错的。</p>
 </main>
 </div>
 <script>

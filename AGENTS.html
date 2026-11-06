@@ -269,11 +269,11 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 </aside>
 <main>
-<h1 id="agentsmd">AGENTS.md</h1>
+<h1 id="agentsmd">AGENTS.md</h1><div class="meta"><span class="chip hi">CAM</span><span class="chip hi">精度</span><span class="chip">口径</span></div>
 <blockquote>
 <p>给 AI agent / 新接手者的入口。<strong>先读这一页，再读 <code>docs/项目记忆.md</code>。</strong></p>
-<p>最后更新：2026-11-05 · 14 crate / <strong>518 测试全绿</strong> / 5 个外部依赖全最新
-（<code>cargo clippy</code> 有 8 条历史遗留告警，见 §2 注）</p>
+<p>最后更新：2026-11-06 · 14 crate / <strong>533 测试全绿</strong> / 5 个外部依赖全最新
+（<code>cargo clippy</code> 有 8 条历史遗留告警，见 §2 注；sim / app 零告警）</p>
 </blockquote>
 <hr />
 <h2 id="1">1. 这是什么</h2>
@@ -421,7 +421,7 @@ testdata/         golden CSV + design_box.stl
 </tr>
 <tr>
 <td><code>sim</code></td>
-<td>88</td>
+<td>98</td>
 <td><code>collide</code></td>
 <td>34</td>
 </tr>
@@ -556,6 +556,14 @@ testdata/         golden CSV + design_box.stl
 <td>✅ <strong>默认关</strong>，<code>--color</code> 显式开（<code>RunConfig::colorize</code>）：关掉时 <code>creator</code> <strong>一个字节都不分配</strong>、不写子块位图、<code>changed_mask</code> 走 <code>count_changed</code> 快路径——不是"不显示"，是那份工作根本不发生。几何逐体素一致（有测试），creator 0 B</td>
 </tr>
 <tr>
+<td>形位公差</td>
+<td>✅ <code>sim::form</code>：<strong>ISO 1101 最小区域法</strong>评平面度/圆柱度（区域宽度 <code>max−min</code>，基准用八方向模式搜索优化），同时给 LSQ 值作对照；表面点沿实际场梯度投影得到。分片=位置连通+法向 12°；分不出特征的归 <code>Freeform</code> 只报偏差。桌腿件 h=0.6：两个平面 0.028 / 0.360 mm（差 13 倍，整件均值看不出来）</td>
+</tr>
+<tr>
+<td>模型相似度</td>
+<td>✅ <code>sim::similarity</code>：双向 Hausdorff / Chamfer / F1@τ（P/R）/ IoU·Dice / 法向一致 / 有符号偏置；正向=设计面→实际场，反向=实际网格顶点→设计 SDF（<strong>反向不可省</strong>：远处的残料正向看不见）。自比标定 H 0.177 / Chamfer 0.006 / IoU 1.0000 @h=0.5，见 <code>docs/模型相似度评价.md</code></td>
+</tr>
+<tr>
 <td>可达性分析</td>
 <td>✅ <code>sim::reach</code>：对每个设计面采样点判「面朝 + 射线不被挡」（球体追踪），存 <code>facing</code>/<code>masks</code> 两张位图；够不到的面按空间连通块分组并给建议方向、A/C、bbox。封闭内腔（法向各向抵消）如实报「没有单一方向」而不是丢掉</td>
 </tr>
@@ -565,7 +573,15 @@ testdata/         golden CSV + design_box.stl
 </tr>
 <tr>
 <td>多方向保真度口径</td>
-<td>✅ <code>--multi</code> 也报<strong>名义曲面逐点偏差</strong>（设计面 0.8 mm 采点）：桌腿件 h=0.6 时平均 |d| 0.132 / P95 0.607 / 合格(≤0.15) 81.6%。实测行距减半只换 2 个点（142→339 s）、坡度放宽 45→70° 残料不降（38→130 s），两个旋钮都留成 <code>--finish-step</code> / <code>--slope</code> 但不默认启用</td>
+<td>✅ <strong>三个口径并排</strong>：体素（<code>surface_dev</code>，分辨力≈h）/ 解析（<code>sweep_deviation</code>，<strong>与 h 无关</strong>，点到刀具扫掠体并集的有符号距离）/ 体积（<code>compare_with_design</code>）。桌腿件 h=0.6：体素 合格 81.6% / 过切 5.8% / 最大 +1.55；解析 <strong>85.0% / 0.6% / +0.27</strong>。逐点归因（<code>attribute_points</code>）证明体素报的过切里 79% 没有任何刀具扫过——薄于一个体素的尖角被判成空气。<strong>验收看解析值</strong>；行距/坡度两个旋钮实测无效（见 §39）</td>
+</tr>
+<tr>
+<td>精加工刀径</td>
+<td>✅ 默认按工件尺度 <code>(短边/18).clamp(0.8,3.0)</code>，<code>--finish-d</code> 覆盖。这是<strong>唯一有效的保真度杠杆</strong>（凹角残料 <code>R(1/sin(θ/2)−1)</code> 面积 ∝ √R）：Ø3 85.0% / Ø1.5 91.6% / Ø1.0 94.1%，切长 45 / 84 / 123 m</td>
+</tr>
+<tr>
+<td>刀路体检</td>
+<td>✅ <code>--dry</code>（<code>RunConfig::dry_run</code>）：只走刀路不切材料，解析口径的数字一模一样（测试钉住段数/端点/刀号逐段一致）。桌腿件 139527 块 424 s → <strong>51 s</strong>（8.3×），调刀路时用它，最后再跑一次全量仿真出体积/预览</td>
 </tr>
 <tr>
 <td>比对性能</td>
@@ -632,20 +648,22 @@ testdata/         golden CSV + design_box.stl
 <hr />
 <h2 id="6">6. 下一步（按价值排序）</h2>
 <ol start="0">
-<li><strong>可达面上的过切</strong>（现在最该动的一处）。工序编排已把可达面积吃到几何上限
-   （桌腿件 78.6% → 86.4%），交叉表把剩下的问题切成了两半：
-   可达面 42476 点里 <strong>合格 86.0% / 过切 6.4% / 残料 7.6%</strong>；不可达面 6842 点里
-   残料 51.6%（那是翻面才能解决的）。所以残料基本不是刀路问题，
-   <strong>真正能改的是可达面上那 6.4% 的过切</strong>（最大 +1.55 mm，最深处
-   <code>(12.50, 23.62, 2.32)</code>，贴着 <code>x = 12.5</code> 的侧壁）。下一步先定位它属于
-   ① 设计场边界符号翻转（<code>mesh_to_field</code> 的窄带在 bbox 边缘）还是
-   ② 侧向工序 drop-cutter 在凸棱处抬刀不足，两者处置完全不同。</li>
+<li><strong>凹角清根（小刀只走残料）</strong>——现在最该动的一处。解析口径把问题定死了：
+   可达面上 8.3% 残料里 <strong>3308 点是"刀走过了但切不到"</strong>（凹角圆角），
+   只有 232 点是覆盖漏洞；&gt;1 mm 的 8305 点全在不可达面。刀径实验给出上限：
+   全局 Ø1 能到 94.1%（可达面 93.8%），但切长从 45 m 涨到 123 m。
+   差的是"只在小刀有用的地方用小刀"：残料点 → 每道方向的局部掩膜 →
+   Ø1 只在这些格子走刀。<code>finish_pass</code> 里加一个掩膜参数即可，
+   <code>Pass</code> 加 <code>rest: Option&lt;Vec&lt;DVec3&gt;&gt;</code>，用 <code>--dry</code> 量收益。</li>
 <li><strong>二次装夹（翻面）</strong>：桌腿件 13.6% 的面积在单次装夹下几何不可达
-   （背面 1732 mm² + 遮挡 328 mm²）。<code>reach</code> 已经把每片的 bbox 和建议方向算出来，
-   缺的是"翻面后重新以新的 −Z 为基准规划"这一步——<code>Frame</code> 已支持任意方向，
-   主要工作在装夹建模（毛坯改形、基准面重定位）。</li>
+   （背面 1732 mm² + 遮挡 328 mm²）。解析口径下这块折合约 17% 的残料面积，
+   是剩下最大的一块。做法已经清楚：绕 X 轴 180° 的位姿是<strong>精确的体素索引
+   置换</strong>（<code>(i,j,k) → (i, ny−1−j, nz−1−k)</code>，因为旋转中心取格心），
+   设计网格与 <code>cut_segs</code> 用同一个 <code>Frame</code> 变换即可；缺的是把两套工序的
+   <code>cut_segs</code> 拼起来算解析口径、以及毛坯在第二次装夹时的"已切状态"传递。</li>
 <li><strong>残料重切（小刀）</strong>：新覆盖的 1177 mm² 里大部分仍是残料，Ø3 球头放不进去。
-   需要"仿真后读残料 → 聚类 → 换 Ø1.5 补一道"，即真正的一轮闭环。</li>
+   需要"仿真后读残料 → 聚类 → 换 Ø1.5 补一道"，即真正的一轮闭环。
+   （与 #0 是同一件事，合并做。）</li>
 <li><strong>剖切平面进 Bevy</strong>——HTML 预览版已有（HUD 滑块 + <code>discard</code>），窗口里还没接。五轴件的内腔不剖开根本看不见。</li>
 <li><strong>点选面 → 反查 creator</strong>（ADR-005 §交互）。溯源数据已经有了，缺的是拾取 + 图例面板。</li>
 <li><strong><code>TileCache</code> 增量上传进窗口</strong>（<code>render</code> 侧 11× 已实测，差 Bevy 那一步）。</li>

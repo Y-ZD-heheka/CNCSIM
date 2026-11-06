@@ -367,14 +367,6 @@ fn voxel_compare(
     (gouge, resid_vol, resid_max, resid_at, region, resid_capped)
 }
 
-/// 解析过切：设计面采样点 × 每段扫掠 SDF。
-///
-/// 对每个设计面点问一个问题：**它是否曾被刀具包住？** `sd_sweep(p) < 0` ⟺ 点 p
-/// 在扫掠体内 ⟺ 刀从设计面之外切了过去。深度 = −sd_sweep（刀面越过设计点多少）。
-///
-/// 预筛：点在段扫掠 AABB（外扩 tol）之外 ⟹ 到扫掠体距离 ≥ 到 AABB 距离 > tol，
-/// 不可能是过切，跳过昂贵的 `sd_sweep`。
-#[allow(clippy::type_complexity)]
 /// 段的空间索引：设计面上的采样点只查**自己所在格**里的段。
 ///
 /// 原来是对每个点扫全部段（110 万点 × 5.5 万段 = 5.5e10 次 AABB 比较），
@@ -390,7 +382,7 @@ impl SegGrid {
     fn build(lo: DVec3, hi: DVec3, boxes: &[(DVec3, DVec3)]) -> Option<Self> {
         let ext = hi - lo;
         let longest = ext.x.max(ext.y).max(ext.z);
-        if !(longest > 1e-9) || !longest.is_finite() {
+        if longest <= 1e-9 || !longest.is_finite() {
             return None;
         }
         // 目标 ~5 万格：格子太粗桶里段太多，太细建表本身变慢
@@ -449,6 +441,259 @@ impl SegGrid {
     }
 }
 
+/// 扫掠体索引：段 AABB + **每段自己那把刀**的母线 + 空间分桶。
+///
+/// 解析过切与逐点归因共用同一份表。两处各建一次不只是慢一倍——"用哪把刀的
+/// 母线"会在两处各写一遍，那正是最容易悄悄走偏的地方（粗刀 φ6 与精刀 R1.5
+/// 的扫掠体差一个数量级）。
+struct SweepIndex<'a> {
+    segments: &'a [CutSegment],
+    boxes: Vec<(DVec3, DVec3)>,
+    cutters: Vec<&'a Profile>,
+    grid: Option<SegGrid>,
+    all: Vec<u32>,
+}
+
+impl<'a> SweepIndex<'a> {
+    /// `margin` 是 AABB 的外扩量：`nearest` 只能给出 `|sd| ≤ margin` 的精确值，
+    /// 更远的点返回 `+∞`（"刀具从没进到这么近"）。过切判定不受它影响——
+    /// 点在扫掠体内时必然落在扫掠 AABB 内。
+    fn new(segments: &'a [CutSegment], tools: &'a ToolTable, margin: f64) -> Self {
+        let cutters: Vec<&Profile> = segments
+            .iter()
+            .map(|s| &tools.by_number(s.tool).unwrap_or_else(|| tools.first()).cutter)
+            .collect();
+        let boxes: Vec<(DVec3, DVec3)> = segments
+            .iter()
+            .zip(&cutters)
+            .map(|(s, cutter)| {
+                let (lo, hi) = sweep_aabb(&s.from, &s.to, cutter);
+                let t = DVec3::new(margin, margin, margin);
+                (lo - t, hi + t)
+            })
+            .collect();
+        let whole = boxes.iter().fold(None::<(DVec3, DVec3)>, |acc, (lo, hi)| {
+            Some(match acc {
+                None => (*lo, *hi),
+                Some((alo, ahi)) => (
+                    DVec3::new(alo.x.min(lo.x), alo.y.min(lo.y), alo.z.min(lo.z)),
+                    DVec3::new(ahi.x.max(hi.x), ahi.y.max(hi.y), ahi.z.max(hi.z)),
+                ),
+            })
+        });
+        // 段索引：只在 `whole` 有界时建，退化情形（单段/空）走直扫
+        let grid = whole.and_then(|(lo, hi)| SegGrid::build(lo, hi, &boxes));
+        Self {
+            segments,
+            boxes,
+            cutters,
+            grid,
+            all: (0..segments.len() as u32).collect(),
+        }
+    }
+
+    /// 到**扫掠体并集**的最近有符号距离：`<0` 在刀扫过的体积里，`>0` 在材料侧。
+    ///
+    /// 返回 `(距离, 段号)`；没有候选段（比 `margin` 还远）时返回 `(+∞, None)`。
+    ///
+    /// 预筛：点在段扫掠 AABB（外扩 margin）之外 ⟹ 到扫掠体距离 > margin，
+    /// 不必算昂贵的 `sd_sweep`。这也保证 `|sd| ≤ margin` 时结果**精确**：
+    /// 距离扫掠体 ≤ margin 的段，其外扩 AABB 必然盖住这一点。
+    fn nearest(&self, p: DVec3) -> (f64, Option<usize>) {
+        let candidates: &[u32] = match &self.grid {
+            Some(g) => match g.cell_of(p) {
+                Some(k) => &g.buckets[k],
+                None => return (f64::INFINITY, None),
+            },
+            None => &self.all,
+        };
+        let mut best = f64::INFINITY;
+        let mut best_i = None;
+        for &si in candidates {
+            let si = si as usize;
+            let (lo, hi) = self.boxes[si];
+            if p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z {
+                continue;
+            }
+            let s = &self.segments[si];
+            let sd = sd_sweep(p, &s.from, &s.to, self.cutters[si]);
+            if sd < best {
+                best = sd;
+                best_i = Some(si);
+            }
+        }
+        (best, best_i)
+    }
+
+    /// 这一点被哪一段扫掠体侵入最深（返回段号与深度 mm）。`None` = 没有一段碰到。
+    fn deepest(&self, p: DVec3, tol: f64) -> Option<(usize, f64)> {
+        let (sd, si) = self.nearest(p);
+        match si {
+            Some(i) if sd < -tol => Some((i, -sd)),
+            _ => None,
+        }
+    }
+}
+
+/// 一个设计面点的**扫掠体归因**：这一点被哪把刀、哪一段切掉了多少。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointHit {
+    /// 侵入深度（mm）：>0 = 这一点在设计材料内，刀具却扫过了它。
+    pub depth: f64,
+    /// 切到它的**刀号**（多工序里刀号 = 2i+1 / 2i+2，可反推工序）。
+    pub tool: u16,
+    pub block: u32,
+    pub line: u32,
+    pub t_start: f64,
+}
+
+/// 逐点**扫掠体归因**（不经过体素）。
+///
+/// 回答"设计面上这一点到底被哪把刀、哪一段切掉了"。它和
+/// [`crate::surface_dev`] 是两个独立口径：
+///
+/// - 体素口径读的是**材料还剩什么**，空间分辨力 ≈ `h`：比一个体素还薄的
+///   尖角/薄壁会被整格判成"空气"，读出来的过切可以比真实值大好几倍；
+/// - 本函数问的是**刀有没有真扫过这一点**，只受浮点影响。
+///
+/// 两者一起看才有归因价值：体素报过切、本函数说"没有任何一段碰到" ⟹ 那是
+/// 分辨率问题，不是刀路问题，改刀路只会白改。
+pub fn attribute_points(
+    segments: &[CutSegment],
+    tools: &ToolTable,
+    points: &[DVec3],
+    tol: f64,
+) -> Vec<Option<PointHit>> {
+    let ix = SweepIndex::new(segments, tools, tol);
+    points
+        .iter()
+        .map(|p| {
+            ix.deepest(*p, tol).map(|(si, depth)| {
+                let s = &segments[si];
+                PointHit {
+                    depth,
+                    tool: s.tool,
+                    block: s.block,
+                    line: s.line,
+                    t_start: s.t_start,
+                }
+            })
+        })
+        .collect()
+}
+
+/// 设计面点到**已切削面**的有符号距离（mm）——解析口径，与体素 `h` 无关。
+///
+/// 语义和 [`crate::surface_dev::signed_deviation`] 一一对应，但读的不是体素场，
+/// 而是"刀具扫掠体的并集"：
+///
+/// | 值 | 含义 |
+/// |---|---|
+/// | `d < -tol` | 刀扫过了设计材料 → **过切**，深度 `−d` |
+/// | `\|d\| ≤ tol` | 刀面正好落在设计面上 → 切到位 |
+/// | `d > tol` | 刀具最近只到过 `d` 之外 → **残料**，厚度至少 `d` |
+/// | `+∞` | 比 `margin` 还远 → 这道工序从没接近过它 |
+///
+/// 为什么值得多算一遍：体素口径的空间分辨力 ≈ `h`，**薄于一个体素的尖角**
+/// 会被整格判成空气，读出来的过切能比真实值大好几倍（桌腿件 h=1.0 实测
+/// 体素最大 2.11 mm vs 解析最大 0.27 mm）。验收要的是"零件差多少"，
+/// 不是"格子差多少"。
+pub fn sweep_deviation(
+    segments: &[CutSegment],
+    tools: &ToolTable,
+    points: &[DVec3],
+    margin: f64,
+) -> Vec<f64> {
+    let ix = SweepIndex::new(segments, tools, margin);
+    points.iter().map(|p| ix.nearest(*p).0).collect()
+}
+
+/// 解析口径的偏差统计（`+∞` 统一按 `far` 封顶）。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SweepStats {
+    pub points: usize,
+    /// `|d| ≤ tol`
+    pub ok: usize,
+    /// `d < -tol`：刀切进了设计材料。
+    pub gouge: usize,
+    /// `d > tol`：刀具没到过 → 残料。
+    pub residual: usize,
+    /// 残料里"比 `far` 还远"的那部分：这道工序根本没接近过。
+    pub far: usize,
+    pub mean_abs: f64,
+    pub p95_abs: f64,
+    pub max_gouge: f64,
+    /// 最大残料厚度，按 `far` 封顶。
+    pub max_residual: f64,
+}
+
+impl SweepStats {
+    pub fn ok_frac(&self) -> f64 {
+        if self.points == 0 {
+            0.0
+        } else {
+            self.ok as f64 / self.points as f64
+        }
+    }
+
+    pub fn gouge_frac(&self) -> f64 {
+        if self.points == 0 {
+            0.0
+        } else {
+            self.gouge as f64 / self.points as f64
+        }
+    }
+
+    pub fn residual_frac(&self) -> f64 {
+        if self.points == 0 {
+            0.0
+        } else {
+            self.residual as f64 / self.points as f64
+        }
+    }
+}
+
+/// 统计 [`sweep_deviation`] 的结果。`far` 必须与调用时给的 `margin` 一致。
+pub fn sweep_stats(vals: &[f64], tol: f64, far: f64) -> SweepStats {
+    let mut s = SweepStats {
+        points: vals.len(),
+        ..Default::default()
+    };
+    if vals.is_empty() {
+        return s;
+    }
+    let mut abs: Vec<f64> = Vec::with_capacity(vals.len());
+    let mut sum = 0.0;
+    for &d in vals {
+        let capped = if d.is_finite() { d } else { far };
+        let a = capped.abs();
+        abs.push(a);
+        sum += a;
+        if a <= tol {
+            s.ok += 1;
+        } else if capped < 0.0 {
+            s.gouge += 1;
+            s.max_gouge = s.max_gouge.max(a);
+        } else {
+            s.residual += 1;
+            s.max_residual = s.max_residual.max(a);
+            if a >= far - 1e-9 {
+                s.far += 1;
+            }
+        }
+    }
+    s.mean_abs = sum / vals.len() as f64;
+    abs.sort_by(f64::total_cmp);
+    let k = ((vals.len() as f64 * 0.95) as usize).min(abs.len() - 1);
+    s.p95_abs = abs[k];
+    s
+}
+
+/// 解析过切：设计面采样点 × 每段扫掠 SDF。
+///
+/// 对每个设计面点问一个问题：**它是否曾被刀具包住？** `sd_sweep(p) < 0` ⟺ 点 p
+/// 在扫掠体内 ⟺ 刀从设计面之外切了过去。深度 = −sd_sweep（刀面越过设计点多少）。
+#[allow(clippy::type_complexity)]
 fn analytic_gouge(
     segments: &[CutSegment],
     tools: &ToolTable,
@@ -457,38 +702,8 @@ fn analytic_gouge(
     tol: f64,
     hint: Option<(DVec3, DVec3)>,
 ) -> (f64, DVec3, u32, u32, f64, usize) {
-    // 段 AABB 预先算一遍（每点每段重算是 78k×110 次纯浪费）。**每段用自己那把刀**
-    // 的母线：粗加工的 φ6 和精加工的 R0.5 扫掠体差着数量级。
-    let cutters: Vec<&Profile> = segments
-        .iter()
-        .map(|s| &tools.by_number(s.tool).unwrap_or_else(|| tools.first()).cutter)
-        .collect();
-    let boxes: Vec<(DVec3, DVec3)> = segments
-        .iter()
-        .zip(&cutters)
-        .map(|(s, cutter)| {
-            let (lo, hi) = sweep_aabb(&s.from, &s.to, cutter);
-            let t = DVec3::new(tol, tol, tol);
-            (lo - t, hi + t)
-        })
-        .collect();
-
-    // 全体段的合并包围盒：设计面上在外面一圈的点**不可能被任何一段碰到**，
-    // 每个点先做一次 O(1) 判断就能跳掉。50×50×100 的毛坯有 4 个 50×100 的侧面，
-    // 它们的采样点占绝大多数，而刀从来不去那里。
-    let whole = boxes.iter().fold(None::<(DVec3, DVec3)>, |acc, (lo, hi)| {
-        Some(match acc {
-            None => (*lo, *hi),
-            Some((alo, ahi)) => (
-                DVec3::new(alo.x.min(lo.x), alo.y.min(lo.y), alo.z.min(lo.z)),
-                DVec3::new(ahi.x.max(hi.x), ahi.y.max(hi.y), ahi.z.max(hi.z)),
-            ),
-        })
-    });
-
-    // 段索引：只在 `whole` 有界时建，退化情形（单段/空）走原来的直扫
-    let grid = whole.and_then(|(lo, hi)| SegGrid::build(lo, hi, &boxes));
-    let all_segs: Vec<u32> = (0..segments.len() as u32).collect();
+    // 段 AABB 与每段的母线预先算一遍（每点每段重算是 78k×110 次纯浪费）。
+    let ix = SweepIndex::new(segments, tools, tol);
 
     // ── 两段扫描 ──
     //
@@ -504,22 +719,14 @@ fn analytic_gouge(
     scan_gouge(
         design_surface_points_strided(design, step * coarse_k, coarse_k as usize),
         None,
-        segments,
-        &boxes,
-        &cutters,
-        grid.as_ref(),
-        &all_segs,
+        &ix,
         tol,
         &mut best,
     );
     scan_gouge(
         design_surface_points(design, step),
         hint,
-        segments,
-        &boxes,
-        &cutters,
-        grid.as_ref(),
-        &all_segs,
+        &ix,
         tol,
         &mut best,
     );
@@ -545,15 +752,10 @@ struct GougeBest {
 }
 
 /// 在内层循环里维护"最深过切"。
-#[allow(clippy::too_many_arguments)]
 fn scan_gouge(
     pts: impl Iterator<Item = DVec3>,
     hint: Option<(DVec3, DVec3)>,
-    segments: &[CutSegment],
-    boxes: &[(DVec3, DVec3)],
-    cutters: &[&Profile],
-    grid: Option<&SegGrid>,
-    all_segs: &[u32],
+    ix: &SweepIndex<'_>,
     tol: f64,
     best: &mut GougeBest,
 ) {
@@ -565,33 +767,20 @@ fn scan_gouge(
         {
             continue;
         }
-        let candidates: &[u32] = match grid {
-            Some(g) => match g.cell_of(p) {
-                Some(k) => &g.buckets[k],
-                None => continue,
-            },
-            None => all_segs,
-        };
-        for &si in candidates {
-            let si = si as usize;
-            let s = &segments[si];
-            let (lo, hi) = boxes[si];
-            if p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z {
-                continue;
-            }
-            let sd = sd_sweep(p, &s.from, &s.to, cutters[si]);
-            if sd < -tol && -sd > best.depth {
-                best.depth = -sd;
-                best.at = p;
-                best.block = s.block;
-                best.line = s.line;
-                best.t = s.t_start;
-                if std::env::var_os("CNCSIM_PROF").is_some() {
-                    println!(
-                        "  [gouge] {:.3} @ ({:.3},{:.3},{:.3}) 段 {si} tool T{} 第 {} 行",
-                        best.depth, p.x, p.y, p.z, s.tool, s.line
-                    );
-                }
+        if let Some((si, depth)) = ix.deepest(p, tol)
+            && depth > best.depth
+        {
+            best.depth = depth;
+            best.at = p;
+            let s = &ix.segments[si];
+            best.block = s.block;
+            best.line = s.line;
+            best.t = s.t_start;
+            if std::env::var_os("CNCSIM_PROF").is_some() {
+                println!(
+                    "  [gouge] {:.3} @ ({:.3},{:.3},{:.3}) 段 {si} tool T{} 第 {} 行",
+                    best.depth, p.x, p.y, p.z, s.tool, s.line
+                );
             }
         }
     }
@@ -923,6 +1112,81 @@ mod tests {
         // argmax 取第一个并列最深点——任何落在刀 footprint 内部（|y−5| ≤ 2.75，
         // 网格步距 0.5）的点都给精确 −0.4，约束到 footprint 内即可
         assert!((at.y - 5.0).abs() <= 2.75 + 1e-9, "y={}", at.y);
+    }
+
+    #[test]
+    fn sweep_deviation_is_signed_and_resolution_free() {
+        // Ø6 平底刀在 z=4.6 沿 x 走一趟（y=5），设计顶面 z=5：
+        //   (5,5,5)  刀底比设计面低 0.4  → 过切 −0.40
+        //   (5,9,5)  离走刀线 4 mm，刀半径 3 → 残料 +1.00
+        //   (20,5,5) 刀从没到过（比 margin 远）→ +∞
+        let cutter = flat_end_mill(6.0, 20.0);
+        let tools = single_tool(&cutter);
+        let segments = vec![CutSegment {
+            from: Pose { tip: DVec3::new(0.0, 5.0, 4.6), axis: DVec3::Z },
+            to: Pose { tip: DVec3::new(10.0, 5.0, 4.6), axis: DVec3::Z },
+            block: 3,
+            line: 7,
+            t_start: 1.25,
+            tool: 1,
+        }];
+        let pts = [
+            DVec3::new(5.0, 5.0, 5.0),
+            DVec3::new(5.0, 9.0, 5.0),
+            DVec3::new(20.0, 5.0, 5.0),
+        ];
+        let d = sweep_deviation(&segments, &tools, &pts, 3.0);
+        assert!((d[0] + 0.4).abs() < 2e-3, "过切应为 −0.4，实际 {}", d[0]);
+        assert!((d[1] - 1.0).abs() < 2e-3, "残料应为 +1.0，实际 {}", d[1]);
+        assert!(!d[2].is_finite(), "比 margin 远应返回 +∞，实际 {}", d[2]);
+
+        // 统计：1 过切 / 1 残料 / 1 未接近；∞ 按 `far` 封顶
+        let s = sweep_stats(&d, 0.15, 3.0);
+        assert_eq!((s.ok, s.gouge, s.residual, s.far), (0, 1, 2, 1));
+        assert!((s.max_gouge - 0.4).abs() < 2e-3);
+        assert!((s.max_residual - 3.0).abs() < 1e-9, "∞ 要按 far 封顶");
+        assert!((s.mean_abs - (0.4 + 1.0 + 3.0) / 3.0).abs() < 1e-9);
+    }
+
+    /// 恰好切到设计面 = 合格（不是过切也不是残料）。
+    ///
+    /// 这条是"体素 vs 解析"两个口径的接缝：体素读数在 h 较大时对切线位姿
+    /// 会给出 ±h/2 的假偏差，解析口径必须给 0。
+    #[test]
+    fn sweep_deviation_calls_a_tangent_pass_ok() {
+        let cutter = flat_end_mill(6.0, 20.0);
+        let tools = single_tool(&cutter);
+        let segments = vec![CutSegment {
+            from: Pose { tip: DVec3::new(0.0, 5.0, 5.0), axis: DVec3::Z },
+            to: Pose { tip: DVec3::new(10.0, 5.0, 5.0), axis: DVec3::Z },
+            block: 0,
+            line: 0,
+            t_start: 0.0,
+            tool: 1,
+        }];
+        let d = sweep_deviation(&segments, &tools, &[DVec3::new(5.0, 5.0, 5.0)], 3.0);
+        assert!(d[0].abs() < 1e-9, "切线位姿应为 0，实际 {}", d[0]);
+        assert_eq!(sweep_stats(&d, 0.15, 3.0).ok, 1);
+    }
+
+    #[test]
+    fn attribute_points_names_the_tool_and_line() {
+        let cutter = flat_end_mill(6.0, 20.0);
+        let tools = single_tool(&cutter);
+        let segments = vec![CutSegment {
+            from: Pose { tip: DVec3::new(0.0, 5.0, 4.6), axis: DVec3::Z },
+            to: Pose { tip: DVec3::new(10.0, 5.0, 4.6), axis: DVec3::Z },
+            block: 3,
+            line: 7,
+            t_start: 1.25,
+            tool: 1,
+        }];
+        let pts = [DVec3::new(5.0, 5.0, 5.0), DVec3::new(20.0, 5.0, 5.0)];
+        let hits = attribute_points(&segments, &tools, &pts, 0.005);
+        let h = hits[0].expect("被刀扫过，必须命中");
+        assert_eq!((h.tool, h.block, h.line), (1, 3, 7));
+        assert!((h.depth - 0.4).abs() < 2e-3);
+        assert!(hits[1].is_none(), "刀没到过的点不该命中");
     }
 
     #[test]

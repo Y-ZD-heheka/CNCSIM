@@ -238,7 +238,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <div class="layout">
 <aside>
   <div class="brand">Technical Design</div>
-  <div class="brand-title">五轴联动 CNC<br>切割仿真软件</div>
+  <div class="brand-title">项目记忆</div>
   <div class="toc">
 <ul>
 <li><a href="#1">1. 定位与范围</a></li>
@@ -415,12 +415,28 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#_60">三个踩过的坑（都写进代码注释了）</a></li>
 </ul>
 </li>
+<li><a href="#38-11-06">38. 特征级形位公差（11-06）</a><ul>
+<li><a href="#_61">定义与基准</a></li>
+<li><a href="#_62">四个坑</a></li>
+<li><a href="#h0611">数字（桌腿件，h=0.6，11 道工序）</a></li>
+<li><a href="#_63">已知限制（没粉饰）</a></li>
+</ul>
+</li>
+<li><a href="#39-64-09-11-06">39. 三个口径：把"过切 6.4%"拆成 0.9% + 判据误差（11-06）</a><ul>
+<li><a href="#_64">加了两件量具</a></li>
+<li><a href="#64-09">结论一：6.4% 里只有 0.9% 是真的</a></li>
+<li><a href="#_65">结论二：残料不是刀花，是凹角圆角</a></li>
+<li><a href="#_66">结论三：刀径是唯一有效的那根杠杆（实测三次）</a></li>
+<li><a href="#-dry-83">新增：--dry 刀路体检（8.3×）</a></li>
+<li><a href="#_67">没做什么（别当成已经做了）</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
 </aside>
 <main>
-<h1 id="_1">项目记忆 —— 决策、口径与踩过的坑</h1>
+<h1 id="_1">项目记忆 —— 决策、口径与踩过的坑</h1><div class="meta"><span class="chip hi">决策</span><span class="chip hi">铁律</span><span class="chip">死胡同</span></div>
 <blockquote>
 <p><strong>这是唯一真相源。</strong> 原 <code>.workbuddy-ai/memory/</code> 与 <code>.workbuddy/memory/</code> 两套笔记已合并去重到这里，
 按日期的工作史见 <a href="开发日志.html"><code>开发日志.md</code></a>。</p>
@@ -3814,6 +3830,206 @@ MRR = ap × ae × vf  →  Ø6 时 33.3 cm³/min
 </tr>
 </tbody>
 </table></div>
+<h2 id="38-11-06">38. 特征级形位公差（11-06）</h2>
+<p>"继续添加模型差异对比算法"——上一轮列的下一步 #5：平面度 / 圆柱度，按 <strong>ISO 1101
+最小区域法</strong>。新增 <code>crates/sim/src/form.rs</code>（7 个测试）。</p>
+<h3 id="_61">定义与基准</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>平面度 = max(n·q) − min(n·q)     圆柱度 = max(r_i) − min(r_i)
+</code></pre></div>
+
+<p>是<strong>区域宽度</strong>，不是"最大偏差"。基准要优化到最小区域：八方向模式搜索
+（±e₁、±e₂、四条对角），改进不足千分之一就缩步长。LSQ 基准同时算，
+<code>form_lsq ≥ form_mz</code> 是构造上成立的，差值只说明"LSQ 高估了多少"。</p>
+<p>表面点：设计面采样沿<strong>实际场梯度</strong>投影（<code>q = p + d·∇d/|∇d|</code>），一阶精确，无需最近邻。</p>
+<h3 id="_62">四个坑</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>坑</th>
+<th>现象</th>
+<th>处置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>坐标下降卡折点</td>
+<td>四个正交方向都不降、<strong>对角方向能降</strong> → 停在第 0.36% 差的位置</td>
+<td>加对角方向；改进 &lt; 0.1% 也缩步长</td>
+</tr>
+<tr>
+<td>平面 → 无穷大圆柱</td>
+<td>轴挪远后平面上到轴距离趋近常数（极差 ∝ w²/2R）</td>
+<td>轴不出特征 2.5×bbox、<code>mz ≤ 0.05R</code>、角向 ≥ 4/12 扇区</td>
+</tr>
+<tr>
+<td>一阶波动当形状误差</td>
+<td><code>R + a·cosθ</code> 平移轴就能消掉——那是<strong>偏心</strong></td>
+<td>测试钉住：一阶 → 圆柱度≈0；二阶（椭圆）才计入</td>
+</tr>
+<tr>
+<td>把"区域宽度"算成"最大偏差"</td>
+<td>单点凸起 h 会算成 h/2 或 2h</td>
+<td>棋盘双层测试：平面度 = h</td>
+</tr>
+</tbody>
+</table></div>
+<p>第一条是"随机撒 400 个方向找更好解"的测试抓出来的——这类测试比断言"结果等于某个数"
+更能证伪：只要搜索方向反了、步长不收敛、或者目标函数写错，它立刻找到更优解。</p>
+<h3 id="h0611">数字（桌腿件，h=0.6，11 道工序）</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>形位（最小区域法）：6 个特征 / 自由曲面占 39.3% 面积 / 丢弃小分片 203
+  平面 2709 mm²：平面度 0.028（LSQ 0.029）/ 平均偏差 −0.024
+  平面 1634 mm²：平面度 0.360（LSQ 0.362）/ 平均偏差 −0.037
+</code></pre></div>
+
+<p>同一件活上两个平面的平面度差 <strong>13 倍</strong>（0.028 vs 0.360）——这是"整件一个数"
+绝对看不出来的东西，也是加这一层的理由。h=1.5 时同一片是 0.621（≈0.4h），
+说明形位在粗网格上被离散化主导；h 降到 0.6 掉到 0.028，<strong>不是线性下降</strong>，
+因为形位是相对基准的区域宽度，平滑区域的量化噪声大部分互相抵消。</p>
+<h3 id="_63">已知限制（没粉饰）</h3>
+<p>特征分割是"位置连通 + 法向 12° 一致"，<strong>曲率大的圆柱会被拆成条带</strong>
+（格距 3.75 mm 在 r=10 上是 21.5° 的法向差）。阈值放 24° 能连上圆柱，
+但 90° 的相邻面会经棱边并成一片（自由曲面占比 39% → 55%），两头都不划算。
+要同时成立得做按曲率自适应的连通判据——没做。分不出特征的面积归 <code>Freeform</code>，
+只报偏差统计，不给公差号。</p>
+<h2 id="39-64-09-11-06">39. 三个口径：把"过切 6.4%"拆成 0.9% + 判据误差（11-06）</h2>
+<p>上一轮留下的问题：可达面上 6.4% 的过切（最大 +1.55 mm）到底是刀路还是判据？
+这一轮把它查清，并顺手改掉了真正决定保真度的那一项。</p>
+<h3 id="_64">加了两件量具</h3>
+<ol>
+<li><strong><code>compare::attribute_points</code></strong>（逐点扫掠体归因）：对每个设计面点问"哪一段
+   刀具扫过了它、侵入多深"，返回 <code>tool / block / line / 深度</code>。刀号在多工序
+   里就是 <code>2i+1 / 2i+2</code>，所以能直接反过来认出是第几道、粗还是精。</li>
+<li><strong><code>compare::sweep_deviation</code></strong>（解析口径，<strong>与 h 无关</strong>）：设计面点到
+   "刀具扫掠体并集"的有符号距离。<code>&lt;0</code> 过切、<code>≈0</code> 切到位、<code>&gt;0</code> 残料、<code>+∞</code>
+   刀具从没接近过。它就是三坐标测量在仿真里的对应物。</li>
+</ol>
+<h3 id="64-09">结论一：6.4% 里只有 0.9% 是真的</h3>
+<p>同一份刀路、同一批点，两个口径：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>口径</th>
+<th>合格</th>
+<th>过切</th>
+<th>残料</th>
+<th>最大过切</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>体素（h=0.6）</td>
+<td>81.6%</td>
+<td>5.8%</td>
+<td>12.6%</td>
+<td><strong>+1.55 mm</strong></td>
+</tr>
+<tr>
+<td>解析（与 h 无关）</td>
+<td>85.0%</td>
+<td><strong>0.6%</strong></td>
+<td>14.4%</td>
+<td><strong>+0.27 mm</strong></td>
+</tr>
+<tr>
+<td>可达面：体素</td>
+<td>86.0%</td>
+<td>6.4%</td>
+<td>7.6%</td>
+<td></td>
+</tr>
+<tr>
+<td>可达面：解析</td>
+<td><strong>90.7%</strong></td>
+<td><strong>0.9%</strong></td>
+<td>8.3%</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<p>逐点归因给出直接证据：h=1.0 时体素报过切的 14834 点里，<strong>11699 点（79%）
+没有任何一段刀具扫掠体碰过</strong>。那些点全在<strong>薄于一个体素的尖角</strong>上——体素把
+整格判成空气，读数就变成"过切 2.1 mm"。</p>
+<p>所以口径的正确用法是：<strong>验收看解析值，体素值只用来定位体积/残料分布</strong>。
+h 不再卡验收（h=0.6 与 h=1.0 的解析数字完全一致），只影响体积积分。</p>
+<h3 id="_65">结论二：残料不是刀花，是凹角圆角</h3>
+<p>残料按厚度分档（Ø3 基线，h=0.6，共 22869 点）：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>0.15–0.25 mm  5302 点   ← 刚出公差带：凹角圆角的浅带
+0.25–0.50 mm  9262 点   ← 同一类，深一点
+0.50–1.00 mm  3710 点
+&gt;1 mm         4595 点   ← 全部是"刀具从没接近过"（reach 判不可达）
+</code></pre></div>
+
+<p>可达面上的残料再分一次：<strong>3308 点是"刀走过了但切不到"</strong>（凹角圆角），
+只有 232 点是"工序没走到"。也就是说残料<strong>不是覆盖率问题</strong>，
+是球头在凹角处必然留下的 <code>R(1/sin(θ/2)−1)</code>（90° 角 = 0.41R）。</p>
+<p>换成 Ø1.5 后同一批数字是 4951 / 2721 / 685 / 3039：<strong>0.5 mm 以上的档位
+被吃掉了</strong>（3710 → 685），剩下的 63% 集中在 0.15–0.5 的浅带里——
+正是小半径球头能把圆角收细的那一段。</p>
+<h3 id="_66">结论三：刀径是唯一有效的那根杠杆（实测三次）</h3>
+<p>解析口径下换精加工刀径（其余参数不变、行距按 0.4D 等比缩）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>精加工刀</th>
+<th>合格</th>
+<th>过切</th>
+<th>残料</th>
+<th>切长</th>
+<th>可达面合格</th>
+<th>不可达面合格</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ø3.0</td>
+<td>85.0%</td>
+<td>0.6%</td>
+<td>14.4%</td>
+<td>45.0 m</td>
+<td>90.7%</td>
+<td>39.1%</td>
+</tr>
+<tr>
+<td>Ø1.5</td>
+<td><strong>91.6%</strong></td>
+<td>1.2%</td>
+<td>7.2%</td>
+<td>84.1 m</td>
+<td>93.6%</td>
+<td>57.7%</td>
+</tr>
+<tr>
+<td>Ø1.0</td>
+<td><strong>94.1%</strong></td>
+<td>1.9%</td>
+<td>4.0%</td>
+<td>123.2 m</td>
+<td>93.8%</td>
+<td>71.8%</td>
+</tr>
+</tbody>
+</table></div>
+<ul>
+<li>残料面积 ∝ √R（残高 &gt; tol 的带宽 ∝ √(2R·tol)），所以<strong>行距和坡度都不是杠杆</strong>，
+  这与上一轮"行距减半只换 2 个点"的实测一致；</li>
+<li>小刀还额外吃掉了"不可达面"：39.1% → 71.8%。<code>reach</code> 的可见性判据按 1.5 mm
+  采样 + 射线走，<strong>比刀具保守</strong>——"看不见"不等于"进不去"，Ø1 球头能钻进
+  Ø1.5 进不去的窄槽；</li>
+<li>代价是切长 ∝ 1/D。默认改成 <code>(短边/18).clamp(0.8, 3.0)</code>，桌腿件 → Ø1.5；
+  要更高保真显式给 <code>--finish-d 1.0</code>。</li>
+</ul>
+<h3 id="-dry-83">新增：<code>--dry</code> 刀路体检（8.3×）</h3>
+<p>解析口径只吃 <code>cut_segs</code>，不吃体素。<code>RunConfig::dry_run</code> 让仿真<strong>只走刀路、
+不切材料</strong>：同一个 139527 块的桌腿程序，424 s → <strong>51 s</strong>，而解析口径的数字
+一模一样（有测试钉住"段数/端点/刀号逐段一致"）。调刀路时用它，最后再跑一次
+全量仿真出体积和预览。</p>
+<h3 id="_67">没做什么（别当成已经做了）</h3>
+<ul>
+<li>没有为凹角<strong>加小刀清根工序</strong>。理论上把 Ø1 只走残料区能拿到接近 94% 的结果
+  而切长只涨一点，但那需要"残料 → 掩膜 → 只在该区走刀"的一整套，本轮没做。</li>
+<li>翻转装夹（13.6% 几何不可达）仍然没做：不可达面里 60.8% 是残料，
+  解析口径下这部分折算约 17% 的面积，是剩下最大的一块。</li>
+</ul>
 </main>
 </div>
 <script>

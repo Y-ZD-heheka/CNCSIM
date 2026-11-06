@@ -986,7 +986,9 @@ fn run_cam(model: &std::path::Path) {
         grid,
         stock_origin: stock.min,
         stock_size: domain,
-        design: Some(design),
+        // 相似度要在仿真**之后**用设计场，所以这里克隆一份（Field 是 i8 稀疏场，
+        // 桌腿件 h=0.6 时约 0.5 MB，代价可以忽略）
+        design: Some(design.clone()),
         design_step: 0.3,
         collide: false,
         creator_sub: 4,
@@ -1215,7 +1217,21 @@ fn run_cam_multi(
 
     let short = stock.size().x.min(stock.size().y);
     let d_rough = 6.0f64.min(0.35 * short).max(1.0);
-    let d_finish = 3.0f64.min(d_rough * 0.6).max(0.8);
+    // ── 精加工刀径：**这一项决定形状保真度的天花板** ──
+    //
+    // 球头在凹角处必然留下 `R(1/sin(θ/2)−1)` 的残料（90° 角 = 0.41R），这是几何
+    // 决定的，不是刀路能绕过去的。桌腿件 h=0.6 的实测（解析口径，与 h 无关）：
+    //
+    //   Ø3.0 → 合格 85.0% / 残料 14.4% / 切长 45 m
+    //   Ø1.5 → 合格 91.6% / 残料  7.2% / 切长 84 m
+    //   Ø1.0 → 合格 94.1% / 残料  4.0% / 切长 123 m
+    //
+    // 残料面积 ∝ √R（残高 >tol 的带宽 ∝ √(2R·tol)），所以**刀径是唯一的杠杆**，
+    // 行距/坡度都不是。代价是切长 ∝ 1/D，按工件尺度取下限：大件用 Ø1 跑出来的
+    // 程序是天文数字。`--finish-d` 可显式覆盖。
+    let d_finish = finish_d_from_args()
+        .unwrap_or_else(|| (short / 18.0).clamp(0.8, 3.0).min(d_rough * 0.6))
+        .clamp(0.4, d_rough);
     let rough = cncsim_cam::ToolSpec::flat(0, d_rough, 20.0);
 
     // ── 开粗参数：按**最大材料去除率**定，同时留够精加工余量 ──
@@ -1262,7 +1278,7 @@ fn run_cam_multi(
     // ── 网格与设计场：可达性分析要用，所以提前到"定工序"之前 ──
     let size = stock.size();
     let vol = size.x * size.y * size.z;
-    let h = h_from_args().unwrap_or((vol / 3.0e7).cbrt().max(0.3).min(1.0));
+    let h = h_from_args().unwrap_or((vol / 3.0e7).cbrt().clamp(0.3, 1.0));
     let domain = [
         (size.x / h).round().max(1.0) as i32,
         (size.y / h).round().max(1.0) as i32,
@@ -1501,53 +1517,66 @@ fn run_cam_multi(
         program.issues.len()
     );
 
+    let dry = args_flag("--dry");
     let cfg = cncsim_sim::run::RunConfig {
         grid,
         stock_origin: stock.min,
         stock_size: domain,
-        design: Some(design),
+        // 相似度要在仿真**之后**用设计场，所以这里克隆一份（Field 是 i8 稀疏场，
+        // 桌腿件 h=0.6 时约 0.5 MB，代价可以忽略）
+        design: Some(design.clone()),
         design_step: 0.3,
         collide: false,
         creator_sub: 4,
         colorize: args_flag("--color"),
-        drop_chips: true,
+        drop_chips: !dry,
+        dry_run: dry,
         ..Default::default()
     };
     let table = cncsim_tool::ToolTable::new(plan.tools.clone());
     let t0 = std::time::Instant::now();
     let out = cncsim_sim::run::run_tools(&program, &table, &cfg);
     let r = &out.report;
-    println!(
-        "仿真：{:.1} s / {} 块 / {} 段 / 去料 {:.1} mm³ / 丢碎屑 {} 格",
-        t0.elapsed().as_secs_f64(),
-        out.stats.blocks,
-        out.stats.cut_segments,
-        r.removed_volume_mm3,
-        r.chip_voxels
-    );
-    println!(
-        "  切割染色：{}（creator {:.1} KB）",
-        if cfg.colorize { "开" } else { "关" },
-        out.grid.creator_bytes() as f64 / 1024.0
-    );
-    println!(
-        "  过切 {:.3} mm³ / {:.4} mm @ ({:.2},{:.2},{:.2})；残留 {:.3} mm³ / {:.4} mm @ ({:.2},{:.2},{:.2})",
-        r.gouge_volume_mm3,
-        r.gouge_max_depth_mm,
-        r.gouge_at.x,
-        r.gouge_at.y,
-        r.gouge_at.z,
-        r.residual_volume_mm3,
-        r.residual_max_thickness,
-        r.residual_at.x,
-        r.residual_at.y,
-        r.residual_at.z
-    );
-    if let Some((lo, hi)) = r.gouge_region {
+    if dry {
         println!(
-            "  过切区域 ({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
-            lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+            "刀路体检（--dry，不切材料）：{:.1} s / {} 块 / {} 段",
+            t0.elapsed().as_secs_f64(),
+            out.stats.blocks,
+            out.stats.cut_segments
         );
+    } else {
+        println!(
+            "仿真：{:.1} s / {} 块 / {} 段 / 去料 {:.1} mm³ / 丢碎屑 {} 格",
+            t0.elapsed().as_secs_f64(),
+            out.stats.blocks,
+            out.stats.cut_segments,
+            r.removed_volume_mm3,
+            r.chip_voxels
+        );
+        println!(
+            "  切割染色：{}（creator {:.1} KB）",
+            if cfg.colorize { "开" } else { "关" },
+            out.grid.creator_bytes() as f64 / 1024.0
+        );
+        println!(
+            "  过切 {:.3} mm³ / {:.4} mm @ ({:.2},{:.2},{:.2})；残留 {:.3} mm³ / {:.4} mm @ ({:.2},{:.2},{:.2})",
+            r.gouge_volume_mm3,
+            r.gouge_max_depth_mm,
+            r.gouge_at.x,
+            r.gouge_at.y,
+            r.gouge_at.z,
+            r.residual_volume_mm3,
+            r.residual_max_thickness,
+            r.residual_at.x,
+            r.residual_at.y,
+            r.residual_at.z
+        );
+        if let Some((lo, hi)) = r.gouge_region {
+            println!(
+                "  过切区域 ({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
+                lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+            );
+        }
     }
 
     // ── 可达性报告：够不到的面单独列出来，并给出建议方向 ──
@@ -1597,26 +1626,114 @@ fn run_cam_multi(
             "  └ {} 点背面（没有工序方向朝向它）+ {} 点被遮挡：**刀路再调也切不到**，只能改工艺",
             reach.backfacing, reach.occluded
         );
-        println!(
-            "  └ 剩下能切到的面上若还有残料，那才是刀路问题（实测过切 {:.3} mm³ / 残留 {:.3} mm³）",
-            r.gouge_volume_mm3, r.residual_volume_mm3
-        );
+        if !dry {
+            println!(
+                "  └ 剩下能切到的面上若还有残料，那才是刀路问题（实测过切 {:.3} mm³ / 残留 {:.3} mm³）",
+                r.gouge_volume_mm3, r.residual_volume_mm3
+            );
+        }
     }
 
     // ── 名义曲面逐点偏差：和回转链路同一套口径，直接回答"像不像原版" ──
     let pts = cncsim_voxel::meshvol::surface_points(tris, 0.8);
-    let dev = cncsim_sim::surface_dev::signed_deviation(&out.grid, &pts);
-    let sd = cncsim_sim::surface_dev::stats(&dev, 0.15, 4.0 * h);
+    let mut sd = cncsim_sim::surface_dev::SurfaceStats::default();
+    let mut dev: Vec<f64> = Vec::new();
+    if !dry {
+        dev = cncsim_sim::surface_dev::signed_deviation(&out.grid, &pts);
+        sd = cncsim_sim::surface_dev::stats(&dev, 0.15, 4.0 * h);
+        println!(
+            "名义曲面：{} 点 / 平均 |d| {:.3} / P95 {:.3} / 合格(≤0.15) {:.1}% / 过切 {:.1}% / 残料 {:.1}% / 最大过切 {:+.2}",
+            sd.points,
+            sd.mean_abs,
+            sd.p95_abs,
+            sd.ok_frac() * 100.0,
+            sd.gouge_frac() * 100.0,
+            sd.residual_frac() * 100.0,
+            sd.max_gouge
+        );
+    }
+
+    // ── 解析口径：设计面点到**已切削面**的距离（与体素 h 无关）──
+    //
+    // 上面那个"名义曲面"读的是体素场，空间分辨力 ≈ h：薄于一个体素的尖角会被
+    // 整格判成空气，过切能报大好几倍。这里直接问"刀具扫掠体的并集离这一点多远"，
+    // 只受浮点影响。两个口径并排，差值就是判据本身的分辨力误差。
+    let dsw = cncsim_sim::compare::sweep_deviation(&out.cut_segs, &table, &pts, 1.0);
+    let ss = cncsim_sim::compare::sweep_stats(&dsw, 0.15, 1.0);
     println!(
-        "名义曲面：{} 点 / 平均 |d| {:.3} / P95 {:.3} / 合格(≤0.15) {:.1}% / 过切 {:.1}% / 残料 {:.1}% / 最大过切 {:+.2}",
-        sd.points,
-        sd.mean_abs,
-        sd.p95_abs,
-        sd.ok_frac() * 100.0,
-        sd.gouge_frac() * 100.0,
-        sd.residual_frac() * 100.0,
-        sd.max_gouge
+        "解析口径（扫掠体，与 h 无关）：{} 点 / 平均 |d| {:.3} / P95 {:.3} / 合格(±0.15) {:.1}% / 过切 {:.1}% / 残料 {:.1}% / 最大过切 {:+.2}",
+        ss.points,
+        ss.mean_abs,
+        ss.p95_abs,
+        ss.ok_frac() * 100.0,
+        ss.gouge_frac() * 100.0,
+        ss.residual_frac() * 100.0,
+        ss.max_gouge
     );
+    println!(
+        "  └ 残料里 {} 点比 1.0 mm 还远（这 {} 道工序从没接近过它们）{}",
+        ss.far,
+        passes.len(),
+        if dry {
+            String::new()
+        } else {
+            format!(" / 体素口径最大过切 {:+.2}", sd.max_gouge)
+        }
+    );
+
+    // ── 残料分布：厚度分档 + 空间热区 ──
+    //
+    // "残料 14.4%" 只说明有多少点没切到，不说明是**什么**：0.2 mm 的刀花、
+    // 0.4 mm 的凸棱圆角、还是 2 mm 根本没去过的区域，处置完全不同。
+    // 按厚度分档 + 按 4 mm 分块，能把这三类分开。
+    {
+        // 分档上界：(0.15,0.25] / (0.25,0.5] / (0.5,1] / >1
+        let bands = [0.25f64, 0.5, 1.0];
+        let mut hist = [0usize; 4];
+        let mut cell: std::collections::HashMap<[i32; 3], (usize, f64, f64, cncsim_math::DVec3, cncsim_math::DVec3)> =
+            std::collections::HashMap::new();
+        const SZ: f64 = 4.0;
+        for (p, d) in pts.iter().zip(&dsw) {
+            let dd = if d.is_finite() { *d } else { 1.0e9 };
+            if dd <= 0.15 {
+                continue;
+            }
+            let k = bands.iter().position(|&b| dd <= b).unwrap_or(3);
+            hist[k] += 1;
+            if dd > 1.0e8 {
+                continue; // 刀具从没接近过：不进热区（它们没有空间中心）
+            }
+            let key = [
+                (p.x / SZ).floor() as i32,
+                (p.y / SZ).floor() as i32,
+                (p.z / SZ).floor() as i32,
+            ];
+            let e = cell.entry(key).or_insert((0, 0.0, 0.0, *p, *p));
+            e.0 += 1;
+            e.1 += dd;
+            e.2 = e.2.max(dd);
+            e.3 = cncsim_math::DVec3::new(e.3.x.min(p.x), e.3.y.min(p.y), e.3.z.min(p.z));
+            e.4 = cncsim_math::DVec3::new(e.4.x.max(p.x), e.4.y.max(p.y), e.4.z.max(p.z));
+        }
+        println!(
+            "  残料厚度分档：0.15–0.25 {} / 0.25–0.5 {} / 0.5–1 {} / >1 {}（其中刀具没接近过 {}）",
+            hist[0], hist[1], hist[2], hist[3], ss.far
+        );
+        let mut rows: Vec<_> = cell.into_iter().collect();
+        rows.sort_by_key(|a| std::cmp::Reverse(a.1.0));
+        for (_, (n, sum, max, lo, hi)) in rows.iter().take(4) {
+            println!(
+                "  ├ 热区 ({:.1},{:.1},{:.1})..({:.1},{:.1},{:.1})：{n} 点 / 平均 {:.2} / 最深 {max:.2}",
+                lo.x,
+                lo.y,
+                lo.z,
+                hi.x,
+                hi.y,
+                hi.z,
+                sum / *n as f64
+            );
+        }
+    }
 
     // ── 可达 × 偏差 交叉表：把"够不到"和"没切好"彻底分开 ──
     //
@@ -1625,10 +1742,36 @@ fn run_cam_multi(
     // 不可达面上残料 → 只能翻面或换工艺，别再调步距。
     {
         let pts: Vec<cncsim_math::DVec3> = vis.points.clone();
-        let dev2 = cncsim_sim::surface_dev::signed_deviation(&out.grid, &pts);
+        let dsw2 = cncsim_sim::compare::sweep_deviation(&out.cut_segs, &table, &pts, 1.0);
+        let dev2 = if dry {
+            Vec::new()
+        } else {
+            cncsim_sim::surface_dev::signed_deviation(&out.grid, &pts)
+        };
         // (点数, 合格, 过切, 残料)
         let mut r = (0usize, 0usize, 0usize, 0usize);
         let mut u = (0usize, 0usize, 0usize, 0usize);
+        let mut ra = (0usize, 0usize, 0usize, 0usize);
+        let mut ua = (0usize, 0usize, 0usize, 0usize);
+        for (i, a) in dsw2.iter().enumerate() {
+            let reachable = vis.masks[i] & final_mask != 0;
+            // 解析口径：+∞ = 刀具从没接近过 → 残料
+            let a = *a;
+            let slot = if !a.is_finite() || a > 0.15 {
+                3
+            } else if a < -0.15 {
+                2
+            } else {
+                1
+            };
+            let t = if reachable { &mut ra } else { &mut ua };
+            t.0 += 1;
+            match slot {
+                1 => t.1 += 1,
+                2 => t.2 += 1,
+                _ => t.3 += 1,
+            }
+        }
         for (i, d) in dev2.iter().enumerate() {
             let reachable = vis.masks[i] & final_mask != 0;
             let d = *d;
@@ -1648,22 +1791,230 @@ fn run_cam_multi(
             }
         }
         let pct = |n: usize, t: usize| if t == 0 { 0.0 } else { n as f64 / t as f64 * 100.0 };
+        if !dry {
+            println!(
+                "  可达面 {}：体素口径 合格 {:.1}% / 过切 {:.1}% / 残料 {:.1}%",
+                r.0,
+                pct(r.1, r.0),
+                pct(r.2, r.0),
+                pct(r.3, r.0)
+            );
+        }
         println!(
-            "  可达面 {}：合格 {:.1}% / 过切 {:.1}% / 残料 {:.1}%",
-            r.0,
-            pct(r.1, r.0),
-            pct(r.2, r.0),
-            pct(r.3, r.0)
+            "  可达面 {}：解析口径 合格 {:.1}% / 过切 {:.1}% / 残料 {:.1}%",
+            ra.0,
+            pct(ra.1, ra.0),
+            pct(ra.2, ra.0),
+            pct(ra.3, ra.0)
         );
+        // 可达面上的残料再分一次"刀没接近过（>1mm）"和"切了但没切够"：
+        // 前者是覆盖率问题（工序没走到），后者是刀径/圆角问题（走也切不到）。
+        let (mut far_r, mut near_r) = (0usize, 0usize);
+        for (i, a) in dsw2.iter().enumerate() {
+            if vis.masks[i] & final_mask == 0 {
+                continue;
+            }
+            if !a.is_finite() || *a > 1.0 {
+                far_r += 1;
+            } else if *a > 0.15 {
+                near_r += 1;
+            }
+        }
         println!(
-            "  不可达面 {}：合格 {:.1}% / 过切 {:.1}% / 残料 {:.1}%（只能翻面或换工艺）",
-            u.0,
-            pct(u.1, u.0),
-            pct(u.2, u.0),
-            pct(u.3, u.0)
+            "  └ 其中 >1 mm {far_r} 点（工序没走到）/ 0.15–1 mm {near_r} 点（刀走过了但切不到：刀径/圆角）"
+        );
+        if !dry {
+            println!(
+                "  不可达面 {}：体素口径 合格 {:.1}% / 过切 {:.1}% / 残料 {:.1}%（只能翻面或换工艺）",
+                u.0,
+                pct(u.1, u.0),
+                pct(u.2, u.0),
+                pct(u.3, u.0)
+            );
+        }
+        println!(
+            "  不可达面 {}：解析口径 合格 {:.1}% / 过切 {:.1}% / 残料 {:.1}%",
+            ua.0,
+            pct(ua.1, ua.0),
+            pct(ua.2, ua.0),
+            pct(ua.3, ua.0)
         );
     }
 
+    // ── 过切归因：体素口径 × 解析扫掠体 ──
+    //
+    // 体素口径读的是"材料还剩什么"，空间分辨力 ≈ h：比一个体素还薄的尖角会被
+    // 整格判成空气，读出来的过切可以比真实值大好几倍。解析口径只问"刀有没有
+    // 真扫过这一点"。两个数一起看才知道下一步该改刀路还是改判据。
+    if !dry {
+        let hits = cncsim_sim::compare::attribute_points(&out.cut_segs, &table, &pts, 0.05);
+        let mut by_tool: std::collections::HashMap<u16, (usize, f64)> =
+            std::collections::HashMap::new();
+        let (mut n_vox, mut n_hit, mut n_deep) = (0usize, 0usize, 0usize);
+        let (mut worst, mut worst_i) = (0.0f64, usize::MAX);
+        for (i, d) in dev.iter().enumerate() {
+            if *d <= 0.15 {
+                continue;
+            }
+            n_vox += 1;
+            if *d > worst {
+                worst = *d;
+                worst_i = i;
+            }
+            if let Some(h) = hits[i] {
+                n_hit += 1;
+                if h.depth > 0.15 {
+                    n_deep += 1;
+                }
+                let e = by_tool.entry(h.tool).or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 = e.1.max(h.depth);
+            }
+        }
+        let pct = |n: usize| if n_vox == 0 { 0.0 } else { n as f64 / n_vox as f64 * 100.0 };
+        println!(
+            "过切归因：体素 >0.15 的 {n_vox} 点 → 扫掠体命中 {n_hit}（{:.0}%）/ 未命中 {}（{:.0}%）",
+            pct(n_hit),
+            n_vox - n_hit,
+            pct(n_vox - n_hit)
+        );
+        let mut rows: Vec<(u16, usize, f64)> =
+            by_tool.into_iter().map(|(t, (c, d))| (t, c, d)).collect();
+        rows.sort_by_key(|a| std::cmp::Reverse(a.1));
+        for (t, n, d) in rows.iter().take(4) {
+            let p = ((*t as usize).saturating_sub(1)) / 2;
+            let dir = passes.get(p).map(|q| q.dir).unwrap_or(cncsim_math::DVec3::Z);
+            println!(
+                "  ├ T{t}（第 {} 道 {}({:.2},{:.2},{:.2}) 点 {n} / 最深 {d:.2}）",
+                p + 1,
+                if t % 2 == 1 { "粗" } else { "精" },
+                dir.x,
+                dir.y,
+                dir.z
+            );
+        }
+        if n_vox > n_hit {
+            println!(
+                "  ├ 未命中 {} 点：没有任何一段刀具扫过——特征是**薄于 h={h:.2} 的尖角/薄壁**，\
+                 体素把整格判成空气。这是判据的分辨力问题，不是刀路问题",
+                n_vox - n_hit
+            );
+        }
+        println!(
+            "  └ 深度口径：体素最大 {:.2} mm vs 解析最大 {:.2} mm（其中解析也 >0.15 的 {n_deep} 点）",
+            worst.max(sd.max_gouge),
+            r.gouge_max_depth_mm
+        );
+        if worst_i < hits.len()
+            && let Some(h) = hits[worst_i]
+        {
+            println!(
+                "  └ 最深点 ({:.2},{:.2},{:.2})：T{} 第 {} 行，解析侵入 {:.3} mm（{}）",
+                pts[worst_i].x,
+                pts[worst_i].y,
+                pts[worst_i].z,
+                h.tool,
+                h.line,
+                h.depth,
+                if h.depth > 0.15 { "真过切" } else { "体素高估" }
+            );
+        }
+    }
+
+    // ── 相似度：Hausdorff / Chamfer / F1 / IoU / 法向一致 ──
+    //
+    // 前面的"名义曲面偏差"是**单向**的（设计面 → 实际面），它看不见"落在设计面
+    // 之外很远的残料"；也没有朝向信息。这一节补上双向与体积口径：
+    //   Hausdorff = 最坏点（装配/干涉死在这里）
+    //   Chamfer   = 双向平均（整体做像了多少）
+    //   F1@tol    = 面吻合程度（P 从实际面出发、R 从设计面出发）
+    //   bias      = 有符号平均位移（正 = 过切、负 = 残料）
+    //   IoU/Dice  = 体积吻合（与采样密度无关）
+    //   法向一致  = 位置对但朝向错（斜面、台阶圆角）
+    if !dry {
+        let mut lod = 1;
+        let mut rmesh = out.grid.extract_surface_lod(lod);
+        while rmesh.indices.len() / 3 > 600_000 && lod < 3 {
+            lod += 1;
+            rmesh = out.grid.extract_surface_lod(lod);
+        }
+        let sim = cncsim_sim::similarity::compare(
+            &design,
+            &samples,
+            &out.grid,
+            domain,
+            &rmesh,
+            0.15,
+        );
+        println!(
+            "相似度（LOD{lod} / {} 顶点）：Hausdorff {:.3}（正向 {:.3} / 反向 {:.3}） / Chamfer {:.3} / F1@0.15 {:.3}（P {:.3} / R {:.3}）",
+            sim.actual_points, sim.hausdorff, sim.design_max, sim.actual_max, sim.chamfer,
+            sim.f_score, sim.precision, sim.recall
+        );
+        println!(
+            "  ├ IoU {:.4} / Dice {:.4} / 法向一致 {:.3} / 偏置 {:+.3} mm → {}",
+            sim.iou,
+            sim.dice,
+            sim.normal_consistency,
+            sim.bias_mm,
+            sim.verdict()
+        );
+        if sim.design_saturated + sim.actual_saturated > 0 {
+            println!(
+                "  └ 距离被窄带钳制：正向 {} 点 / 反向 {} 点 —— Hausdorff 只是**下界**",
+                sim.design_saturated, sim.actual_saturated
+            );
+        }
+    }
+
+    // ── 特征级形位公差（ISO 1101 最小区域法）──
+    //
+    // 上面的相似度是"整件一个数"。验收真正要的是"这个面平不平、这个孔圆不圆"：
+    // 平面度 / 圆柱度 = 两张平行平面（两个同轴圆柱）把实际表面夹住的最小间距。
+    // 基准本身要优化（最小区域），拿最小二乘当基准会高估。
+    //
+    // 表面点从设计面采样沿**实际场梯度**投影到实际表面（q = p + d·∇d/|∇d|），
+    // 是一阶精确投影，不需要最近邻搜索。
+    if !dry {
+        let rep = cncsim_sim::form::analyze(
+            &samples,
+            &out.grid,
+            &cncsim_sim::form::FormConfig::default(),
+        );
+        if rep.features.is_empty() {
+            println!("形位：没有面积足够的特征（min_area 20 mm²）");
+        } else {
+            println!(
+                "形位（最小区域法）：{} 个特征 / 自由曲面占 {:.1}% 面积 / 丢弃小分片 {}",
+                rep.features.len(),
+                rep.freeform_frac * 100.0,
+                rep.skipped
+            );
+            for f in rep.features.iter().take(4) {
+                if f.kind == cncsim_sim::form::Kind::Freeform {
+                    println!(
+                        "  ├ 自由曲面 {:.0} mm²：偏差 平均 {:+.3} / 过切 {:.3} / 残料 {:.3} / 法向一致 {:.3}（不评形位）",
+                        f.area_mm2, f.mean_dev, f.max_gouge, f.max_residual, f.normal_tightness
+                    );
+                } else {
+                    println!(
+                        "  ├ {} {:.0} mm²：{} {:.3} mm（LSQ {:.3}）/ 偏差 平均 {:+.3} / 法向一致 {:.3}",
+                        f.kind.name(),
+                        f.area_mm2,
+                        f.kind.form_name(),
+                        f.form_mz,
+                        f.form_lsq,
+                        f.mean_dev,
+                        f.normal_tightness
+                    );
+                }
+            }
+        }
+    }
+
+    if dry {
+        return;
+    }
     if let Some(path) = export_path_from_args() {
         // 自动降 LOD：h 小的时候 LOD 1 也能到几十万三角形，预览面板会卡
         let mut lod = 1;
@@ -1825,7 +2176,7 @@ fn run_cam_rotary(model: &std::path::Path, tris: &[cncsim_cam::Tri], stock: cncs
     let h = h_from_args().unwrap_or(if auto {
         (tip_r * 0.5).max(h_budget).min(1.0)
     } else {
-        (h_budget).max(0.5).min(1.0)
+        (h_budget).clamp(0.5, 1.0)
     });
     println!("网格：h = {h:.2} mm（刀尖 R{tip_r:.2}，体素上限 4×10⁷）");
     let size = stock.size();
@@ -1973,7 +2324,7 @@ fn run_cam_rotary(model: &std::path::Path, tris: &[cncsim_cam::Tri], stock: cncs
     // 采样点带**面法向**：能不能加工，取决于面朝哪，不是半径。
     // 法向朝下（n·z < cos(A限位)）的是倒扣面，一次装夹从上面下来根本够不到，
     // 算进"切坏了"就是把工艺限制记成加工误差。
-    let surf = cncsim_voxel::meshvol::surface_points_with_normals(&tris, 0.8);
+    let surf = cncsim_voxel::meshvol::surface_points_with_normals(tris, 0.8);
     let cos_lim = cncsim_cam::rotary::A_LIMIT_DEG.to_radians().cos();
     let mut outer: Vec<cncsim_math::DVec3> = Vec::with_capacity(surf.len());
     let mut reach: Vec<bool> = Vec::with_capacity(surf.len());
@@ -2192,6 +2543,15 @@ fn slope_deg() -> f64 {
 }
 
 /// `--finish-step <mm>`：精加工行距（默认 0.4×刀径）。
+fn finish_d_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--finish-d")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+}
+
 fn finish_step_from_args() -> Option<f64> {
     std::env::args()
         .skip(1)
