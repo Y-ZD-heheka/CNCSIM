@@ -854,7 +854,7 @@ fn run_cam(model: &std::path::Path) {
         hi.z
     );
 
-    let stock = match cam_stock_from_args() {
+    let mut stock = match cam_stock_from_args() {
         Some(size) => {
             let c = (lo + hi) * 0.5;
             cncsim_cam::Stock {
@@ -871,6 +871,58 @@ fn run_cam(model: &std::path::Path) {
         "毛坯：({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
         stock.min.x, stock.min.y, stock.min.z, stock.max.x, stock.max.y, stock.max.z
     );
+
+    // ── 工件包络：装不下就**主动缩小**，而不是硬着头皮生成一份跑不了的刀路 ──
+    //
+    // 包络来自机床配置（`work: table_diameter / max_height`），默认 Ø400 × 高 340
+    // （AC 双转台摇篮：台面 Ø400；Z 上限 520 − 台面 180）。
+    // 缩放是**等比**的，中心取（毛坯 XY 中心，底面）——件还是坐在台面上、
+    // 绕 C 轴扫的还是同一个圆。比例会打印出来，不偷偷改件。
+    let mut tris = tris;
+    {
+        let env = match cncsim_config::load(machine_path_from_args()) {
+            Ok(c) => c.work,
+            Err(_) => cncsim_config::WorkEnvelope::default(),
+        };
+        let pivot = DVec3::new(
+            0.5 * (stock.min.x + stock.max.x),
+            0.5 * (stock.min.y + stock.max.y),
+            stock.min.z,
+        );
+        let (r, h) = stock_envelope(&stock);
+        match shrink_for_envelope(r, h, &env) {
+            Some(k) if !args_flag("--no-shrink") => {
+                for t in tris.iter_mut() {
+                    for p in t.iter_mut() {
+                        *p = pivot + (*p - pivot) * k;
+                    }
+                }
+                let size = stock.size();
+                stock = cncsim_cam::Stock {
+                    min: pivot,
+                    max: pivot + size * k,
+                };
+                println!(
+                    "工件包络：件 Ø{:.0}×{:.0} 超出 台面 Ø{:.0} / 高 {:.0} → 等比缩小 **{:.3}×** → Ø{:.0}×{:.0}",
+                    2.0 * r,
+                    h,
+                    env.table_diameter,
+                    env.max_height,
+                    k,
+                    2.0 * r * k,
+                    h * k
+                );
+            }
+            Some(_) => println!(
+                "工件包络：件 Ø{:.0}×{:.0} 超出 台面 Ø{:.0} / 高 {:.0}，`--no-shrink` 保持原尺寸（**这份程序在这台机床上装不下**）",
+                2.0 * r, h, env.table_diameter, env.max_height
+            ),
+            None => println!(
+                "工件包络：Ø{:.0}×{:.0} ⊆ 台面 Ø{:.0} / 高 {:.0} ✓",
+                2.0 * r, h, env.table_diameter, env.max_height
+            ),
+        }
+    }
 
     // `--axis x,y,z`：**定轴 3+2**——把旋转轴锁到该方向，再走普通三轴刀路。
     // `--multi`：多方向开粗 + 精加工（+Z / ±X / ±Y），一份程序。
@@ -926,6 +978,7 @@ fn run_cam(model: &std::path::Path) {
         rough: Some(rough.clone()),
         finish: finish.clone(),
         process: process.clone(),
+        rest: None,
     };
     let t0 = std::time::Instant::now();
     let prog = match cncsim_cam::generate(&job) {
@@ -1311,6 +1364,8 @@ fn run_cam_multi(
             dir: *d,
             rough: Some(rough.clone()),
             finish: finish.clone(),
+            rest: None,
+            process: None,
         })
         .collect();
     // 轴向工序用 45° 坡度门槛，覆盖的是"法向与某根轴夹角 ≤45°"的面；剩下的洞在
@@ -1332,6 +1387,8 @@ fn run_cam_multi(
                 dir: d,
                 rough: None,
                 finish: finish.clone(),
+                rest: None,
+                process: None,
             });
             n_oblique += 1;
         }
@@ -1436,6 +1493,8 @@ fn run_cam_multi(
                     dir: d,
                     rough: None,
                     finish: finish.clone(),
+                    rest: None,
+                    process: None,
                 });
                 n_auto += 1;
             }
@@ -1455,6 +1514,95 @@ fn run_cam_multi(
         }
     );
 
+    // ── 凹角小刀清根：先按现有工序体检一遍，再把残料圈补一道小刀 ──
+    //
+    // 球头在凹角处必然留下 `R(1/sin(θ/2)−1)`（90° 角 = 0.41R），换小刀只补
+    // 残料那一圈，切长只涨几个百分点；全局换小刀是 2.7 倍切长（见 §39）。
+    //
+    // 判据用**解析口径**（与 h 无关）：只补 0.15 < d ≤ 1.0 的点。d > 1 mm 的是
+    // "刀根本没接近过"——换小刀也进不去，那是翻面或五轴的活，补了只是白跑。
+    if !args_flag("--no-rest") {
+        // 清根刀径：**由公差反推**。球头在 90° 凹角的残高是 `R(1/sin45°−1)=0.414R`，
+        // 要落进 ±0.15 就必须 R ≤ 0.36（Ø0.72）。默认取这个上限与 0.6×精刀 的较小者，
+        // `--rest-d` 可覆盖。
+        let d_rest = rest_d_from_args().unwrap_or_else(|| {
+            let by_tol = 2.0 * 0.15 / (1.0 / (std::f64::consts::FRAC_PI_4).sin() - 1.0);
+            (d_finish * 0.6).min(by_tol * 1.02).clamp(0.5, 1.5)
+        });
+        let t0 = std::time::Instant::now();
+        let plan0 = match generate_plan(tris, stock, &process, &passes) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("清根体检：初版计划生成失败：{e}");
+                std::process::exit(1);
+            }
+        };
+        let table0 = cncsim_tool::ToolTable::new(plan0.tools.clone());
+        let prog0 = cncsim_gcode::interpret(&plan0.program.gcode, &interp_config_for(&plan0.tools));
+        let cfg0 = cncsim_sim::run::RunConfig {
+            grid,
+            stock_origin: stock.min,
+            stock_size: domain,
+            design: Some(design.clone()),
+            dry_run: true,
+            drop_chips: false,
+            ..Default::default()
+        };
+        let out0 = cncsim_sim::run::run_tools(&prog0, &table0, &cfg0);
+        let d0 = cncsim_sim::compare::sweep_deviation(&out0.cut_segs, &table0, &vis.points, 1.0);
+        // 残料点的**下标**（后面要按方向筛：每个方向只补它自己看得见的那批）
+        let targets: Vec<usize> = d0
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.is_finite() && **d > 0.15 && **d <= 1.0)
+            .map(|(i, _)| i)
+            .collect();
+        println!(
+            "残料清根：{} 点残料（0.15–1.0 mm）→ 换 Ø{d_rest:.1} 补刀（体检 {:.1} s / 已成程序 {} 段）",
+            targets.len(),
+            t0.elapsed().as_secs_f64(),
+            out0.cut_segs.len()
+        );
+        if targets.is_empty() {
+            println!("  └ 没有落在这个区间的残料，不加清根道");
+        } else {
+            let mut rp = process.clone();
+            rp.finish_stepover_mm = (d_rest * 0.4).clamp(0.2, 0.6);
+            rp.stock_allowance_mm = 0.0;
+            let n0 = passes.len();
+            // **每个方向只补它自己看得见的残料**（`vis.masks` 的第 k 位）。
+            // 11 个方向各补一遍同一批点是 2.1 倍切长——实测下来还不如全局换小刀，
+            // 那就白做了。覆盖不到 3% 的方向直接不出道。
+            let mut added = 0usize;
+            for k in 0..n0.min(63) {
+                let bit = 1u64 << k;
+                let pts: Vec<cncsim_math::DVec3> = targets
+                    .iter()
+                    .filter(|i| vis.masks[**i] & bit != 0)
+                    .map(|i| vis.points[*i])
+                    .collect();
+                if pts.len() * 33 < targets.len() {
+                    continue; // <3%：这道补不了多少东西
+                }
+                passes.push(Pass {
+                    dir: passes[k].dir,
+                    rough: None,
+                    // 刃长 3 mm：清根刀是**长颈小刀**，不是 20 mm 刃的常规球头——
+                    // 刃长写 20 会让刀杆检查把"悬伸下面 20 mm 处的料"也判成碰撞，
+                    // 实测一次就误杀 1474 个清根点。
+                    finish: cncsim_cam::ToolSpec::ball(0, d_rest, 3.0),
+                    rest: Some(pts),
+                    process: Some(rp.clone()),
+                });
+                added += 1;
+            }
+            println!(
+                "  └ 追加 {added} 道 Ø{d_rest:.1} 清根（每道只走自己看得见的残料，行距 {:.2}）",
+                rp.finish_stepover_mm
+            );
+        }
+    }
+
     let t0 = std::time::Instant::now();
     let plan = match generate_plan(tris, stock, &process, &passes) {
         Ok(p) => p,
@@ -1473,10 +1621,11 @@ fn run_cam_multi(
         t0.elapsed().as_secs_f64()
     );
     println!(
-        "完成 {} 道 / 跳过 {} 道 / 刀杆避让 {} 点",
+        "完成 {} 道 / 跳过 {} 道 / 刀杆避让 {} 点 / 球面避让（啃悬伸）{} 点",
         plan.passes,
         plan.skipped.len(),
-        plan.program.stats.shank_skips
+        plan.program.stats.shank_skips,
+        plan.program.stats.ball_skips
     );
     for (i, why) in &plan.skipped {
         let d = passes[*i].dir;
@@ -1494,18 +1643,7 @@ fn run_cam_multi(
     }
 
     // ── 解释：A/C 按 Head（双摆头）约定生成，必须配套 ──
-    let mut radii = vec![0.0; 64];
-    for t in &plan.tools {
-        let k = t.number as usize;
-        if k < radii.len() {
-            radii[k] = t.diameter * 0.5;
-        }
-    }
-    let ic = cncsim_gcode::InterpConfig {
-        tool_radii: radii,
-        rotary: cncsim_gcode::RotaryConvention::Head,
-        ..Default::default()
-    };
+    let ic = interp_config_for(&plan.tools);
     let program = cncsim_gcode::interpret(&plan.program.gcode, &ic);
     if program.has_errors() {
         eprintln!("解释器报错：{:?}", program.issues);
@@ -1670,6 +1808,69 @@ fn run_cam_multi(
         ss.residual_frac() * 100.0,
         ss.max_gouge
     );
+    // ── 过切归因（解析口径）：每个过切点是被**哪把刀**扫过的 ──
+    //
+    // 体素口径那套归因要跑完整仿真；这里只吃 `cut_segs`，所以 `--dry` 也能出。
+    // 清根道是否啃到悬伸、哪一道该改，全靠这张表。
+    {
+        let idx: Vec<usize> = dsw
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.is_finite() && **d < -0.15)
+            .map(|(i, _)| i)
+            .collect();
+        if !idx.is_empty() {
+            let sub: Vec<cncsim_math::DVec3> = idx.iter().map(|i| pts[*i]).collect();
+            let hits = cncsim_sim::compare::attribute_points(&out.cut_segs, &table, &sub, 0.05);
+            let mut cnt: std::collections::HashMap<u16, (usize, f64)> =
+                std::collections::HashMap::new();
+            for h in hits.iter().flatten() {
+                let e = cnt.entry(h.tool).or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 = e.1.max(h.depth);
+            }
+            let mut rows: Vec<_> = cnt.into_iter().collect();
+            rows.sort_by_key(|a| std::cmp::Reverse(a.1.0));
+            let top: Vec<String> = rows
+                .iter()
+                .take(4)
+                .map(|(t, (n, d))| {
+                    let p = ((*t as usize).saturating_sub(1)) / 2;
+                    format!("T{t}(第{}道,{n}点,{d:.2})", p + 1)
+                })
+                .collect();
+            println!(
+                "  过切归因：{} 点 >0.15 → 命中扫掠体 {} / 没命中 {}；{}",
+                idx.len(),
+                hits.iter().flatten().count(),
+                idx.len() - hits.iter().flatten().count(),
+                top.join(" ")
+            );
+        }
+    }
+
+    // 最深过切点**是谁切的**：只对这一个点做归因（单点，代价可忽略）
+    if let Some((i, _)) = dsw
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.is_finite())
+        .min_by(|a, b| a.1.total_cmp(b.1))
+        && dsw[i] < -0.15
+    {
+        let one = [pts[i]];
+        let hit = cncsim_sim::compare::attribute_points(&out.cut_segs, &table, &one, 0.05);
+        if let Some(h) = hit[0] {
+            println!(
+                "  └ 最深过切 ({:.2},{:.2},{:.2})：T{} 第 {} 行 / {:.2} mm",
+                pts[i].x,
+                pts[i].y,
+                pts[i].z,
+                h.tool,
+                h.line,
+                h.depth
+            );
+        }
+    }
     println!(
         "  └ 残料里 {} 点比 1.0 mm 还远（这 {} 道工序从没接近过它们）{}",
         ss.far,
@@ -2543,6 +2744,15 @@ fn slope_deg() -> f64 {
 }
 
 /// `--finish-step <mm>`：精加工行距（默认 0.4×刀径）。
+fn rest_d_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--rest-d")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+}
+
 fn finish_d_from_args() -> Option<f64> {
     std::env::args()
         .skip(1)
@@ -2604,6 +2814,51 @@ fn cam_path_from_args() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// 装不装得下：`None` = 装得下；`Some(k)` = 等比缩小到 `k`（留 1% 余量）。
+///
+/// 只判两条硬约束（台面直径、刀尖高度）。"摆角与尺寸耦合"不在这里——
+/// 那是工序选方向的事（`r ≤ L/tanA`），缩放解决不了。
+fn shrink_for_envelope(
+    r: f64,
+    h: f64,
+    env: &cncsim_config::WorkEnvelope,
+) -> Option<f64> {
+    let mut s = 1.0f64;
+    if env.table_diameter > 0.0 {
+        s = s.min(0.5 * env.table_diameter / r.max(1e-9));
+    }
+    if env.max_height > 0.0 {
+        s = s.min(env.max_height / h.max(1e-9));
+    }
+    (s < 1.0).then(|| (s * 0.99).max(0.05))
+}
+
+/// 解释器配置：刀补半径按刀号、A/C 用 Head（双摆头）约定。
+///
+/// 必须和 `generate_plan` 用**同一份**刀表——半径差一点，仿真就按另一把刀扫。
+fn interp_config_for(tools: &[cncsim_tool::ToolDef]) -> cncsim_gcode::InterpConfig {
+    let mut radii = vec![0.0; 64];
+    for t in tools {
+        let k = t.number as usize;
+        if k < radii.len() {
+            radii[k] = t.diameter * 0.5;
+        }
+    }
+    cncsim_gcode::InterpConfig {
+        tool_radii: radii,
+        rotary: cncsim_gcode::RotaryConvention::Head,
+        ..Default::default()
+    }
+}
+
+/// 毛坯装夹包络的两个分量：**(外接圆半径, 高度)**。
+///
+/// 半径取 XY 对角线的半长——工件绕 C 轴会扫出整个外接圆，台面装的是那个圆。
+fn stock_envelope(s: &cncsim_cam::Stock) -> (f64, f64) {
+    let size = s.size();
+    (0.5 * (size.x * size.x + size.y * size.y).sqrt(), size.z)
 }
 
 fn cam_stock_from_args() -> Option<cncsim_math::DVec3> {

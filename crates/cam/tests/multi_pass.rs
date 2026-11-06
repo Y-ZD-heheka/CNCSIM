@@ -79,6 +79,8 @@ fn passes() -> Vec<Pass> {
             dir,
             rough: Some(ToolSpec::flat(0, 5.0 + i as f64, 20.0)),
             finish: ToolSpec::ball(0, 3.0, 10.0),
+            rest: None,
+            process: None,
         })
         .collect()
 }
@@ -148,6 +150,8 @@ fn side_passes_reach_the_x_faces() {
                 dir: DVec3::new(dir, 0.0, 0.0),
                 rough: Some(ToolSpec::flat(0, 5.0, 20.0)),
                 finish: ToolSpec::ball(0, 3.0, 10.0),
+                rest: None,
+                process: None,
             }],
         )
         .unwrap();
@@ -245,6 +249,8 @@ fn side_passes_tilt_the_tool_axis() {
                 dir,
                 rough: Some(ToolSpec::flat(0, 5.0, 20.0)),
                 finish: ToolSpec::ball(0, 3.0, 10.0),
+                rest: None,
+                process: None,
             }],
         )
         .unwrap();

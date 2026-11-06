@@ -26,6 +26,12 @@ pub struct Pass {
     /// 该方向的粗加工刀；`None` = 只精加工。
     pub rough: Option<ToolSpec>,
     pub finish: ToolSpec,
+    /// **清根目标点**（世界坐标）：`Some` 时这一道只在这些点附近走刀。
+    /// 用于"凹角小刀清根"——上一道在大刀留下的残料圈里补一遍。
+    pub rest: Option<Vec<DVec3>>,
+    /// 这一道用自己的工艺参数（`None` = 用计划级的那套）。
+    /// 清根要换更小的行距，但**不能**动其它道的参数。
+    pub process: Option<Process>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,7 +125,8 @@ pub fn generate_plan(
             stock: lstock,
             rough: rough.clone(),
             finish: finish.clone(),
-            process: process.clone(),
+            process: pass.process.clone().unwrap_or_else(|| process.clone()),
+            rest: pass.rest.as_deref(),
         };
         // 单道失败就跳过，不让整份计划作废
         let prog = match crate::generate_in(&job, Some(f)) {
@@ -154,6 +161,7 @@ pub fn generate_plan(
         gcode.push_str(&format!("G0 A{a:.3} C{c:.3}\n"));
         gcode.push_str(&strip_end(&prog.gcode));
         stats.shank_skips += prog.stats.shank_skips;
+        stats.ball_skips += prog.stats.ball_skips;
         stats.levels += prog.stats.levels;
         stats.rough_moves += prog.stats.rough_moves;
         stats.finish_moves += prog.stats.finish_moves;

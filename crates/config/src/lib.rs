@@ -74,6 +74,33 @@ pub struct MachineConfig {
     pub tool_length: f64,
     /// 回转中心到刀尖的偏置（mm）
     pub pivot_distance: DVec3,
+    /// **工件包络**：超出它的件在这台机床上装不下/夹不住。
+    ///
+    /// 配置里没写就按 [`WorkEnvelope::default`]（Ø400 × 高 340）。
+    pub work: WorkEnvelope,
+}
+
+/// 工件包络（装夹尺寸上限）。
+///
+/// 只放"几何上装不下"的两条：**台面能托多大**、**刀尖能到多高**。
+/// 摆角与尺寸的耦合（`r ≤ L/tanA`）不在这里——它取决于工件要摆到多少度，
+/// 是工序的事，不是机床的常量。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorkEnvelope {
+    /// 台面直径（mm）：工件绕 C 轴扫过的圆必须落在这个直径内。
+    pub table_diameter: f64,
+    /// 最大工件高度（mm）：刀尖 Z 行程上限减台面高度。
+    pub max_height: f64,
+}
+
+impl Default for WorkEnvelope {
+    fn default() -> Self {
+        // AC 双转台摇篮：台面 Ø400，Z 上限 520 − 台面 180 = 340
+        Self {
+            table_diameter: 400.0,
+            max_height: 340.0,
+        }
+    }
 }
 
 // ────────────────────── 磁盘格式（只在这里出现） ──────────────────────
@@ -86,7 +113,24 @@ struct MachineFile {
     tool_length: f64,
     #[serde(default = "zero3")]
     pivot_distance: [f64; 3],
+    #[serde(default)]
+    work: WorkFile,
     // parts / motion 等字段故意不声明 → serde 静默忽略
+}
+
+#[derive(Deserialize, Default)]
+struct WorkFile {
+    #[serde(default = "default_table")]
+    table_diameter: f64,
+    #[serde(default = "default_height")]
+    max_height: f64,
+}
+
+fn default_table() -> f64 {
+    WorkEnvelope::default().table_diameter
+}
+fn default_height() -> f64 {
+    WorkEnvelope::default().max_height
 }
 
 #[derive(Deserialize)]
@@ -194,6 +238,10 @@ pub fn parse(src: &str) -> Result<MachineConfig, ConfigError> {
             file.pivot_distance[1],
             file.pivot_distance[2],
         ),
+        work: WorkEnvelope {
+            table_diameter: file.work.table_diameter,
+            max_height: file.work.max_height,
+        },
     })
 }
 

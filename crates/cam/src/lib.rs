@@ -309,12 +309,20 @@ pub struct Job<'a> {
     pub rough: Option<ToolSpec>,
     pub finish: ToolSpec,
     pub process: Process,
+    /// **残料清根的目标点**（世界坐标）。`Some` 时只在这些点附近走刀。
+    ///
+    /// 用来做"凹角小刀清根"：上一道精加工在凹角处必然留下 `R(1/sin(θ/2)−1)`
+    /// 的残料，换一把小刀只在残料那一圈补一遍，切长只涨几个百分点。
+    /// 掩膜会把目标点**按刀半径外扩**（刀心在旁边时球面才够得到）。
+    pub rest: Option<&'a [DVec3]>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
     /// 因为**刀杆会撞工件**而放弃的刀点数。
     pub shank_skips: usize,
+    /// 因为**球面会啃进设计面**（悬伸/倒扣）而放弃的刀点数。
+    pub ball_skips: usize,
     /// 高度场列数。
     pub samples: usize,
     /// 粗加工层数。
@@ -400,6 +408,10 @@ pub fn generate_in(job: &Job<'_>, frame: Option<Frame>) -> Result<Program, CamEr
     validate(job)?;
     let p = &job.process;
     let map = HeightMap::build(job.mesh, job.stock, p.sample_mm);
+    // 残料清根的掩膜：局部坐标系里，按**这把刀**的半径外扩
+    let rest = job.rest.map(|pts| {
+        RestMask::build(pts, frame, job.stock, p.sample_mm, job.finish.radius())
+    });
 
     let part_min = map
         .z
@@ -449,7 +461,9 @@ pub fn generate_in(job: &Job<'_>, frame: Option<Frame>) -> Result<Program, CamEr
         && (undercut_frac > 0.02
             || neck_wider(&job.finish)
             || job.rough.as_ref().is_some_and(neck_wider));
-    let index = need_shank.then(|| MeshIndex::build(job.mesh, job.stock));
+    // 清根道**一定**要建索引：`ball_hits` 靠它判"球有没有啃到悬伸"
+    let index =
+        (need_shank || job.rest.is_some()).then(|| MeshIndex::build(job.mesh, job.stock));
 
     let mut e = Emit::new(frame);
     e.raw(&format!(
@@ -512,6 +526,7 @@ pub fn generate_in(job: &Job<'_>, frame: Option<Frame>) -> Result<Program, CamEr
         safe,
         part_min,
         index.as_ref(),
+        rest.as_ref(),
         &mut stats,
     );
     e.rapid_z(safe);
@@ -762,9 +777,95 @@ fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance: f64) -> bo
     false
 }
 
+/// 球头刀在 `tip` 处时，**球面是否侵入设计面超过 `tol`**。
+///
+/// drop-cutter 只保证"球不穿**高度场**"，而高度场每列只认最上面那一层：
+/// 悬伸下面的一块料它看不见。清根道用 Ø0.7 钻进去补残料时就会啃到悬伸的
+/// 底面——实测把"不可达面"的过切从 0.1% 抬到 6.9%。这里按**真网格**再判一次：
+/// 球心到设计面的距离必须 ≥ R − tol（球与设计面相切时正好等于 R）。
+fn ball_hits(ix: &MeshIndex, tip: DVec3, r: f64, tol: f64) -> bool {
+    let need = (r - tol).max(0.0);
+    if need <= 0.0 {
+        return false;
+    }
+    ix.min_dist(tip + DVec3::new(0.0, 0.0, r), need) < need
+}
+
 // ─────────────────────────── 高度场 ───────────────────────────
 
 /// XY 网格上的最高表面 `z(x,y)` 与命中三角形的法向。
+/// 残料清根的**局部掩膜**：只在这些高度场格子里出刀。
+///
+/// 世界坐标 → 本道工序的局部系 → 格子。比目标点**外扩一个刀半径**：
+/// 刀心落在残料旁边一个 R 以内时，球面才真的扫得到那一点。
+struct RestMask {
+    x0: f64,
+    y0: f64,
+    step: f64,
+    nx: usize,
+    ny: usize,
+    hit: Vec<bool>,
+}
+
+impl RestMask {
+    fn build(pts: &[DVec3], frame: Option<Frame>, stock: Stock, step: f64, radius: f64) -> Self {
+        let nx = ((stock.size().x / step).ceil() as usize) + 1;
+        let ny = ((stock.size().y / step).ceil() as usize) + 1;
+        let mut m = Self {
+            x0: stock.min.x,
+            y0: stock.min.y,
+            step,
+            nx,
+            ny,
+            hit: vec![false; nx * ny],
+        };
+        // 外扩半径（格数向上取整）
+        let k = ((radius / step).ceil() as i64).max(1);
+        for p in pts {
+            let q = frame.map_or(*p, |f| f.unapply(*p));
+            let ci = ((q.x - m.x0) / step).round() as i64;
+            let cj = ((q.y - m.y0) / step).round() as i64;
+            for j in (cj - k)..=(cj + k) {
+                if j < 0 || j >= ny as i64 {
+                    continue;
+                }
+                for i in (ci - k)..=(ci + k) {
+                    if i < 0 || i >= nx as i64 {
+                        continue;
+                    }
+                    m.hit[j as usize * nx + i as usize] = true;
+                }
+            }
+        }
+        m
+    }
+
+    fn has(&self, x: f64, y: f64) -> bool {
+        let i = ((x - self.x0) / self.step).round() as i64;
+        let j = ((y - self.y0) / self.step).round() as i64;
+        if i < 0 || j < 0 || i >= self.nx as i64 || j >= self.ny as i64 {
+            return false;
+        }
+        self.hit[j as usize * self.nx + i as usize]
+    }
+
+    /// 整行没有目标就整行跳过（省掉 nx 次判断，也让空行程不生成）。
+    fn row_has(&self, y: f64) -> bool {
+        let j = ((y - self.y0) / self.step).round() as i64;
+        if j < 0 || j >= self.ny as i64 {
+            return false;
+        }
+        let base = j as usize * self.nx;
+        self.hit[base..base + self.nx].iter().any(|v| *v)
+    }
+
+    /// 被覆盖的格子数（只在测试里用：确认"外扩一个半径"没退化成整张图）。
+    #[cfg(test)]
+    fn points(&self) -> usize {
+        self.hit.iter().filter(|v| **v).count()
+    }
+}
+
 struct HeightMap {
     x0: f64,
     y0: f64,
@@ -1076,6 +1177,7 @@ fn finish_pass(
     safe: f64,
     part_min: f64,
     index: Option<&MeshIndex>,
+    rest: Option<&RestMask>,
     stats: &mut Stats,
 ) {
     let r = tool.radius();
@@ -1090,10 +1192,23 @@ fn finish_pass(
     let mut flip = false;
     for j in 0..=n_lines {
         let y = stock.min.y + (j as f64 * step).min(stock.size().y);
+        // 清根道：整行没有目标就不走（空行程连 G 代码都不生成）
+        if rest.is_some_and(|m| !m.row_has(y)) {
+            continue;
+        }
         let mut pts: Vec<DVec3> = Vec::new();
         let mut runs: Vec<Vec<DVec3>> = Vec::new();
         for i in 0..=((stock.size().x / dx).ceil() as usize) {
             let x = stock.min.x + (i as f64 * dx).min(stock.size().x);
+            if rest.is_some_and(|m| !m.has(x, y)) {
+                // 不在残料区里：当成"这一刀不存在"，断开成两段
+                if pts.len() >= 2 {
+                    runs.push(std::mem::take(&mut pts));
+                } else {
+                    pts.clear();
+                }
+                continue;
+            }
             let tip = map.at(x, y).and_then(|(z, n)| {
                 if flat {
                     // **平底刀（立铣刀）的落刀高度 = 刀盘范围内最高点**。
@@ -1119,10 +1234,25 @@ fn finish_pass(
                 let tip = DVec3::new(x, y, zc - r);
                 (tip.z > part_min - 3.0 * r).then_some(tip)
             });
-            // 刀杆撞工件的点直接放弃：宁可留料，也不能撞
+            // 刀杆撞工件的点直接放弃：宁可留料，也不能撞。
+            //
+            // 清根道是**贴着墙**走的：小刀的刃与刀颈同半径，在凹角里本来就与两侧
+            // 墙面相切（间隙 0）。拿"必须留 0.5 mm 间隙"去判它，会把每个凹角点都
+            // 判成碰撞（实测误杀 1351 点）。清根道改判"刀颈侵入设计面不超过 0.15"，
+            // 与球面的 `ball_hits` 同一口径。
+            let clearance = if rest.is_some() {
+                -0.15
+            } else {
+                p.shank_clearance_mm
+            };
             let tip = match tip {
-                Some(t) if index.is_some_and(|ix| shank_hits(ix, t, tool, p.shank_clearance_mm)) => {
+                Some(t) if index.is_some_and(|ix| shank_hits(ix, t, tool, clearance)) => {
                     stats.shank_skips += 1;
+                    None
+                }
+                // 清根道额外查**球面**：小刀会钻到悬伸下面，那里高度场是瞎的
+                Some(t) if rest.is_some() && index.is_some_and(|ix| ball_hits(ix, t, r, 0.03)) => {
+                    stats.ball_skips += 1;
                     None
                 }
                 other => other,
@@ -1409,6 +1539,83 @@ mod tests {
         );
     }
 
+    /// 清根掩膜：**只盖目标点 + 一个刀半径**，远处不覆盖。
+    #[test]
+    fn rest_mask_covers_targets_plus_one_radius() {
+        let st = Stock {
+            min: DVec3::ZERO,
+            max: DVec3::new(10.0, 10.0, 10.0),
+        };
+        let m = RestMask::build(&[DVec3::new(5.0, 5.0, 0.0)], None, st, 0.25, 0.5);
+        assert!(m.has(5.0, 5.0), "目标点本身必须在掩膜里");
+        assert!(m.has(5.45, 5.0), "外扩 R=0.5 内的邻居也要走（球面才够得到）");
+        assert!(!m.has(7.0, 5.0), "远处不该覆盖");
+        assert!(m.row_has(5.0));
+        assert!(!m.row_has(9.0), "整行没目标就该跳过");
+        assert!(m.points() >= 9, "外扩后至少 3×3 格：{}", m.points());
+    }
+
+    /// 球面闸门：球心离设计面不到 `R − tol` 就判"会啃"。
+    ///
+    /// 这是清根道的安全阀——高度场只认每列最上面那层，悬伸下面是瞎的。
+    #[test]
+    fn ball_gate_blocks_a_tool_that_would_eat_a_ceiling() {
+        let mesh = vec![[
+            DVec3::new(-5.0, -5.0, 10.0),
+            DVec3::new(5.0, -5.0, 10.0),
+            DVec3::new(5.0, 5.0, 10.0),
+        ]];
+        let st = Stock {
+            min: DVec3::new(-6.0, -6.0, 0.0),
+            max: DVec3::new(6.0, 6.0, 12.0),
+        };
+        let ix = MeshIndex::build(&mesh, st);
+        let (r, tol) = (1.5, 0.03);
+        // 刀尖 z=8.4 → 球心 9.9，离板 0.1 ≪ R−tol：判"会啃"
+        assert!(ball_hits(&ix, DVec3::new(0.0, 0.0, 8.4), r, tol));
+        // 刀尖 z=10.0 → 球心 11.5，正好相切（距离 = R）：放行
+        assert!(!ball_hits(&ix, DVec3::new(0.0, 0.0, 10.0), r, tol));
+    }
+
+    /// `Job.rest` 必须真的把刀路收窄：同一块平板，带 rest 的切长应远小于全表面。
+    #[test]
+    fn rest_job_only_cuts_near_the_targets() {
+        let z = 5.0;
+        let p = |x: f64, y: f64| DVec3::new(x, y, z);
+        let mesh = vec![
+            [p(0.0, 0.0), p(20.0, 0.0), p(20.0, 20.0)],
+            [p(0.0, 0.0), p(20.0, 20.0), p(0.0, 20.0)],
+        ];
+        let stock = Stock {
+            min: DVec3::ZERO,
+            max: DVec3::new(20.0, 20.0, 10.0),
+        };
+        let process = Process {
+            finish_stepover_mm: 1.0,
+            sample_mm: 0.5,
+            ..Default::default()
+        };
+        let mut job = Job {
+            mesh: &mesh,
+            stock,
+            rough: None,
+            finish: ToolSpec::ball(1, 2.0, 10.0),
+            process,
+            rest: None,
+        };
+        let full = generate_in(&job, None).expect("全表面应能生成");
+        let targets = [DVec3::new(5.0, 5.0, z)];
+        job.rest = Some(&targets);
+        let one = generate_in(&job, None).expect("清根应能生成");
+        assert!(
+            one.stats.cut_mm < 0.25 * full.stats.cut_mm,
+            "清根只该走一小块：{} vs {} mm",
+            one.stats.cut_mm,
+            full.stats.cut_mm
+        );
+        assert!(one.stats.cut_mm > 0.0, "目标点附近总要走一点");
+    }
+
     /// 平底刀（立铣刀）在墙边被抬到墙顶：drop-cutter 天然不过切。
     #[test]
     fn flat_tool_lifts_to_the_wall_top() {
@@ -1451,6 +1658,7 @@ mod tests {
                 stepdown_mm: 1.0,
                 ..Default::default()
             },
+            rest: None,
         }
     }
 

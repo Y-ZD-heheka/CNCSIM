@@ -436,6 +436,13 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#_69">因此</a></li>
 </ul>
 </li>
+<li><a href="#41-11-06">41. 装不下就缩小 + 凹角小刀清根（11-06 深夜）</a><ul>
+<li><a href="#411">41.1 工件包络</a></li>
+<li><a href="#412">41.2 凹角清根</a></li>
+<li><a href="#413">41.3 三个坑（都是量出来的，不是想出来的）</a></li>
+<li><a href="#414">41.4 剩下的</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -4094,6 +4101,99 @@ h 不再卡验收（h=0.6 与 h=1.0 的解析数字完全一致），只影响�
 <code>--rotary</code> 要求件是回转体（吻合度 ≥0.85，叶轮 0%），<code>--multi</code> 是定轴高度场。
 下一步要么做"沿曲面流线的五轴刀路"，要么明确把叶轮类件排除在能力范围外。
 不要再靠"再加几道方向"去糊——实测没有收益。</p>
+<h2 id="41-11-06">41. 装不下就缩小 + 凹角小刀清根（11-06 深夜）</h2>
+<p>两件事：<strong>工件超出机床包络时自动等比缩小</strong>，以及<strong>凹角残料用长颈小刀补一遍</strong>。</p>
+<h3 id="411">41.1 工件包络</h3>
+<p><code>MachineConfig.work: WorkEnvelope { table_diameter, max_height }</code>，摇篮机是
+<strong>Ø400 / 高 340</strong>（台面 Ø400；刀尖 Z 上限 520 − 台面 180）。超出时 CAM 直接
+等比缩小，<strong>不拒绝、也不偷偷改件</strong>：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>工件包络：件 Ø707×400 超出 台面 Ø400 / 高 340 → 等比缩小 0.560× → Ø396×224
+</code></pre></div>
+
+<ul>
+<li>比例 = <code>min(1, 200/r, 340/h) × 0.99</code>，<code>r</code> 是毛坯 XY 的<strong>外接圆半径</strong>
+  （件绕 C 轴扫的就是那个圆），缩放中心取（毛坯 XY 中心，底面）。</li>
+<li><code>--no-shrink</code> 保持原尺寸并把"这份程序在这台机上装不下"写进报告。</li>
+<li><strong>没有</strong>把"摆角×尺寸"的耦合（<code>r ≤ L/tanA</code>）放进这个判据：那取决于工序要摆
+  多少度，是工序的事。真实的耦合见 §40 与机床文档 §6。</li>
+</ul>
+<h3 id="412">41.2 凹角清根</h3>
+<p><code>Job.rest</code> / <code>Pass.rest</code>（世界坐标目标点）→ <code>RestMask</code>（把目标点按<strong>刀半径</strong>
+外扩成一张高度场格子的位图）→ <code>finish_pass</code> 只在这些格子里出刀。整行没目标
+就整行跳过，G 代码里连空行程都不生成。</p>
+<p>两阶段：先按原计划<strong>干跑</strong>（<code>--dry</code>，22 s）拿 <code>sweep_deviation</code>，把
+<code>0.15 &lt; d ≤ 1.0</code> 的点当目标；<code>d &gt; 1</code> 的是"刀根本没接近过"，换小刀也进不去
+（那是翻面/五轴的活），不补。</p>
+<p>数字（桌腿件 h=0.6，解析口径）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>方案</th>
+<th>合格</th>
+<th>过切</th>
+<th>残料</th>
+<th>切长</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>基线 Ø1.5</td>
+<td>91.6%</td>
+<td>1.2%</td>
+<td>7.2%</td>
+<td>84 m</td>
+</tr>
+<tr>
+<td>全局换 Ø1.0</td>
+<td>94.1%</td>
+<td>1.9%</td>
+<td>4.0%</td>
+<td>123 m</td>
+</tr>
+<tr>
+<td><strong>清根 Ø0.7 × 4 道</strong></td>
+<td><strong>93.7%</strong></td>
+<td><strong>1.2%</strong></td>
+<td>5.1%</td>
+<td><strong>108 m</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>同一切长档位上，清根比"全局换小刀"更划算：多 2.1 个点、<strong>过切不涨</strong>，
+而全局小刀是 2.6 个点但过切翻倍。可达面 90.7% → <strong>94.9%</strong>。</p>
+<h3 id="413">41.3 三个坑（都是量出来的，不是想出来的）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>现象</th>
+<th>根因</th>
+<th>处置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>清根后不可达面过切 0.1% → 6.9%（1420 点，0.27 mm）</td>
+<td>小刀钻进悬伸下面：高度场每列只认最上面那层，看不见悬伸</td>
+<td><code>ball_hits</code>：球心到<strong>真网格</strong>的距离必须 ≥ <code>R − 0.03</code>。698 点被拦</td>
+</tr>
+<tr>
+<td>一个凹角点都没走（误杀 1351 点）</td>
+<td>刀杆检查要求"留 0.5 mm 间隙"，而清根刀在凹角里本来就与两侧墙面<strong>相切</strong>（间隙 0）</td>
+<td>清根道的刀杆判据改成"侵入 ≤0.15"（<code>clearance = −0.15</code>）</td>
+</tr>
+<tr>
+<td>再造一批（误杀 1474 点）</td>
+<td>清根刀写成刃长 20 mm 的常规球头，刀颈"伸到 20 mm 高"</td>
+<td>写成<strong>长颈小刀</strong>：刃长 3 mm，刀颈从 3 mm 起</td>
+</tr>
+</tbody>
+</table></div>
+<p>另外试过"从每条刀路的最高点下刀"（想让刀颈插得浅一点）：<strong>过切一点没变</strong>
+（3272 点原样），已回退——记录在这里，免得下次再试。</p>
+<h3 id="414">41.4 剩下的</h3>
+<p>可达面 5.1% 残料里，&gt;0.15 mm 的那部分已经压到 1.5% 左右；剩下的是
+<strong>刀径与公差的结构关系</strong>：90° 凹角要落进 ±0.15 得 R ≤ 0.36（Ø0.72），
+再小就断刀。要继续往上只能翻面（不可达面仍 42% 残料）或五轴侧刃。</p>
 </main>
 </div>
 <script>

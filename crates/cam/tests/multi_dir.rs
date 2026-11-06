@@ -82,6 +82,7 @@ fn machine_from(dir: DVec3, part: &[Tri], world_stock: Stock) -> (String, Stock)
             sample_mm: 0.5,
             ..Default::default()
         },
+        rest: None,
     };
     let prog = generate_in(&job, Some(f)).expect("生成失败");
     (prog.gcode, world_stock)

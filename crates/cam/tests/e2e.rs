@@ -86,6 +86,7 @@ fn relief_mesh_is_machined_without_gouge_and_with_bounded_residual() {
         rough: Some(rough.clone()),
         finish: finish.clone(),
         process: process.clone(),
+        rest: None,
     };
     let prog = generate(&job).expect("CAM 生成失败");
     println!(
