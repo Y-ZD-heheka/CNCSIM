@@ -414,7 +414,14 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#55">多线程：55% 的墙钟在单线程里</a></li>
 </ul>
 </li>
-<li><a href="#_110">数字演进一览</a></li>
+<li><a href="#617-78811-07">五轴曲面法向点铣：叶轮 61.7% → 78.8%（11-07）</a><ul>
+<li><a href="#_110">核心那一句</a></li>
+<li><a href="#_111">数字</a></li>
+<li><a href="#_112">四个坑</a></li>
+<li><a href="#_113">剩下的</a></li>
+</ul>
+</li>
+<li><a href="#_114">数字演进一览</a></li>
 </ul>
 </div>
 
@@ -3645,7 +3652,43 @@ CAM 读它，超出就 <code>min(1, 200/r, 340/h)×0.99</code> 等比缩小，�
 <p>试过没用的：加密段索引 8 倍反而更慢（59.6 → 64.2 s），已回退——瓶颈不在桶里
 有多少段，而在每段 <code>sd_sweep</code> 本身。</p>
 <hr />
-<h2 id="_110">数字演进一览</h2>
+<h2 id="617-78811-07">五轴曲面法向点铣：叶轮 61.7% → 78.8%（11-07）</h2>
+<p>§40 的结论是"叶轮要五轴侧刃铣，本项目没有"。这一轮把那条结论<strong>改掉了一半</strong>：
+不做侧刃铣（要直纹面），做<strong>法向点铣</strong>——刀轴沿设计面外法向，球贴上去切。</p>
+<h3 id="_110">核心那一句</h3>
+<p>球头各向同性：球在 <code>p</code> 相切 ⟺ 球心在 <code>p + R·n</code>。而 <code>球心 = tip + R·a</code>，所以</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>tip = p + R·(n − a)              a = 刀轴
+</code></pre></div>
+
+<p><strong>刀轴是自由的</strong>。<code>a = n</code> 时 <code>tip = p</code>；法向超出行程（叶片下表面 A=180°，
+机床 110°）就把 <code>a</code> 拉到 110°，球照样相切，只是刀尖偏出去 <code>R(n−a)</code>。
+叶轮 1 有 <strong>45% 的残料点栽在 A 超程上</strong>，改这一条之后是 0 个。</p>
+<h3 id="_111">数字</h3>
+<p>桌腿件（h=1.5，关清根/翻面隔离变量）：<strong>91.6% → 93.9%</strong>，残料 7.2% → 4.9%，
+不可达面 57.9% → <strong>73.5%</strong>，过切和最大过切<strong>一点没变</strong>（1.2% / +0.32）。</p>
+<p>叶轮 1（h=1.0，关清根）：<strong>61.7% → 78.8%</strong>，残料 37.0% → 19.8%，
+可达面 73.4% → <strong>94.5%</strong>，过切不变（1.3%）。</p>
+<p>刀径是决定性的一根：Ø2.3（=精刀）63.1% / Ø1.5 64.1% / <strong>Ø1.0 78.8%</strong> /
+Ø0.8 78.5% / Ø0.6 77.4%。默认 <code>--surface-d = min(精刀, Ø1.0)</code>。</p>
+<h3 id="_112">四个坑</h3>
+<ol>
+<li><strong>刀号只写在 G 代码字符串里</strong>（<code>ToolSpec</code> 里是 0）→ 仿真 <code>by_number</code> 找不到，
+   退回第一把 Ø6 平底刀：过切 1.2% → 6.8%、最深 2.92 mm。</li>
+<li><strong>收尾的竖直抬刀</strong>：多工序尾是 <code>G49</code> + <code>G53 Z61</code>，从刀尖当前位置竖直往上。
+   三轴道每列上方都已切空，五轴道结束时刀尖在侧壁上、刀杆还歪着——一抬就是
+   从工件里穿出去，<code>sd_sweep</code> 在一条 82 mm 的长扫掠上报 0.67 mm。
+   → 曲面道自己收尾：沿刀轴退出 → <code>G49</code> → <code>G0 A0 C0</code> → <code>G0 Z safe</code>。</li>
+<li><strong>刃部圆柱从来没被查过</strong>：3 轴 drop-cutter 里球已经保证刀柱在料外，五轴不成立。
+   → <code>shank_hits_axis</code> 分两段（刃部 <code>R−0.03</code>、刀杆 <code>R+0.3</code>）。</li>
+<li><strong>串链穿墙</strong>：接受点和被拒点混在一起，1 mm 的近邻之间可能隔着凸棱。
+   → 每条直线段都过 <code>sweep_ok</code>（球心 + 刃部圆柱），法向差 &gt;60° 不连。</li>
+</ol>
+<h3 id="_113">剩下的</h3>
+<p>叶轮 1 的 13.9 万残料点里 <strong>10.2 万（73%）被刀杆拦掉</strong>——Ø1 的刀伸进叶片通道，
+刃长以上那一段必然蹭到对面叶片。这不是刀路能解的：要么更细的颈/更长悬伸的刀，
+要么翻面。另外残料 &gt;1 mm 的 3.8 万点需要<strong>五轴开粗</strong>，点铣一遍切不到底。</p>
+<hr />
+<h2 id="_114">数字演进一览</h2>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -3884,6 +3927,11 @@ CAM 读它，超出就 <code>min(1, 200/r, 340/h)×0.99</code> 等比缩小，�
 <td><strong>11-06 相似度 + 形位</strong></td>
 <td><strong>528</strong></td>
 <td><strong>双向 Hausdorff/Chamfer/F1/IoU + 最小区域法形位公差：两个平面 0.028 / 0.360 mm</strong></td>
+</tr>
+<tr>
+<td><strong>11-07 五轴曲面法向点铣</strong></td>
+<td><strong>544</strong></td>
+<td><strong>叶轮 61.7 → 78.8%，残料 37 → 19.8%，过切不变；刀轴可倾斜绕开 A 行程</strong></td>
 </tr>
 <tr>
 <td><strong>11-06 包络缩小 + 凹角清根</strong></td>

@@ -1521,24 +1521,25 @@ fn run_cam_multi(
     //
     // 判据用**解析口径**（与 h 无关）：只补 0.15 < d ≤ 1.0 的点。d > 1 mm 的是
     // "刀根本没接近过"——换小刀也进不去，那是翻面或五轴的活，补了只是白跑。
-    if !args_flag("--no-rest") {
-        // 清根刀径：**由公差反推**。球头在 90° 凹角的残高是 `R(1/sin45°−1)=0.414R`，
-        // 要落进 ±0.15 就必须 R ≤ 0.36（Ø0.72）。默认取这个上限与 0.6×精刀 的较小者，
-        // `--rest-d` 可覆盖。
-        let d_rest = rest_d_from_args().unwrap_or_else(|| {
-            let by_tol = 2.0 * 0.15 / (1.0 / (std::f64::consts::FRAC_PI_4).sin() - 1.0);
-            (d_finish * 0.6).min(by_tol * 1.02).clamp(0.5, 1.5)
-        });
+    // ── 刀路体检：**只走刀、不切料**，拿到"哪里的设计面还没被切到" ──
+    //
+    // 清根（小刀补残料圈）和五轴曲面道（补高度场看不见的面）都要这份数据，
+    // 所以只跑一次。代价 = 一次纯粹的刀路走位（桌腿件 22 道 ~51 s）。
+    let want_rest = !args_flag("--no-rest");
+    let want_surface = !args_flag("--no-surface");
+    let mut probe: Option<(cncsim_sim::run::RunOutput, cncsim_tool::ToolTable)> = None;
+    if want_rest || want_surface {
         let t0 = std::time::Instant::now();
         let plan0 = match generate_plan(tris, stock, &process, &passes) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("清根体检：初版计划生成失败：{e}");
+                eprintln!("刀路体检：初版计划生成失败：{e}");
                 std::process::exit(1);
             }
         };
         let table0 = cncsim_tool::ToolTable::new(plan0.tools.clone());
-        let prog0 = cncsim_gcode::interpret(&plan0.program.gcode, &interp_config_for(&plan0.tools));
+        let prog0 =
+            cncsim_gcode::interpret(&plan0.program.gcode, &interp_config_for(&plan0.tools));
         let cfg0 = cncsim_sim::run::RunConfig {
             grid,
             stock_origin: stock.min,
@@ -1549,7 +1550,23 @@ fn run_cam_multi(
             ..Default::default()
         };
         let out0 = cncsim_sim::run::run_tools(&prog0, &table0, &cfg0);
-        let d0 = cncsim_sim::compare::sweep_deviation(&out0.cut_segs, &table0, &vis.points, 1.0);
+        println!(
+            "刀路体检（只走刀不切料）：{:.1} s / {} 段",
+            t0.elapsed().as_secs_f64(),
+            out0.cut_segs.len()
+        );
+        probe = Some((out0, table0));
+    }
+
+    if want_rest && let Some((out0, table0)) = &probe {
+        // 清根刀径：**由公差反推**。球头在 90° 凹角的残高是 `R(1/sin45°−1)=0.414R`，
+        // 要落进 ±0.15 就必须 R ≤ 0.36（Ø0.72）。默认取这个上限与 0.6×精刀 的较小者，
+        // `--rest-d` 可覆盖。
+        let d_rest = rest_d_from_args().unwrap_or_else(|| {
+            let by_tol = 2.0 * 0.15 / (1.0 / (std::f64::consts::FRAC_PI_4).sin() - 1.0);
+            (d_finish * 0.6).min(by_tol * 1.02).clamp(0.5, 1.5)
+        });
+        let d0 = cncsim_sim::compare::sweep_deviation(&out0.cut_segs, table0, &vis.points, 1.0);
         // 残料点的**下标**（后面要按方向筛：每个方向只补它自己看得见的那批）
         let targets: Vec<usize> = d0
             .iter()
@@ -1558,9 +1575,8 @@ fn run_cam_multi(
             .map(|(i, _)| i)
             .collect();
         println!(
-            "残料清根：{} 点残料（0.15–1.0 mm）→ 换 Ø{d_rest:.1} 补刀（体检 {:.1} s / 已成程序 {} 段）",
+            "残料清根：{} 点残料（0.15–1.0 mm）→ 换 Ø{d_rest:.1} 补刀（体检程序 {} 段）",
             targets.len(),
-            t0.elapsed().as_secs_f64(),
             out0.cut_segs.len()
         );
         if targets.is_empty() {
@@ -1629,14 +1645,107 @@ fn run_cam_multi(
         None
     };
 
+    // ── 五轴曲面法向点铣：把"高度场看不见"的面补上 ──
+    //
+    // 高度场每列只认最上面那一层，所以叶片侧壁在任何方向的列里都不是最高面——
+    // `docs/项目记忆.md` §40 里叶轮 2 可达 86.3%、可达面却只有 15.4% 合格。
+    // 这条道**不经过高度场**：球心放在 `p + R·n`，刀轴沿 `n`，球在 `p` 相切。
+    //
+    // 目标点用**密采**（`surface_samples`，步距 = 0.4×精刀径）：`reach` 的
+    // 1.5 mm 采样只够判"看不看得见"，不够定刀路——1.5 mm 步距在 R0.5 的球上
+    // 会留下 0.56 mm 的刀花。
+    let mut surf_frag = String::new();
+    let mut surf_tool: Option<cncsim_cam::ToolSpec> = None;
+    if want_surface && let Some((out0, table0)) = &probe {
+        let step = (d_finish * 0.4).clamp(0.25, 0.8);
+        let smp = cncsim_voxel::meshvol::surface_samples(tris, step);
+        let pts: Vec<cncsim_math::DVec3> = smp.iter().map(|(p, _, _)| *p).collect();
+        let d = cncsim_sim::compare::sweep_deviation(&out0.cut_segs, table0, &pts, 1.0);
+        let targets: Vec<(cncsim_math::DVec3, cncsim_math::DVec3)> = smp
+            .iter()
+            .zip(&d)
+            .filter(|(_, dd)| dd.is_finite() && **dd > 0.15)
+            .map(|((p, n, _), _)| (*p, *n))
+            .collect();
+        println!(
+            "五轴曲面：设计面密采 {} 点（{:.2} mm）→ 残料 {} 点（{:.1}%）",
+            smp.len(),
+            step,
+            targets.len(),
+            targets.len() as f64 / smp.len().max(1) as f64 * 100.0
+        );
+        if !targets.is_empty() {
+            // 曲面道刀径：**默认比精刀小一档（≤Ø1）**。它本来就是补残料/补高度场
+            // 看不见的面用的，刀越大越进不去——叶轮 1 实测（h=1.0、解析口径）：
+            //
+            //   Ø2.3 → 63.1% / Ø1.5 → 64.1% / **Ø1.0 → 78.8%** / Ø0.8 → 78.5% / Ø0.6 → 77.4%
+            //
+            // 再小就没收益了（切长还翻倍），所以封在 Ø1.0。
+            let ds = surface_d_from_args().unwrap_or(d_finish.min(1.0));
+            // 刃长 = 刀能"伸进去"的深度。给长一点能进深腔，但**刃部圆柱也要
+            // 真的进得去**（见 `shank_hits_axis`）——深窄槽里长刃反而全被拒。
+            let flute = surface_flute_from_args()
+                .unwrap_or_else(|| (0.4 * stock.size().z).clamp(4.0, 16.0));
+            let tn = (2 * passes.len() + 1) as u16;
+            // **刀号必须写进 `ToolSpec`**：G 代码里的 `T23` 只是文本，仿真按
+            // `ToolTable::by_number` 找母线。刀号写成 0 会让仿真用错刀（退到第一把
+            // Ø6 平底刀），实测把过切从 1.2% 抬到 6.8%、最深 2.92 mm。
+            let tool = cncsim_cam::ToolSpec::ball(tn, ds, flute);
+            let mut o = cncsim_cam::surface::SurfaceOpts::new(tool.clone(), tn, stock);
+            o.link_mm = (2.0 * step).clamp(0.5, 3.0);
+            o.out_step_mm = (1.2 * tool.radius()).clamp(0.3, 1.2);
+            o.feed_mm_min = 800.0;
+            match cncsim_cam::surface::generate_surface(tris, stock, &targets, &o) {
+                Ok(sx) => {
+                    let st = sx.stats;
+                    println!(
+                        "  └ Ø{ds:.1} 长颈球头（刃长 {flute:.0}）：通过 {} 点 / A超程 {} / 球面塞不下 {} / 刀杆撞 {} / 切入啃 {} → {} 条链 / {} 块 / 切 {:.1} m",
+                        st.accepted,
+                        st.a_rejected,
+                        st.gouge_rejected,
+                        st.shank_rejected,
+                        st.plunge_rejected,
+                        st.runs,
+                        st.moves,
+                        st.cut_mm / 1000.0
+                    );
+                    surf_frag = sx.gcode;
+                    surf_tool = Some(tool);
+                }
+                Err(e) => println!("  └ 五轴曲面道生成失败：{e}"),
+            }
+        }
+    }
+
     let t0 = std::time::Instant::now();
-    let plan = match generate_plan(tris, stock, &process, &passes) {
+    let mut plan = match generate_plan(tris, stock, &process, &passes) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("多方向 CAM 失败：{e}");
             std::process::exit(1);
         }
     };
+
+    // 把五轴曲面道插进程序：**翻面道之前**（它在第一套装夹里，目标是翻面前的残料），
+    // 没有翻面时就插在收尾（G53 回退）之前。
+    if !surf_frag.is_empty() {
+        let at = match flip_idx {
+            Some(fi) => plan
+                .program
+                .gcode
+                .find(&format!("(PASS {} dir", fi + 1))
+                .unwrap_or(plan.program.gcode.len()),
+            None => plan
+                .program
+                .gcode
+                .rfind("(G53:")
+                .unwrap_or(plan.program.gcode.len()),
+        };
+        plan.program.gcode.insert_str(at, &surf_frag);
+        if let Some(t) = surf_tool {
+            plan.tools.push(t.to_tool_def());
+        }
+    }
     println!(
         "刀路：{} 行 / {} 层 / 粗 {} 段 / 精 {} 段 / 切 {:.0} mm（{:.2} s）",
         plan.program.stats.lines,
@@ -1992,6 +2101,44 @@ M30
                 h.line,
                 h.depth
             );
+        }
+        // `CNCSIM_GOUGE=x,y,z`：把它周围所有"负距离"的段全列出来，看是哪一段、
+        // 哪一个姿态啃的。查深层过切时比猜快得多。
+        if let Ok(v) = std::env::var("CNCSIM_GOUGE") {
+            let c: Vec<f64> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if c.len() == 3 {
+                let q = cncsim_math::DVec3::new(c[0], c[1], c[2]);
+                let mut hits: Vec<(f64, usize)> = Vec::new();
+                for (k, s) in out.cut_segs.iter().enumerate() {
+                    let prof = &table.by_number(s.tool).map_or(table.first(), |t| t).cutter;
+                    let dd = cncsim_voxel::sweep::sd_sweep(q, &s.from, &s.to, prof);
+                    if dd < 0.2 {
+                        hits.push((dd, k));
+                    }
+                }
+                hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+                for (dd, k) in hits.iter().take(6) {
+                    let s = &out.cut_segs[*k];
+                    println!(
+                        "[gouge] d={dd:.3} T{} D{:.2} 行{} · tip ({:.3},{:.3},{:.3})→({:.3},{:.3},{:.3}) · axis ({:.3},{:.3},{:.3})→({:.3},{:.3},{:.3})",
+                        s.tool,
+                        table.by_number(s.tool).map_or(0.0, |t| t.diameter),
+                        s.line,
+                        s.from.tip.x,
+                        s.from.tip.y,
+                        s.from.tip.z,
+                        s.to.tip.x,
+                        s.to.tip.y,
+                        s.to.tip.z,
+                        s.from.axis.x,
+                        s.from.axis.y,
+                        s.from.axis.z,
+                        s.to.axis.x,
+                        s.to.axis.y,
+                        s.to.axis.z
+                    );
+                }
+            }
         }
     }
     println!(
@@ -2867,6 +3014,24 @@ fn slope_deg() -> f64 {
 }
 
 /// `--finish-step <mm>`：精加工行距（默认 0.4×刀径）。
+fn surface_d_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--surface-d")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+}
+
+fn surface_flute_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--surface-flute")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+}
+
 fn rest_d_from_args() -> Option<f64> {
     std::env::args()
         .skip(1)

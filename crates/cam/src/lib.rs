@@ -36,6 +36,7 @@
 
 pub mod multi;
 pub mod rotary;
+pub mod surface;
 use cncsim_math::{DVec2, DVec3};
 use cncsim_tool::{
     CutterKind, Profile, ToolDef, ball_end_mill, flat_end_mill, tapered_ball_end_mill,
@@ -640,7 +641,7 @@ fn descend(from: f64, to: f64, step: f64) -> Vec<f64> {
 ///
 /// 高度场只能保证**刀刃**不侵入（drop-cutter 的几何保证），刀刃以上那一段柱体
 /// 在"零件有倒扣"时仍可能插进高度场没表示出来的料里。这里按真实三角形算距离。
-struct MeshIndex {
+pub(crate) struct MeshIndex {
     cell: f64,
     lo: DVec3,
     nx: usize,
@@ -650,7 +651,7 @@ struct MeshIndex {
 }
 
 impl MeshIndex {
-    fn build(mesh: &[Tri], stock: Stock) -> Self {
+    pub(crate) fn build(mesh: &[Tri], stock: Stock) -> Self {
         let cell = (stock.size().x.max(stock.size().y) / 48.0).clamp(0.5, 5.0);
         let nx = ((stock.size().x / cell).ceil() as usize + 1).max(1);
         let ny = ((stock.size().y / cell).ceil() as usize + 1).max(1);
@@ -685,7 +686,7 @@ impl MeshIndex {
     }
 
     /// 到 `reach` 范围内最近三角形的距离（无符号）。附近没有三角形 → `∞`。
-    fn min_dist(&self, p: DVec3, reach: f64) -> f64 {
+    pub(crate) fn min_dist(&self, p: DVec3, reach: f64) -> f64 {
         let i0 = (((p.x - reach - self.lo.x) / self.cell).floor() as i64)
             .clamp(0, self.nx as i64 - 1) as usize;
         let i1 = (((p.x + reach - self.lo.x) / self.cell).floor() as i64)
@@ -756,7 +757,7 @@ fn pt_tri_dist2(p: DVec3, t: &Tri) -> f64 {
 /// 刀杆（刃长以上、刀尖以上整段）会不会碰到工件。
 ///
 /// 局部坐标系里刀轴恒为 +Z：沿轴取样，逐点问到三角网格的最近距离。
-fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance: f64) -> bool {
+pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance: f64) -> bool {
     let r = tool.radius();
     let flute = tool.flute_mm.max(r);
     let shank_r = tool.top_radius().max(r);

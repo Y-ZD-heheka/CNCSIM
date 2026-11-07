@@ -457,6 +457,15 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#_75">试过没用的</a></li>
 </ul>
 </li>
+<li><a href="#44-11-07">44. 五轴曲面法向点铣：把高度场看不见的面补上（11-07）</a><ul>
+<li><a href="#441">44.1 一句话几何</a></li>
+<li><a href="#442">44.2 三道闸门（都是几何判据，不是启发式）</a></li>
+<li><a href="#443">44.3 路径：串链 + 沿途扫掠闸门</a></li>
+<li><a href="#444-h">44.4 数字（解析口径，与 h 无关）</a></li>
+<li><a href="#445">44.5 四个坑（全部是量出来的）</a></li>
+<li><a href="#446">44.6 没做的</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -4357,6 +4366,212 @@ h 不再卡验收（h=0.6 与 h=1.0 的解析数字完全一致），只影响�
   瓶颈不在"桶里有多少段"，而在<strong>每段 <code>sd_sweep</code> 本身</strong>。已回退。</li>
 <li>下一步真要再快，得在数学上做：比如按段分块求值（每段只在自己 AABB 里
   算一遍，而不是每个设计点重算一遍附近所有段），那是另一套数据结构。</li>
+</ul>
+<h2 id="44-11-07">44. 五轴曲面法向点铣：把高度场看不见的面补上（11-07）</h2>
+<p>§40 留的结论是"叶轮要五轴侧刃铣，本项目没有"。这一轮做了<strong>五轴曲面法向点铣</strong>：
+不是侧刃铣（那要求叶片是直纹面），而是让球头刀<strong>沿设计面的外法向</strong>贴上去切。
+它对任意网格都成立，代价是点铣（行距决定刀花），换来的是"高度场看不见的面"也能切。</p>
+<h3 id="441">44.1 一句话几何</h3>
+<p>球头是<strong>各向同性</strong>的：球在 <code>p</code> 与设计面相切 ⟺ 球心在 <code>p + R·n</code>。
+刀尖与球心的关系是 <code>球心 = tip + R·a</code>，于是</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>tip = p + R·(n − a)          a = 刀轴
+</code></pre></div>
+
+<p><strong>刀轴 <code>a</code> 是自由的</strong>。取 <code>a = n</code> 时 <code>tip = p</code>（最省事），但法向超出行程时
+（叶片下表面 A=180°、机床只有 110°）可以把 <code>a</code> 拉到 110° 的极限上，
+球照样在 <code>p</code> 相切，只是刀尖偏出去 <code>R(n−a)</code>。</p>
+<p>这一条把"A 超程"从<strong>切不了</strong>变成<strong>换个姿态还能切</strong>：叶轮 1 的残料点里有
+<strong>45%（62413 点）栽在 A 超程上</strong>，改之前全部丢掉，改之后 0 个。</p>
+<h3 id="442">44.2 三道闸门（都是几何判据，不是启发式）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>闸门</th>
+<th>判据</th>
+<th>拦掉的</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>球面</td>
+<td><code>dist(p + R·n, 网格) ≥ R − 0.03</code></td>
+<td>凹坑/窄槽里塞不下的球</td>
+</tr>
+<tr>
+<td>刃部圆柱</td>
+<td>从球顶到刃长，<code>dist ≥ R − 0.03</code></td>
+<td>刀轴一歪，刃部圆柱横着压在相邻面上</td>
+</tr>
+<tr>
+<td>刀杆</td>
+<td>刃长以上，<code>dist ≥ R + 0.3</code></td>
+<td>通道太窄、深腔够不到</td>
+</tr>
+</tbody>
+</table></div>
+<p>刃部圆柱那一条是<strong>实测逼出来的</strong>：早先只从刃长以上查（3 轴 drop-cutter 里
+球已经保证刀柱在料外，这么写没问题），五轴不成立，实测啃出 0.67 mm。</p>
+<h3 id="443">44.3 路径：串链 + 沿途扫掠闸门</h3>
+<p>目标点是一堆散点（设计面密采 → 只留解析残料 &gt;0.15 的）。用<strong>最近邻串链</strong>
+（带方向偏好，避免锯齿）连成折线，再按弧长抽稀。</p>
+<p>两处必须<strong>验证直线段本身</strong>：</p>
+<ul>
+<li><strong>不许穿墙连</strong>：接受点和被拒点混在一起，两点相距 1 mm 也可能隔着一道凸棱。
+  不加这条实测啃出 6.8% 过切、最深 2.92 mm（237 块）。</li>
+<li><strong>法向差 &gt; 60° 不连</strong>：那是棱的对面，一个块里刀轴转 60° 以上，刃部圆柱会把
+  棱扫平。</li>
+<li><strong>抽稀也要验</strong>：把 0.6 mm 的步子拉成 1.2 mm 之前，先确认直连仍然安全。</li>
+</ul>
+<p>判据统一在 <code>sweep_ok</code>：球心轨迹 + 刃部圆柱两个高度，最近距离都必须 ≥ <code>R − tol</code>。</p>
+<h3 id="444-h">44.4 数字（解析口径，与 h 无关）</h3>
+<p><strong>桌腿件</strong>（h=1.5，关清根/翻面以隔离变量）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>合格</th>
+<th>过切</th>
+<th>残料</th>
+<th>可达面</th>
+<th><strong>不可达面</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>无曲面道</td>
+<td>91.6%</td>
+<td>1.2%</td>
+<td>7.2%</td>
+<td>93.5%</td>
+<td>57.9%</td>
+</tr>
+<tr>
+<td>+五轴曲面道</td>
+<td><strong>93.9%</strong></td>
+<td>1.2%</td>
+<td><strong>4.9%</strong></td>
+<td>93.6%</td>
+<td><strong>73.5%</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>过切<strong>一点没涨</strong>（最大 +0.32 与基线相同），归因表里也没有曲面刀（T23）。</p>
+<p><strong>叶轮 1</strong>（Ø100×40、5.1 万面，h=1.0，关清根）：这是真正的目标件。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>曲面刀径</th>
+<th>合格</th>
+<th>过切</th>
+<th>残料</th>
+<th>可达面</th>
+<th>通过点数</th>
+<th>切长</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>无曲面道</td>
+<td>61.7%</td>
+<td>1.3%</td>
+<td>37.0%</td>
+<td>73.4%</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Ø2.3（= 精刀）</td>
+<td>63.1%</td>
+<td>1.3%</td>
+<td>35.5%</td>
+<td>73.9%</td>
+<td>4200</td>
+<td>7.5 m</td>
+</tr>
+<tr>
+<td>Ø1.5</td>
+<td>64.1%</td>
+<td>1.3%</td>
+<td>34.6%</td>
+<td>75.0%</td>
+<td>4886</td>
+<td>10.2 m</td>
+</tr>
+<tr>
+<td><strong>Ø1.0</strong></td>
+<td><strong>78.8%</strong></td>
+<td>1.3%</td>
+<td><strong>19.8%</strong></td>
+<td><strong>94.5%</strong></td>
+<td>33270</td>
+<td>18.2 m</td>
+</tr>
+<tr>
+<td>Ø0.8</td>
+<td>78.5%</td>
+<td>1.4%</td>
+<td>20.1%</td>
+<td>94.3%</td>
+<td>34885</td>
+<td>23.0 m</td>
+</tr>
+<tr>
+<td>Ø0.6</td>
+<td>77.4%</td>
+<td>1.4%</td>
+<td>21.2%</td>
+<td>93.2%</td>
+<td>35610</td>
+<td>23.2 m</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>刀径是这根杠杆</strong>：Ø2.3 → Ø1.0 把残料砍掉一半（37.0% → 19.8%），
+再小就没有收益（Ø0.8/0.6 反而略降，切长翻倍）。所以默认
+<code>--surface-d = min(精刀, Ø1.0)</code>。</p>
+<p>剩下的门槛是<strong>刀杆</strong>：叶轮 1 的 13.9 万残料点里，<strong>10.2 万（73%）被刀杆拦掉</strong>
+——Ø1 的刀伸进叶片通道时，刃长以上那一段必然蹭到对面的叶片。这不是刀路问题，
+是"这条通道需要更细的颈/更长的悬伸"，或者翻面。</p>
+<h3 id="445">44.5 四个坑（全部是量出来的）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>现象</th>
+<th>根因</th>
+<th>处置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>过切 1.2% → 6.8%，最深 <strong>2.92 mm</strong></td>
+<td>G 代码写了 <code>T23</code>，但 <code>ToolSpec</code> 的刀号是 0 → 仿真按 <code>by_number</code> 找不到，<strong>退回第一把 Ø6 平底刀</strong>扫掠</td>
+<td>刀号必须写进 <code>ToolSpec</code>，不能只写在字符串里</td>
+</tr>
+<tr>
+<td>过切最深 <strong>0.67 mm</strong>，<code>sd_sweep</code> 报在一条 82 mm 的长扫掠上</td>
+<td>多工序的收尾是 <code>G49</code> + <code>G53 Z&lt;安全高度&gt;</code>：从"刀尖当前位置"<strong>竖直</strong>往上抬。三轴道每列上方都已切空，没问题；五轴道结束时刀尖在侧壁上、刀杆还歪着，一抬就从工件里穿出去</td>
+<td>曲面道自己收尾：沿刀轴退到外面 → <code>G49</code> → <code>G0 A0 C0</code> → <code>G0 Z safe</code></td>
+</tr>
+<tr>
+<td>0.67 mm 的第二来源</td>
+<td>刃部圆柱（球顶到刃长）从来没被查过</td>
+<td><code>shank_hits_axis</code> 分两段：刃部按 <code>R − tol</code>、刀杆按 <code>R + 0.3</code></td>
+</tr>
+<tr>
+<td>换姿态时擦伤</td>
+<td>退刀量只有 2 mm，刀杆在离面 2 mm 处转 90°</td>
+<td><code>lift = 刃长 + 2</code>，整根刃部退出来再摆姿态</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="446">44.6 没做的</h3>
+<ul>
+<li><strong>不是侧刃铣</strong>：刀轴沿法向、球点接触，行距由 <code>out_step</code>/采样决定。
+  真侧刃铣要先把网格拟合成直纹面，对非直纹叶片无解；这一版对任意网格成立。</li>
+<li><strong>没有五轴开粗</strong>：残料 &gt;1 mm 的地方（叶轮 1 有 3.8 万点）现在只能"贴着曲面
+  往里啃一刀"，切不到底，需要 5 轴粗加工或翻面。</li>
+<li><strong>链接是五轴快移</strong>：<code>G0</code> 在仿真里不计切削，实机要后处理按机床做碰撞检查。
+  我们只保证刀尖点在安全姿态上（退刀量 = 刃长 + 2）。</li>
 </ul>
 </main>
 </div>
