@@ -150,6 +150,13 @@ pub struct ToolSpec {
     pub flute_mm: f64,
     /// 锥度球头的半角（度）。其它刀型忽略。
     pub taper_half_deg: f64,
+    /// **避空颈长**（mm）：刃长以上、缩颈之前的**等径细颈**。
+    ///
+    /// 真实长颈刀 = 刃 + 细颈 + 缩颈 + Ø6 柄。这一段**不切削但要查碰撞**
+    /// （半径 = 刃顶半径）。`flute_mm` 不能兼任它：把 flute 加长等于把碰撞
+    /// 豁免区跟着加长，刀在细颈那段横着扫（实测 flute 16→25 时 Ø1 刀的
+    /// "切入啃"从 3 暴增到 249、合格率 96.5 → 95.7%）。
+    pub neck_mm: f64,
     /// **刀柄直径**（mm）。`0` = 与刃部同径的"等径柄"（旧行为，用于历史对拍）。
     ///
     /// 真实刀具统一 **Ø6 h6 夹持**：小刃径的刀经缩颈扩到 6，Ø6 段在刃长以上。
@@ -166,6 +173,7 @@ impl ToolSpec {
             diameter,
             flute_mm,
             taper_half_deg: 0.0,
+            neck_mm: 0.0,
             shank_diameter: 0.0,
         }
     }
@@ -177,6 +185,7 @@ impl ToolSpec {
             diameter,
             flute_mm,
             taper_half_deg: 0.0,
+            neck_mm: 0.0,
             shank_diameter: 0.0,
         }
     }
@@ -191,6 +200,7 @@ impl ToolSpec {
             diameter: tip_diameter,
             flute_mm,
             taper_half_deg: half_angle_deg.max(0.0),
+            neck_mm: 0.0,
             shank_diameter: 0.0,
         }
     }
@@ -199,6 +209,17 @@ impl ToolSpec {
     pub fn with_shank(mut self, d: f64) -> Self {
         self.shank_diameter = d.max(0.0);
         self
+    }
+
+    /// 设定避空颈长（链式）。`n <= 0` = 无颈。
+    pub fn with_neck(mut self, n: f64) -> Self {
+        self.neck_mm = n.max(0.0);
+        self
+    }
+
+    /// 颈顶高度：刃长 + 避空颈。缩颈从这里开始。
+    pub fn neck_top(&self) -> f64 {
+        self.flute_mm.max(self.radius()) + self.neck_mm.max(0.0)
     }
 
     /// 缩颈长度：从刃顶按 **30° 半角**扩到柄径需要多高。
@@ -219,9 +240,9 @@ impl ToolSpec {
     ///
     /// * `z ≤ flute`：**切削刃**。这一段会切掉材料，**不做碰撞检查**
     ///   （只有过切检查，那是另一套判据）。
-    /// * `flute < z ≤ flute + taper`：**避空缩颈**。半径从刃顶按 30° 线性长到柄径。
-    ///   这一段不切削，碰到工件就是干涉——要查。
-    /// * `z > flute + taper`：**Ø6 刀柄**。要查。
+    /// * `flute < z ≤ flute + neck`：**避空细颈**。等径（= 刃顶半径），要查。
+    /// * `flute + neck < z ≤ flute + neck + taper`：**缩颈**。30° 线性长到柄径，要查。
+    /// * `z > flute + neck + taper`：**Ø6 刀柄**。要查。
     ///
     /// 早先拿 `shank_r` 一刀切地从刃顶查到顶，等于把避空段也按 Ø6 算——
     /// Ø1.0 刀的避空段本来只有 Ø1 到 Ø3 那么粗，被当成 Ø6 会误杀大量刀点。
@@ -231,9 +252,13 @@ impl ToolSpec {
         if z <= flute {
             return r_cut;
         }
+        let neck_top = self.neck_top();
+        if z <= neck_top {
+            return r_cut;
+        }
         let t = self.taper_len();
-        if z <= flute + t {
-            r_cut + (z - flute) * 30f64.to_radians().tan()
+        if z <= neck_top + t {
+            r_cut + (z - neck_top) * 30f64.to_radians().tan()
         } else {
             self.shank_radius()
         }
@@ -284,8 +309,9 @@ impl ToolSpec {
         let r = self.radius();
         let r_cut = self.top_radius();
         let r_shank = self.shank_radius();
-        let top = self.flute_mm + 20.0;
-        // 缩颈：从刃顶按 **30° 半角**扩到柄径（Ø6 平底刀退化为 0）
+        let neck_top = self.neck_top();
+        let top = neck_top + 20.0;
+        // 缩颈：从颈顶按 **30° 半角**扩到柄径（Ø6 平底刀退化为 0）
         let taper_len = self.taper_len();
         ToolDef {
             number: self.number,
@@ -300,7 +326,9 @@ impl ToolSpec {
             shank: Profile::new(vec![
                 DVec2::new(0.0, self.flute_mm),
                 DVec2::new(r_cut, self.flute_mm),
-                DVec2::new(r_shank, self.flute_mm + taper_len),
+                // 避空细颈：等径（= 刃顶半径），参与碰撞检查
+                DVec2::new(r_cut, neck_top),
+                DVec2::new(r_shank, neck_top + taper_len),
                 DVec2::new(r_shank, top),
                 DVec2::new(0.0, top),
             ]),
@@ -831,7 +859,7 @@ pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance:
     let flute = tool.flute_mm.max(r);
     let shank_r = tool.shank_radius().max(r);
     let taper = tool.taper_len();
-    let len = flute + 20.0;
+    let len = tool.neck_top() + 20.0;
 
     // **刀刃段（z ≤ flute）整段不查**：那是切削区，材料本来就要被切掉。
     // 拿"离工件 ≥ 间隙"去要求它，会把每个刀点都判成碰撞（实测误杀 42858 点）。
@@ -841,7 +869,7 @@ pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance:
     //   ② Ø6 刀柄（flute+taper … 顶）：半径恒定 → 粗步长
     // 拿 `shank_r` 一刀切地查全程，等于把避空段也当成 Ø6（偏保守，误杀刀点）。
     let mut z = flute;
-    while z < flute + taper {
+    while z < tool.neck_top() + taper {
         let rr = tool.radius_at(z);
         let need = rr + clearance;
         if ix.min_dist(tip + DVec3::new(0.0, 0.0, z), need) < need {
@@ -850,7 +878,7 @@ pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance:
         z += 0.3;
     }
     let step = (shank_r * 0.8).clamp(0.5, 2.0);
-    let mut z = (flute + taper).max(flute);
+    let mut z = (tool.neck_top() + taper).max(flute);
     while z <= len {
         let need = shank_r + clearance;
         if ix.min_dist(tip + DVec3::new(0.0, 0.0, z), need) < need {
@@ -1621,6 +1649,19 @@ mod tests {
             !shank_hits(&ix, DVec3::new(0.0, 0.0, 20.0), &tool, 0.5),
             "抬到板上方 20 mm 不该判碰撞"
         );
+    }
+
+    /// `radius_at` 的四段：刀刃 / 等径避空颈 / 30° 缩颈 / Ø6 柄。
+    #[test]
+    fn radius_at_has_four_segments_with_a_neck() {
+        let t = ToolSpec::ball(1, 1.0, 10.0).with_neck(5.0).with_shank(6.0);
+        // 刀刃与避空颈都是刃顶半径 0.5
+        assert!((t.radius_at(0.0) - 0.5).abs() < 1e-9);
+        assert!((t.radius_at(15.0) - 0.5).abs() < 1e-9, "颈内也是 0.5");
+        // 缩颈：15 → 19.33；z=17 处 Δz=2 → 0.5 + 2·tan30° = 1.655
+        assert!((t.neck_top() - 15.0).abs() < 1e-9);
+        assert!((t.radius_at(17.0) - 1.655).abs() < 0.02);
+        assert!((t.radius_at(20.5) - 3.0).abs() < 1e-9);
     }
 
     /// `radius_at` 的三段：刀刃（恒为刃顶半径）/ 避空缩颈（30° 线性）/ Ø6 柄。

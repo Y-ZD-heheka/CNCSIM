@@ -503,6 +503,12 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#_86">处置</a></li>
 </ul>
 </li>
+<li><a href="#51-965-98011-07">51. 避空颈长：叶轮 96.5% → 98.0%（11-07 晚）</a><ul>
+<li><a href="#_87">正确的模型：刀具是四段</a></li>
+<li><a href="#1h10_1">实验（叶轮 1，h=1.0，解析口径）</a></li>
+<li><a href="#_88">新默认</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -5185,6 +5191,114 @@ v2 加了"法向差 &gt;45° 的邻居不算"（与串链闸门同一口径）�
 <ul>
 <li><code>follow_flow</code> <strong>默认 false</strong>，<code>--flow</code> 打开（留作实验）。</li>
 <li>两条测试保留：圆柱面上流向必须沿母线；带流向也必须覆盖全部点。</li>
+</ul>
+<h2 id="51-965-98011-07">51. 避空颈长：叶轮 96.5% → 98.0%（11-07 晚）</h2>
+<p>§49 加了 Ø6 柄之后，<code>flute_mm</code> 的双重身份暴露了：它既是<strong>切削刃长度</strong>，又是
+<strong>碰撞豁免区高度</strong>（碰撞检查从 <code>flute</code> 开始）。想用"更长的细颈"让 Ø6 柄晚点
+介入通道，直接把 flute 从 16 加到 25——结果 Ø1 刀的"切入啃"从 3 暴增到 249、
+合格率 96.5 → <strong>95.7%</strong>：16~25 mm 这段本该查碰撞的细颈被整段豁免了。</p>
+<h3 id="_87">正确的模型：刀具是四段</h3>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>刃（0…flute）          豁免——材料要切掉
+避空颈（flute…+neck）   等径 = 刃顶半径，**要查**
+缩颈（…+taper）         30° 锥到 Ø6，要查
+刀柄                    Ø6，要查
+</code></pre></div>
+
+<p><code>ToolSpec.neck_mm</code> + <code>neck_top()</code> + <code>radius_at</code> 四段。柄剖面、两处碰撞检查
+（三轴 <code>shank_hits</code> / 五轴 <code>shank_hits_axis</code>）同步。</p>
+<h3 id="1h10_1">实验（叶轮 1，h=1.0，解析口径）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>配置</th>
+<th>合格</th>
+<th>残料</th>
+<th>过切</th>
+<th>切长</th>
+<th>空移</th>
+<th>刀杆撞</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ø1.0 颈0（§49 默认）</td>
+<td>96.5%</td>
+<td>1.9%</td>
+<td>1.5%</td>
+<td>14.9</td>
+<td>66.4</td>
+<td>7516</td>
+</tr>
+<tr>
+<td>Ø0.8 颈0</td>
+<td>96.6%</td>
+<td>1.8%</td>
+<td>1.5%</td>
+<td>15.8</td>
+<td>64.8</td>
+<td>7106</td>
+</tr>
+<tr>
+<td>Ø0.6 颈0</td>
+<td>96.5%</td>
+<td>1.9%</td>
+<td>1.5%</td>
+<td>16.8</td>
+<td>65.1</td>
+<td>6773</td>
+</tr>
+<tr>
+<td>Ø1.0 flute25（豁免，错）</td>
+<td>95.7%</td>
+<td>2.4%</td>
+<td>1.8%</td>
+<td>15.2</td>
+<td>101.2</td>
+<td>1424</td>
+</tr>
+<tr>
+<td>Ø0.8 flute25（豁免，歪打正着）</td>
+<td>97.6%</td>
+<td>0.5%</td>
+<td>1.9%</td>
+<td>16.4</td>
+<td>100.3</td>
+<td>1130</td>
+</tr>
+<tr>
+<td><strong>Ø0.8 颈9（正确模型）</strong></td>
+<td><strong>98.0%</strong></td>
+<td><strong>0.4%</strong></td>
+<td>1.6%</td>
+<td>16.4</td>
+<td>66.0</td>
+<td><strong>1177</strong></td>
+</tr>
+<tr>
+<td>Ø1.0 颈9</td>
+<td>97.8%</td>
+<td>0.5%</td>
+<td>1.7%</td>
+<td>15.4</td>
+<td>67.4</td>
+<td>1465</td>
+</tr>
+</tbody>
+</table></div>
+<p>三条读数：</p>
+<ol>
+<li><strong>刀径仍不是杠杆</strong>（Ø1.0/0.8/0.6 颈0 = 96.5/96.6/96.5），但 Ø0.8 的球面
+   闸门拒绝从 3309 降到 214（小球进得去窄槽）——它只是需要颈来把柄挡在外面。</li>
+<li><strong>颈才是杠杆</strong>：+9 mm 颈让刀杆撞从 7516 → 1177（−84%）、合格率 +1.5。
+   桌腿件 +12 颈无害（它的瓶颈不在刀杆，刀杆撞本来就是 0）。</li>
+<li><strong>豁免版 flute25 的 97.6% 是歪打正着</strong>——它模拟的是"颈不查碰撞"，空移代价
+   100 m；正确模型 98.0% 且空移 66 m。</li>
+</ol>
+<h3 id="_88">新默认</h3>
+<ul>
+<li>曲面刀径：<code>min(精刀, Ø0.8)</code>（原 Ø1.0）</li>
+<li>避空颈：<code>(0.22 × 工件高).clamp(0, 12)</code>（叶轮 41 → 9.0；<code>--surface-neck</code> 覆盖）</li>
+<li>桌腿件 Ø0.8+颈12 = <strong>97.0%</strong>（原 96.9），两件都最优或持平</li>
 </ul>
 </main>
 </div>

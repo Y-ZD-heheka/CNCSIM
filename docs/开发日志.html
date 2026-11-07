@@ -429,6 +429,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#60-1-912-982-2-953-98011-07">倾角 60°：叶轮 1 91.2% → 98.2%，叶轮 2 95.3% → 98.0%（11-07 续三）</a></li>
 <li><a href="#611-07">刀柄是 Ø6，不是刃径（11-07 下午）</a></li>
 <li><a href="#11-07">沿曲面流线：做了，没收益，默认关（11-07 傍晚）</a></li>
+<li><a href="#965-98011-07">避空颈长：叶轮 96.5% → 98.0%（11-07 晚）</a></li>
 <li><a href="#_115">数字演进一览</a></li>
 </ul>
 </div>
@@ -3915,6 +3916,58 @@ CLI <code>--shank-d</code>（默认 6.0）。</p>
 进退刀（各 18 mm），链怎么走都省不了。要省时间得让表面连成整片，即<strong>提高通过率</strong>，
 不是把碎块串好看。<code>follow_flow</code> 默认 false，<code>--flow</code> 留作实验。</p>
 <hr />
+<h2 id="965-98011-07">避空颈长：叶轮 96.5% → 98.0%（11-07 晚）</h2>
+<p>§49 加 Ø6 柄时留了个隐患：<code>flute_mm</code> 既是切削刃长度又是碰撞豁免区高度。
+想加长细颈把柄挡在通道外，直接加 flute → 16~25 mm 这段本该查碰撞的细颈被
+整段豁免，Ø1 刀"切入啃"3 → 249、合格率 96.5 → 95.7%。</p>
+<p>正确的刀具模型是<strong>四段</strong>：刃（豁免）→ 等径避空颈（查）→ 30° 缩颈（查）→
+Ø6 柄（查）。<code>ToolSpec.neck_mm</code> + <code>radius_at</code> 四段 + 两处碰撞检查同步。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>配置</th>
+<th>合格</th>
+<th>残料</th>
+<th>刀杆撞</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ø1.0 颈0（旧默认）</td>
+<td>96.5%</td>
+<td>1.9%</td>
+<td>7516</td>
+</tr>
+<tr>
+<td>Ø0.8 颈0</td>
+<td>96.6%</td>
+<td>1.8%</td>
+<td>7106</td>
+</tr>
+<tr>
+<td><strong>Ø0.8 颈9（新默认）</strong></td>
+<td><strong>98.0%</strong></td>
+<td><strong>0.4%</strong></td>
+<td><strong>1177</strong></td>
+</tr>
+<tr>
+<td>Ø1.0 颈9</td>
+<td>97.8%</td>
+<td>0.5%</td>
+<td>1465</td>
+</tr>
+<tr>
+<td>Ø0.8 flute25（豁免）</td>
+<td>97.6%</td>
+<td>0.5%</td>
+<td>1130（但空移 100 m）</td>
+</tr>
+</tbody>
+</table></div>
+<p>刀径不是杠杆（96.5/96.6/96.5），<strong>颈才是</strong>：+9 mm 颈把 Ø6 柄挡在通道外
+（20.3 → 29.3 mm 才介入），表面连成整片。桌腿件 +12 无害（97.0%，+0.1）。</p>
+<p>新默认：曲面刀 Ø0.8、避空颈 = 22% 工件高（<code>--surface-d</code> / <code>--surface-neck</code> 覆盖）。</p>
+<hr />
 <h2 id="_115">数字演进一览</h2>
 <div class="table-wrap"><table>
 <thead>
@@ -4154,6 +4207,11 @@ CLI <code>--shank-d</code>（默认 6.0）。</p>
 <td><strong>11-06 相似度 + 形位</strong></td>
 <td><strong>528</strong></td>
 <td><strong>双向 Hausdorff/Chamfer/F1/IoU + 最小区域法形位公差：两个平面 0.028 / 0.360 mm</strong></td>
+</tr>
+<tr>
+<td><strong>11-07 避空颈长</strong></td>
+<td><strong>552</strong></td>
+<td><strong>叶轮 96.5 → 98.0%（残料 0.4%），Ø6 柄 + 9 mm 颈把刀杆撞降 84%</strong></td>
 </tr>
 <tr>
 <td><strong>11-07 倾角 60°</strong></td>

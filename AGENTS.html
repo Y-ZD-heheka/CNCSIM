@@ -604,6 +604,10 @@ testdata/         golden CSV + design_box.stl
 <td>✅ <code>ap = 1.0×D</code>、<code>ae = 0.7×D</code>、<code>vf = 600+120D</code>，MRR 打印出来（Ø6 时 33.3 cm³/min）；法向留量 0.3 mm 给精加工</td>
 </tr>
 <tr>
+<td>避空颈长</td>
+<td>✅ <code>ToolSpec.neck_mm</code> + <code>neck_top()</code> + <code>radius_at</code> <strong>四段</strong>（刃豁免 / 等径颈查 / 30° 缩颈查 / Ø6 柄查）。<code>flute_mm</code> 不能兼任颈长——加 flute 等于把碰撞豁免区跟着加长（flute 16→25 时 Ø1 刀"切入啃" 3→249、合格率 96.5→95.7%）。<strong>颈才是 Ø6 柄之后的真杠杆</strong>：+9 mm 颈把柄挡在通道外（20.3→29.3 mm 介入），叶轮刀杆撞 7516→1177（−84%）、合格率 96.5→<strong>98.0%</strong>（残料 0.4%）；桌腿件 +12 无害 97.0%。默认颈 = 22% 工件高（叶轮 9.0），曲面刀默认改 <strong>Ø0.8</strong>（球面闸门拒绝 3309→214）。<code>--surface-neck</code> 覆盖（§51）</td>
+</tr>
+<tr>
 <td>刀柄直径</td>
 <td>✅ <code>ToolSpec.shank_diameter</code> + <code>shank_radius()</code>，CLI <code>--shank-d</code>（默认 <strong>6.0</strong>，真实刀具统一 Ø6 h6 夹持）。<code>to_tool_def()</code> 的柄剖面改成 <strong>刃顶 → 30° 缩颈 → Ø6 → 顶</strong>，<code>shank_hits</code> 与 <code>surface::shank_hits_axis</code> 都改吃 <code>shank_radius()</code>。<strong>之前柄等于刃径，碰撞检查偏乐观</strong>。判据分三段（<code>radius_at</code>）：切削刃 <code>0…flute</code> <strong>不查</strong>（材料要切掉）、避空缩颈 <code>flute…flute+taper</code> 按该高度<strong>实际半径</strong>查、刀柄按 Ø6 查——拿柄径一刀切会把避空段也当 Ø6，虚报 42~72%。叶轮 1 98.2% → <strong>96.6%</strong>（残料 0.2 → 1.8%）、桌腿件 97.8% → <strong>96.9%</strong>（残料 1.0 → 1.9%）。<code>--shank-d 0</code> 逐位复现旧值（§49）</td>
 </tr>

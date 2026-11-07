@@ -1699,13 +1699,14 @@ fn run_cam_multi(
             targets.len() as f64 / smp.len().max(1) as f64 * 100.0
         );
         if !targets.is_empty() {
-            // 曲面道刀径：**默认比精刀小一档（≤Ø1）**。它本来就是补残料/补高度场
-            // 看不见的面用的，刀越大越进不去——叶轮 1 实测（h=1.0、解析口径）：
+            // 曲面道刀径：**默认 Ø0.8**（≤ 精刀）。§44 时 Ø1.0 最优，但那是
+            // 等径柄口径；Ø6 柄 + 分段碰撞之后重测（§51）：
             //
-            //   Ø2.3 → 63.1% / Ø1.5 → 64.1% / **Ø1.0 → 78.8%** / Ø0.8 → 78.5% / Ø0.6 → 77.4%
+            //   Ø1.0 颈0 → 96.5% / Ø0.8 颈0 → 96.6% / **Ø0.8 颈9 → 98.0%**
             //
-            // 再小就没收益了（切长还翻倍），所以封在 Ø1.0。
-            let ds = surface_d_from_args().unwrap_or(d_finish.min(1.0));
+            // 小球能把球面闸门的拒绝从 3309 降到 214（进得去窄槽），
+            // 配合长颈把 Ø6 柄挡在通道外。
+            let ds = surface_d_from_args().unwrap_or(d_finish.min(0.8));
             // 刃长 = 刀能"伸进去"的深度。给长一点能进深腔，但**刃部圆柱也要
             // 真的进得去**（见 `shank_hits_axis`）——深窄槽里长刃反而全被拒。
             let flute = surface_flute_from_args()
@@ -1714,7 +1715,13 @@ fn run_cam_multi(
             // **刀号必须写进 `ToolSpec`**：G 代码里的 `T23` 只是文本，仿真按
             // `ToolTable::by_number` 找母线。刀号写成 0 会让仿真用错刀（退到第一把
             // Ø6 平底刀），实测把过切从 1.2% 抬到 6.8%、最深 2.92 mm。
-            let tool = cncsim_cam::ToolSpec::ball(tn, ds, flute).with_shank(shank_d());
+            let tool = cncsim_cam::ToolSpec::ball(tn, ds, flute)
+                .with_shank(shank_d())
+                // 避空颈：让 Ø6 柄**晚点介入**。默认 = 工件高度的 22%（叶轮
+                // 41 mm → 9.0），实测桌腿件 +12 无害（瓶颈不在刀杆）、叶轮
+                // +9 把刀杆撞从 7516 降到 1178、合格率 96.5 → 98.0%。
+                .with_neck(surface_neck_from_args()
+                    .unwrap_or_else(|| (0.22 * stock.size().z).clamp(0.0, 12.0)));
             let mut o = cncsim_cam::surface::SurfaceOpts::new(tool.clone(), tn, stock);
             o.follow_flow = args_flag("--flow");
             o.max_tilt_deg = surface_tilt_from_args().unwrap_or(60.0);
@@ -3121,6 +3128,15 @@ fn surface_d_from_args() -> Option<f64> {
         .find(|(a, _)| a == "--surface-d")
         .and_then(|(_, v)| v.parse::<f64>().ok())
         .filter(|v| *v > 0.0)
+}
+
+fn surface_neck_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--surface-neck")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v >= 0.0)
 }
 
 fn surface_flute_from_args() -> Option<f64> {

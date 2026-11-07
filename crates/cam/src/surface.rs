@@ -458,7 +458,7 @@ fn shank_hits_axis(
     //    拿柄径一刀切会把这 4~5 mm 也当成 Ø6——Ø1 刀的避空段本来只有 Ø1→Ø3。
     let taper = tool.taper_len();
     let mut z = flute_end;
-    while z < flute_end + taper {
+    while z < tool.neck_top() + taper {
         let rr = tool.radius_at(z);
         let need = (rr + clearance).max(1e-3);
         if ix.min_dist(tip + axis * z, need) < need {
@@ -469,8 +469,8 @@ fn shank_hits_axis(
     // ③ Ø6 刀柄：半径恒定，用粗步长
     let shank_r = tool.shank_radius().max(r);
     let need_s = (shank_r + clearance).max(1e-3);
-    let mut z = (flute_end + taper).max(flute_end);
-    while z <= flute_end + 20.0 {
+    let mut z = (tool.neck_top() + taper).max(flute_end);
+    while z <= tool.neck_top() + 20.0 {
         if ix.min_dist(tip + axis * z, need_s) < need_s {
             return true;
         }
