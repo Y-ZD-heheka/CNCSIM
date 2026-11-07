@@ -1733,7 +1733,7 @@ fn run_cam_multi(
                 Ok(sx) => {
                     let st = sx.stats;
                     println!(
-                        "  └ Ø{ds:.1} 长颈球头（刃长 {flute:.0}）：通过 {} 点（其中 {} 点靠歪刀轴）/ A超程 {} / 球面塞不下 {} / 刀杆撞 {} / 切入啃 {} → {} 条链 / {} 块 / 切 {:.1} m / 空移 {:.1} m / 链间擦料 {} 处",
+                        "  └ Ø{ds:.1} 长颈球头（刃长 {flute:.0}）：通过 {} 点（其中 {} 点靠歪刀轴）/ A超程 {} / 球面塞不下 {} / 刀杆撞 {} / 切入啃 {} → {} 条链 / {} 块 / 切 {:.1} m / 空移 {:.1} m / 链间擦料 {} 处 / 平均抬刀 {:.1} mm",
                         st.accepted,
                         st.axis_retried,
                         st.a_rejected,
@@ -1744,7 +1744,8 @@ fn run_cam_multi(
                         st.moves,
                         st.cut_mm / 1000.0,
                         st.rapid_mm / 1000.0,
-                        st.link_unsafe
+                        st.link_unsafe,
+                        st.avg_link_lift
                     );
                     surf_frag = sx.gcode;
                     surf_tool = Some(tool);

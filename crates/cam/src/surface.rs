@@ -112,6 +112,9 @@ pub struct SurfaceStats {
     pub plunge_rejected: usize,
     /// 链间快移里**会擦到工件**的条数（仿真不计，实机会撞）。
     pub link_unsafe: usize,
+    /// 链间转移的**平均退刀量**（mm）。固定 18 mm 时这个数恒等于 `lift_mm`；
+    /// 自适应之后能看出"大部分链之间其实只需要几毫米"。
+    pub avg_link_lift: f64,
     /// 连成的折线条数。
     pub runs: usize,
     /// 实际输出的 G 代码运动块数。
@@ -276,11 +279,19 @@ pub fn generate_surface(
     e.line(&format!("S{} M3", opts.spindle_rpm));
     e.line("G43.4 H1");
 
-    let lift = opts.lift_mm;
+    let max_lift = opts.lift_mm;
     let mut st_last: Option<usize> = None;
-    // 上一条链退刀后的位姿：用来检查链间快移
-    let mut prev_end: Option<(DVec3, DVec3)> = None;
+    // 上一条链的**刀尖 + 刀轴**（不是退刀位）：用来算这一条链要退多高
+    let mut prev_tip: Option<(DVec3, DVec3)> = None;
+    let (mut lift_sum, mut lift_n) = (0.0f64, 0usize);
     for run in &runs {
+        // 链间转移的退刀量：按"这一段能不能过"自适应，不再固定 18 mm
+        let lift = match prev_tip {
+            Some((pt, pa)) => min_link_lift(&ix, pt, pa, tips[run[0]], axs[run[0]], g, max_lift),
+            None => max_lift,
+        };
+        lift_sum += lift;
+        lift_n += 1;
         // 抽稀：沿弧长每 `out_step` 留一个点，首尾必留
         let kept = decimate(run, &tips, &axs, opts.out_step_mm, &ix, g);
         if kept.is_empty() {
@@ -302,8 +313,8 @@ pub fn generate_surface(
         // 而已验证过整条下刀路径（`sweep_ok`）是空的，所以除了最后贴上去的
         // 那 1 mm，前面都可以快移。
         let up0 = t0 + a0v * lift;
-        if let Some((pt, pa)) = prev_end
-            && !link_ok(&ix, pt, pa, up0, a0v, g)
+        if let Some((pt, pa)) = prev_tip
+            && !link_ok(&ix, pt + pa * lift, pa, up0, a0v, g)
         {
             st.link_unsafe += 1;
         }
@@ -339,8 +350,11 @@ pub fn generate_surface(
         // 用 G1 的话每条链 18 mm × 2（进+退）全算进切长——叶轮 1 的 55 m 里
         // 44 m 是这段空行程，真正的切削只有 11 m。
         e.line(&format!("G0 X{:.4} Y{:.4} Z{:.4}", up.x, up.y, up.z));
-        prev_end = Some((up, axs[last]));
+        prev_tip = Some((tips[last], axs[last]));
         st_last = Some(last);
+    }
+    if lift_n > 0 {
+        st.avg_link_lift = lift_sum / lift_n as f64;
     }
     // **收尾必须自己把刀退出去**：多工序的收尾是 `G49` + `G53 Z<安全高度>`，
     // 那是从"刀尖当前位置"竖直往上抬。三轴道没问题（每列上方都已切空），
@@ -861,6 +875,31 @@ fn link_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: G
     true
 }
 
+/// 链间转移：**能安全通过的最小沿轴退刀量**。
+///
+/// 固定 `lift = 刃长 + 2 = 18 mm` 是"刀杆整根退出"的安全值，但绝大多数链间
+/// 转移 3~6 mm 就够——叶轮 1 有 1427 条链，每条省 10 mm 就是 14 m 空移。
+/// 从 3 mm 往上试，第一个通过 `link_ok` 的就是答案；全都不行返回上限
+/// （那种情况仍会擦料，`st.link_unsafe` 照旧计数）。
+fn min_link_lift(
+    ix: &crate::MeshIndex,
+    a: DVec3,
+    na: DVec3,
+    b: DVec3,
+    nb: DVec3,
+    g: Geo,
+    max_lift: f64,
+) -> f64 {
+    let mut d = 3.0f64.min(max_lift);
+    while d <= max_lift {
+        if link_ok(ix, a + na * d, na, b + nb * d, nb, g) {
+            return d;
+        }
+        d += 2.0;
+    }
+    max_lift
+}
+
 /// 贪心排序：从位置最高的一条链出发，每次挑"起点或终点离当前位置最近"的链，
 /// 必要时整条反向（折线反着走是合法的）。
 ///
@@ -1318,6 +1357,41 @@ mod tests {
             !link_ok(&ix, a, DVec3::Z, across, DVec3::Z, g),
             "跨墙该判擦料"
         );
+    }
+
+    /// `min_link_lift`：平地上一小段转移只需要**最小退刀量**，不是固定 18 mm。
+    #[test]
+    fn min_link_lift_is_small_over_flat_ground() {
+        let mesh = vec![
+            [
+                DVec3::new(-50.0, -50.0, 0.0),
+                DVec3::new(50.0, -50.0, 0.0),
+                DVec3::new(50.0, 50.0, 0.0),
+            ],
+            [
+                DVec3::new(-50.0, -50.0, 0.0),
+                DVec3::new(50.0, 50.0, 0.0),
+                DVec3::new(-50.0, 50.0, 0.0),
+            ],
+        ];
+        let st = Stock {
+            min: DVec3::new(-50.0, -50.0, 0.0),
+            max: DVec3::new(50.0, 50.0, 1.0),
+        };
+        let ix = crate::MeshIndex::build(&mesh, st);
+        let g = Geo {
+            r: 0.4,
+            tol: 0.03,
+            flute: 16.0,
+        };
+        let a = DVec3::new(-10.0, 0.0, 0.0);
+        let b = DVec3::new(10.0, 0.0, 0.0);
+        let d = min_link_lift(&ix, a, DVec3::Z, b, DVec3::Z, g, 18.0);
+        assert!(d < 6.0, "平地上只需小退刀量，实得 {d} mm");
+        assert!(d >= 2.9, "不该退到 0（球会贴地），实得 {d}");
+        let empty = crate::MeshIndex::build(&[], st);
+        let d0 = min_link_lift(&empty, a, DVec3::Z, b, DVec3::Z, g, 18.0);
+        assert!((d0 - 3.0).abs() < 1e-9, "无料时取下限 3 mm，实得 {d0}");
     }
 
     /// 流向场：圆柱面上必须沿**母线**（曲率 0），不是绕圆周（曲率 1/R）。

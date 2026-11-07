@@ -706,10 +706,11 @@ testdata/         golden CSV + design_box.stl
 真正补短板的是工艺层：<strong>链接安全 → 进给自适应 → 方向投票 → 侧铣判定 → 桶刀</strong>。
 不采纳：真自适应 ADF（与确定性冲突）、全局 0.05 mm 体素、swarf 刀路、颤振 SLD。</p>
 </blockquote>
-<p>-1. <strong>链接安全（两级安全高度 + 三段折线）</strong> ⭐ 最急。<code>link_ok</code> 现在只<strong>计数</strong>擦料
-   （叶轮 1 有 8~12 处），不解决；每条链收尾 <code>G0</code> 抬 18 mm 再横移，66 m 空移里 50 m 是这个。
-   做法：<code>skim_z(a,b)</code> 沿 A→B 采样取"能过的最小高度"，<code>order_runs</code> 改成按
-   <strong>(是否安全, 抬刀高度)</strong> 排序，安全高度取 <code>min(skim+余量, clear)</code>。验收：擦料 ≤2、空移 &lt;50 m、合格率不降。</p>
+<p>-1. ~~<strong>链间抬刀自适应</strong>~~ ✅ 做完了（§52）：<code>min_link_lift</code> 从 3 mm 起试到 18 mm，
+   取第一个能过 <code>link_ok</code> 的高度。叶轮 1 空移 <strong>66.0 → 19.1 m（−71%）</strong>、擦料 <strong>9 → 1</strong>；
+   桌腿件 4.8 → 1.7 m；平均抬刀只有 <strong>4.4 / 4.0 mm</strong>（固定 18 mm 过度保守）。合格率一位不变。
+   未做：三段折线（现为沿刀轴退）、擦料时的分级兜底。
+   <strong>下一个（按采纳清单）</strong>：进给自适应（§5.11.1 恒 MRR 三遍）—— 我们全程单一 F800。</p>
 <ol start="0">
 <li>~~<strong>五轴曲面法向点铣 + 歪刀轴（60°）</strong>~~ ✅ 做完了（§44/§45/§47）：叶轮 1
    61.7% → <strong>98.2%</strong>、叶轮 2 47.3% → <strong>98.0%</strong>，过切 1.5% / 0.4%，
