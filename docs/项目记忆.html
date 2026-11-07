@@ -490,9 +490,10 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#49-611-07">49. 刀柄是 Ø6，不是刃径（11-07 下午）</a><ul>
 <li><a href="#_80">发现</a></li>
 <li><a href="#_81">改动</a></li>
-<li><a href="#_82">数字（解析口径）</a></li>
-<li><a href="#_83">没做</a></li>
-<li><a href="#_84">顺带</a></li>
+<li><a href="#491">49.1 分段：刀刃不查、避空按实际半径</a></li>
+<li><a href="#492">49.2 数字（解析口径）</a></li>
+<li><a href="#_82">没做</a></li>
+<li><a href="#_83">顺带</a></li>
 </ul>
 </li>
 </ul>
@@ -5011,67 +5012,108 @@ h 不再卡验收（h=0.6 与 h=1.0 的解析数字完全一致），只影响�
 </tr>
 </tbody>
 </table></div>
-<h3 id="_82">数字（解析口径）</h3>
+<h3 id="491">49.1 分段：刀刃不查、避空按实际半径</h3>
+<p>第一版把 Ø6 从<strong>刃顶一刀切查到顶</strong>——那是错的。刀具是三段，判据也得分三段：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>段</th>
+<th>高度</th>
+<th>查不查</th>
+<th>判据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>切削刃</strong></td>
+<td><code>0 … flute</code></td>
+<td><strong>不查</strong></td>
+<td>材料本来就要切掉（只有过切检查，另一套判据）</td>
+</tr>
+<tr>
+<td><strong>避空缩颈</strong></td>
+<td><code>flute … flute+taper</code></td>
+<td>查</td>
+<td>半径<strong>按该高度线性变化</strong>（30° 锥）</td>
+</tr>
+<tr>
+<td><strong>Ø6 刀柄</strong></td>
+<td><code>flute+taper … 顶</code></td>
+<td>查</td>
+<td>半径恒 3.0</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>ToolSpec::radius_at(z)</code> 就是这三段。避空段半径从 Ø1 长到 Ø6 要 4.3 mm，
+拿柄径一刀切等于把这一整段当成 Ø6 —— 实测叶轮的刀杆撞从 7516 虚报成 10700
+（+42%），桌腿件的避让点从 1802 虚报成 3090（+72%）。</p>
+<h3 id="492">49.2 数字（解析口径）</h3>
 <div class="table-wrap"><table>
 <thead>
 <tr>
 <th></th>
-<th>等径柄（旧）</th>
-<th><strong>Ø6 柄（真实）</strong></th>
+<th>等径柄 <code>--shank-d 0</code></th>
+<th>全程按 Ø6（错）</th>
+<th><strong>分段按实际半径</strong></th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>叶轮 1 合格</td>
 <td>98.2%</td>
-<td><strong>96.4%</strong></td>
+<td>96.4%</td>
+<td><strong>96.6%</strong></td>
 </tr>
 <tr>
 <td>叶轮 1 残料</td>
 <td>0.2%</td>
 <td>2.5%</td>
+<td><strong>1.8%</strong></td>
 </tr>
 <tr>
 <td>叶轮 1 过切</td>
 <td>1.5%</td>
-<td><strong>1.2%</strong></td>
+<td>1.2%</td>
+<td>1.5%</td>
 </tr>
 <tr>
 <td>叶轮 1 刀杆撞</td>
 <td>1420</td>
-<td>10700（7.5×）</td>
+<td>10700</td>
+<td><strong>7516</strong></td>
 </tr>
 <tr>
 <td>桌腿件 合格</td>
 <td>97.8%</td>
-<td><strong>96.6%</strong></td>
+<td>96.6%</td>
+<td><strong>96.9%</strong></td>
 </tr>
 <tr>
 <td>桌腿件 残料</td>
 <td>1.0%</td>
 <td>2.2%</td>
+<td><strong>1.9%</strong></td>
 </tr>
 <tr>
-<td>桌腿件 清根刀杆避让</td>
-<td>49 点</td>
-<td><strong>3090 点</strong></td>
+<td>桌腿件 避让点</td>
+<td>49</td>
+<td>3090</td>
+<td><strong>1802</strong></td>
 </tr>
 </tbody>
 </table></div>
-<p>两个反直觉的地方：</p>
-<ol>
-<li><strong>过切变少了</strong>（叶轮 1.5% → 1.2%，可达面 2.6% → 2.0%）。严格检查剔掉的
-   正是"歪轴歪太多、刀柄硬挤进去"的那批点——它们本来就在过切的边缘。</li>
-<li><strong>可达面反而变好</strong>（97.2% → 97.6%）。同上。</li>
-</ol>
-<p>所以真实的代价是 <strong>1~2 个点的残料</strong>，不是崩溃。<code>--shank-d 0</code> 能<strong>逐位复现</strong>
-旧的 98.2%，两条口径可以并存对拍。</p>
-<h3 id="_83">没做</h3>
+<p>真实的代价是 <strong>1.3~1.6 个点的残料</strong>（叶轮 0.2 → 1.8、桌腿 1.0 → 1.9）。
+<code>--shank-d 0</code> 能<strong>逐位复现</strong>旧的 98.2%，两条口径可以并存对拍。</p>
+<p>三条测试钉住语义：
+<code>radius_at_has_three_segments</code>（三段半径）、
+<code>clearance_segment_uses_local_radius_not_the_shank</code>（避空段不按 Ø6 误报）、
+<code>cutting_edge_is_exempt_from_collision</code>（刀尖埋在料里也不判碰撞）。</p>
+<h3 id="_82">没做</h3>
 <ul>
 <li>没有按 Ø6 柄重跑全量仿真：体积 / 相似度 / F1 / IoU 仍是等径柄口径（§47 那批）。</li>
 <li><code>reach</code> 的可见性判据里也没带柄径——它只用射线，与刀具无关。</li>
 </ul>
-<h3 id="_84">顺带</h3>
+<h3 id="_83">顺带</h3>
 <p>六把刀的<strong>完整中轴剖面图</strong>（1px 线稿）已按 Ø6 柄 + 30° 缩颈重画，六把同一比例
 （4.25 px/mm），粗细可直接比较。</p>
 </main>

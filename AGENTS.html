@@ -605,7 +605,7 @@ testdata/         golden CSV + design_box.stl
 </tr>
 <tr>
 <td>刀柄直径</td>
-<td>✅ <code>ToolSpec.shank_diameter</code> + <code>shank_radius()</code>，CLI <code>--shank-d</code>（默认 <strong>6.0</strong>，真实刀具统一 Ø6 h6 夹持）。<code>to_tool_def()</code> 的柄剖面改成 <strong>刃顶 → 30° 缩颈 → Ø6 → 顶</strong>，<code>shank_hits</code> 与 <code>surface::shank_hits_axis</code> 都改吃 <code>shank_radius()</code>。<strong>之前柄等于刃径，碰撞检查偏乐观</strong>：叶轮 1 98.2% → <strong>96.4%</strong>（残料 0.2 → 2.5%）、桌腿件 97.8% → <strong>96.6%</strong>；过切反而更少（1.5 → 1.2%），因为被拒的正是"歪轴硬挤"的点。<code>--shank-d 0</code> 逐位复现旧值（§49）</td>
+<td>✅ <code>ToolSpec.shank_diameter</code> + <code>shank_radius()</code>，CLI <code>--shank-d</code>（默认 <strong>6.0</strong>，真实刀具统一 Ø6 h6 夹持）。<code>to_tool_def()</code> 的柄剖面改成 <strong>刃顶 → 30° 缩颈 → Ø6 → 顶</strong>，<code>shank_hits</code> 与 <code>surface::shank_hits_axis</code> 都改吃 <code>shank_radius()</code>。<strong>之前柄等于刃径，碰撞检查偏乐观</strong>。判据分三段（<code>radius_at</code>）：切削刃 <code>0…flute</code> <strong>不查</strong>（材料要切掉）、避空缩颈 <code>flute…flute+taper</code> 按该高度<strong>实际半径</strong>查、刀柄按 Ø6 查——拿柄径一刀切会把避空段也当 Ø6，虚报 42~72%。叶轮 1 98.2% → <strong>96.6%</strong>（残料 0.2 → 1.8%）、桌腿件 97.8% → <strong>96.9%</strong>（残料 1.0 → 1.9%）。<code>--shank-d 0</code> 逐位复现旧值（§49）</td>
 </tr>
 <tr>
 <td>工件包络</td>

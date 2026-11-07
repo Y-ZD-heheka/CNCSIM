@@ -441,10 +441,22 @@ fn shank_hits_axis(
         }
         z += step;
     }
-    // ② 刀杆：必须留间隙
+    // ② 避空缩颈：从刃顶按 30° 扩到柄径，**半径是变的**，按该高度的实际值查。
+    //    拿柄径一刀切会把这 4~5 mm 也当成 Ø6——Ø1 刀的避空段本来只有 Ø1→Ø3。
+    let taper = tool.taper_len();
+    let mut z = flute_end;
+    while z < flute_end + taper {
+        let rr = tool.radius_at(z);
+        let need = (rr + clearance).max(1e-3);
+        if ix.min_dist(tip + axis * z, need) < need {
+            return true;
+        }
+        z += 0.3;
+    }
+    // ③ Ø6 刀柄：半径恒定，用粗步长
     let shank_r = tool.shank_radius().max(r);
     let need_s = (shank_r + clearance).max(1e-3);
-    let mut z = flute_end;
+    let mut z = (flute_end + taper).max(flute_end);
     while z <= flute_end + 20.0 {
         if ix.min_dist(tip + axis * z, need_s) < need_s {
             return true;

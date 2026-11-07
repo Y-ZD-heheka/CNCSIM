@@ -201,6 +201,44 @@ impl ToolSpec {
         self
     }
 
+    /// 缩颈长度：从刃顶按 **30° 半角**扩到柄径需要多高。
+    /// 等径柄（`shank_diameter = 0`）时为 0。
+    pub fn taper_len(&self) -> f64 {
+        let r_cut = self.top_radius();
+        let r_shank = self.shank_radius();
+        if r_shank > r_cut + 1e-9 {
+            (r_shank - r_cut) / 30f64.to_radians().tan()
+        } else {
+            0.0
+        }
+    }
+
+    /// 刀尖以上 `z` 高度处的**最大半径**——碰撞检查的分段判据。
+    ///
+    /// 三段（按刀具实际形状，不是按"一刀切"）：
+    ///
+    /// * `z ≤ flute`：**切削刃**。这一段会切掉材料，**不做碰撞检查**
+    ///   （只有过切检查，那是另一套判据）。
+    /// * `flute < z ≤ flute + taper`：**避空缩颈**。半径从刃顶按 30° 线性长到柄径。
+    ///   这一段不切削，碰到工件就是干涉——要查。
+    /// * `z > flute + taper`：**Ø6 刀柄**。要查。
+    ///
+    /// 早先拿 `shank_r` 一刀切地从刃顶查到顶，等于把避空段也按 Ø6 算——
+    /// Ø1.0 刀的避空段本来只有 Ø1 到 Ø3 那么粗，被当成 Ø6 会误杀大量刀点。
+    pub fn radius_at(&self, z: f64) -> f64 {
+        let r_cut = self.top_radius();
+        let flute = self.flute_mm.max(self.radius());
+        if z <= flute {
+            return r_cut;
+        }
+        let t = self.taper_len();
+        if z <= flute + t {
+            r_cut + (z - flute) * 30f64.to_radians().tan()
+        } else {
+            self.shank_radius()
+        }
+    }
+
     /// 刀柄半径：有 `shank_diameter` 就用它，否则退回"刃顶半径"（等径柄）。
     ///
     /// **碰撞检查必须用这个**，不能用 `top_radius()`——后者是切削部的最大
@@ -247,13 +285,8 @@ impl ToolSpec {
         let r_cut = self.top_radius();
         let r_shank = self.shank_radius();
         let top = self.flute_mm + 20.0;
-        // 缩颈：从刃顶按 **30° 半角**扩到柄径（真实长颈刀就是这个形状；
-        // Ø6 平底刀的 r_shank == r_cut，缩颈长度退化为 0）。
-        let taper_len = if r_shank > r_cut + 1e-9 {
-            (r_shank - r_cut) / 30f64.to_radians().tan()
-        } else {
-            0.0
-        };
+        // 缩颈：从刃顶按 **30° 半角**扩到柄径（Ø6 平底刀退化为 0）
+        let taper_len = self.taper_len();
         ToolDef {
             number: self.number,
             kind: match self.kind {
@@ -796,18 +829,31 @@ fn pt_tri_dist2(p: DVec3, t: &Tri) -> f64 {
 pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance: f64) -> bool {
     let r = tool.radius();
     let flute = tool.flute_mm.max(r);
-    // **真实刀柄直径**（Ø6），不是刃径——见 `ToolSpec::shank_diameter`
     let shank_r = tool.shank_radius().max(r);
+    let taper = tool.taper_len();
     let len = flute + 20.0;
-    let step = (shank_r * 0.8).clamp(0.5, 2.0);
-    // **只从刃长以上开始查**：刀刃段（球 + 同半径柱）由 drop-cutter 保证不侵入，
-    // 而且它本来就贴着曲面（球心和切点只差一个 R），拿"离工件 ≥ 间隙"去要求它，
-    // 会把每一个刀点都判成碰撞——实测一次就误杀了 42858 个点。
+
+    // **刀刃段（z ≤ flute）整段不查**：那是切削区，材料本来就要被切掉。
+    // 拿"离工件 ≥ 间隙"去要求它，会把每个刀点都判成碰撞（实测误杀 42858 点）。
+    //
+    // 刃长以上分两段，各自按**该高度的实际半径**查：
+    //   ① 避空缩颈（flute … flute+taper）：30° 锥，半径连续变化 → 细步长
+    //   ② Ø6 刀柄（flute+taper … 顶）：半径恒定 → 粗步长
+    // 拿 `shank_r` 一刀切地查全程，等于把避空段也当成 Ø6（偏保守，误杀刀点）。
     let mut z = flute;
+    while z < flute + taper {
+        let rr = tool.radius_at(z);
+        let need = rr + clearance;
+        if ix.min_dist(tip + DVec3::new(0.0, 0.0, z), need) < need {
+            return true;
+        }
+        z += 0.3;
+    }
+    let step = (shank_r * 0.8).clamp(0.5, 2.0);
+    let mut z = (flute + taper).max(flute);
     while z <= len {
         let need = shank_r + clearance;
-        let p = tip + DVec3::new(0.0, 0.0, z);
-        if ix.min_dist(p, need) < need {
+        if ix.min_dist(tip + DVec3::new(0.0, 0.0, z), need) < need {
             return true;
         }
         z += step;
@@ -1574,6 +1620,105 @@ mod tests {
         assert!(
             !shank_hits(&ix, DVec3::new(0.0, 0.0, 20.0), &tool, 0.5),
             "抬到板上方 20 mm 不该判碰撞"
+        );
+    }
+
+    /// `radius_at` 的三段：刀刃（恒为刃顶半径）/ 避空缩颈（30° 线性）/ Ø6 柄。
+    #[test]
+    fn radius_at_has_three_segments() {
+        let t = ToolSpec::ball(1, 1.0, 10.0).with_shank(6.0);
+        // 刀刃段：任意高度都是刃顶半径 0.5
+        assert!((t.radius_at(0.0) - 0.5).abs() < 1e-9);
+        assert!((t.radius_at(10.0) - 0.5).abs() < 1e-9);
+        // 缩颈：Δr = 2.5，30° → 长 4.330，中点是 1.75
+        let taper = t.taper_len();
+        assert!((taper - 4.330).abs() < 0.01, "缩颈长度 {taper}");
+        assert!((t.radius_at(10.0 + taper * 0.5) - 1.75).abs() < 0.02);
+        // 柄：3.0
+        assert!((t.radius_at(10.0 + taper + 1.0) - 3.0).abs() < 1e-9);
+        // 等径柄（shank_diameter = 0）没有缩颈，全程都是刃顶半径
+        let e = ToolSpec::ball(2, 1.0, 10.0);
+        assert!(e.taper_len() < 1e-9);
+        assert!((e.radius_at(30.0) - 0.5).abs() < 1e-9);
+    }
+
+    /// **避空段按该高度的实际半径判碰撞，不是全程按 Ø6。**
+    ///
+    /// 构造：一小段竖直墙在 x=2、只覆盖 z ∈ [20,21]。Ø1 刀的缩颈在 z=21 处
+    /// 半径只有 `0.5 + 1·tan30° = 1.08`，加 0.3 间隙是 1.38 < 2.0 → **不该判碰撞**。
+    /// 往上缩颈变粗，但离墙角的距离也按 `√(4+dz²)` 变远，始终够不到（z=24.3 处
+    /// 半径 3.0、need 3.3，距离 3.89）。
+    /// 若实现拿柄径一刀切（z=21 处就 need 3.3 > 2.0），这里会误报。
+    #[test]
+    fn clearance_segment_uses_local_radius_not_the_shank() {
+        let wall = vec![
+            [
+                DVec3::new(2.0, -10.0, 20.0),
+                DVec3::new(2.0, 10.0, 20.0),
+                DVec3::new(2.0, 10.0, 21.0),
+            ],
+            [
+                DVec3::new(2.0, -10.0, 20.0),
+                DVec3::new(2.0, 10.0, 21.0),
+                DVec3::new(2.0, -10.0, 21.0),
+            ],
+        ];
+        let st = Stock {
+            min: DVec3::new(-5.0, -10.0, 0.0),
+            max: DVec3::new(2.0, 10.0, 30.0),
+        };
+        let ix = MeshIndex::build(&wall, st);
+        let t = ToolSpec::ball(1, 1.0, 20.0).with_shank(6.0);
+        assert!(
+            !shank_hits(&ix, DVec3::ZERO, &t, 0.3),
+            "避空段在该高度只有 Ø2.2，不该按 Ø6 判碰撞"
+        );
+        // 同一把刀的柄（z ≥ 24.3）如果伸到墙的高度上，就该判——用一块更高的墙验
+        let tall = vec![
+            [
+                DVec3::new(2.0, -10.0, 20.0),
+                DVec3::new(2.0, 10.0, 20.0),
+                DVec3::new(2.0, 10.0, 30.0),
+            ],
+            [
+                DVec3::new(2.0, -10.0, 20.0),
+                DVec3::new(2.0, 10.0, 30.0),
+                DVec3::new(2.0, -10.0, 30.0),
+            ],
+        ];
+        let ix2 = MeshIndex::build(&tall, st);
+        assert!(
+            shank_hits(&ix2, DVec3::ZERO, &t, 0.3),
+            "Ø6 柄在 z≈27 处离墙 2.0 < 3.3，必须判碰撞"
+        );
+    }
+
+    /// **刀刃段整段不参与碰撞检查**：刀尖埋在料里也不判（那是要切掉的）。
+    #[test]
+    fn cutting_edge_is_exempt_from_collision() {
+        // 一块 z ∈ [0,5] 的薄板，刀尖在 (2,0,2) 埋在板下
+        let plate = vec![
+            [
+                DVec3::new(0.0, -5.0, 5.0),
+                DVec3::new(5.0, -5.0, 5.0),
+                DVec3::new(5.0, 5.0, 5.0),
+            ],
+            [
+                DVec3::new(0.0, -5.0, 5.0),
+                DVec3::new(5.0, 5.0, 5.0),
+                DVec3::new(0.0, 5.0, 5.0),
+            ],
+        ];
+        let st = Stock {
+            min: DVec3::new(0.0, -5.0, 0.0),
+            max: DVec3::new(5.0, 5.0, 5.0),
+        };
+        let ix = MeshIndex::build(&plate, st);
+        // 刃长 20：整块板都在刀刃段（z ≤ 20）以内 → 不该判碰撞
+        let t = ToolSpec::ball(1, 1.0, 20.0).with_shank(6.0);
+        assert!(
+            !shank_hits(&ix, DVec3::new(2.0, 0.0, 2.0), &t, 0.3),
+            "刀刃段会直接切掉这块料，不能判成碰撞"
         );
     }
 
