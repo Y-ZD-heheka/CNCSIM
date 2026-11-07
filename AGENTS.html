@@ -395,7 +395,7 @@ cargo<span style="color: #ABB2BF"> </span><span style="color: #E5C07B">test</spa
   render          GPU 缓冲 + 分块增量重建 + HTML 预览 + Bevy 外壳
   ui              面板数据层（纯函数，无 egui 依赖）
   app             CLI 与自检
-docs/             20 篇 md + html（ADR-002…011 + 专题 + 项目记忆 + 开发日志）
+docs/             22 篇 md + html（ADR-002…011 + 专题 + 项目记忆 + 开发日志 + 外部调研采纳清单）
 tools/            守卫脚本、golden 生成、文档渲染、OpenVDB 对比基准
 refs/linuxcnc/    LinuxCNC 源码（GPLv2，仅阅读，作为语义 oracle）
 assets/           .machine.ron + MiSans 字体
@@ -699,6 +699,17 @@ testdata/         golden CSV + design_box.stl
 </blockquote>
 <hr />
 <h2 id="6">6. 下一步（按价值排序）</h2>
+<blockquote>
+<p><strong>外部调研的价值点已提炼成 <code>docs/工艺层补强-采纳清单.md</code></strong>（来源 <code>docs/rust-cnc-cam-research.md</code>，
+25 章）。核心判断：调研的<strong>算法层可当规格用</strong>，但它对"仿真精度"只给了加体素一条路
+（0.05 mm = 550 MB~2.7 GB），而我们的<strong>解析口径</strong>是第三条更便宜的路——守住，别被带跑。
+真正补短板的是工艺层：<strong>链接安全 → 进给自适应 → 方向投票 → 侧铣判定 → 桶刀</strong>。
+不采纳：真自适应 ADF（与确定性冲突）、全局 0.05 mm 体素、swarf 刀路、颤振 SLD。</p>
+</blockquote>
+<p>-1. <strong>链接安全（两级安全高度 + 三段折线）</strong> ⭐ 最急。<code>link_ok</code> 现在只<strong>计数</strong>擦料
+   （叶轮 1 有 8~12 处），不解决；每条链收尾 <code>G0</code> 抬 18 mm 再横移，66 m 空移里 50 m 是这个。
+   做法：<code>skim_z(a,b)</code> 沿 A→B 采样取"能过的最小高度"，<code>order_runs</code> 改成按
+   <strong>(是否安全, 抬刀高度)</strong> 排序，安全高度取 <code>min(skim+余量, clear)</code>。验收：擦料 ≤2、空移 &lt;50 m、合格率不降。</p>
 <ol start="0">
 <li>~~<strong>五轴曲面法向点铣 + 歪刀轴（60°）</strong>~~ ✅ 做完了（§44/§45/§47）：叶轮 1
    61.7% → <strong>98.2%</strong>、叶轮 2 47.3% → <strong>98.0%</strong>，过切 1.5% / 0.4%，
@@ -707,9 +718,9 @@ testdata/         golden CSV + design_box.stl
    点铣的代价已经压过一轮（§46）：叶轮 1 切长 55 → 12.3 m、叶轮 2 33.6 → 8.4 m。
    <strong>沿曲面流线走刀做完了，没有收益</strong>（§50）：链 −3% / 空移 −3.8%，但切长 +2%、
    块 +311——链的形状不是成本主体（64 m 空移里 50 m 是进退刀），
-   <code>follow_flow</code> 默认 false、<code>--flow</code> 留作实验。要再提质量/省时间，
-   得<strong>提高点的通过率</strong>（表面连成整片）：现在是刀杆（Ø6 柄 + 分段碰撞）和
-   球面闸门把表面切碎；更细颈的刀具参数是下一根杠杆。</li>
+   <code>follow_flow</code> 默认 false、<code>--flow</code> 留作实验。
+   <strong>通过率已经提上去了</strong>（§51）：<code>neck_mm</code> 四段模型 + 9 mm 避空颈把 Ø6 柄挡在
+   通道外，叶轮 1 到 <strong>98.0% / 残料 0.4%</strong>，刀杆撞 7516 → 1177。</li>
 <li>~~<strong>凹角清根</strong>~~ ✅ 做完了（§41.2）：91.6% → 93.7%，过切不变，切长 +29%。
    再往上被"刀径 vs 公差"卡住：90° 凹角要落进 ±0.15 得 R ≤ 0.36，再小断刀。</li>
 <li><strong>二次装夹（翻面）</strong>：桌腿件 13.6% 的面积在单次装夹下几何不可达
