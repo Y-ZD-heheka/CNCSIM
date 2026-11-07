@@ -2191,6 +2191,37 @@ M30
         let one = [pts[i]];
         let hit = cncsim_sim::compare::attribute_points(&out.cut_segs, &table, &one, 0.05);
         if let Some(h) = hit[0] {
+            // 【诊断】这个点的过切来自哪一段、哪个刀位、哪一段刀形：
+            // 对齐几何（G 代码行 → 位姿），再用"只含球头"的刀具剖面对照。
+            {
+                // 真正啃这个点的段：在该刀的所有段里取 sd_sweep 最小者
+                let prof_full = &table.by_number(h.tool).unwrap().cutter;
+                let mut spec_ball_only = cncsim_cam::ToolSpec::ball(h.tool, 1.5, 0.75);
+                let ball_only = spec_ball_only.to_tool_def().cutter;
+                let best = out.cut_segs
+                    .iter()
+                    .filter(|sg| sg.tool == h.tool)
+                    .min_by(|a, b| {
+                        let da = cncsim_voxel::sd_sweep(pts[i], &a.from, &a.to, prof_full);
+                        let db = cncsim_voxel::sd_sweep(pts[i], &b.from, &b.to, prof_full);
+                        da.total_cmp(&db)
+                    })
+                    .map(|sg| {
+                        let sd = cncsim_voxel::sd_sweep(pts[i], &sg.from, &sg.to, prof_full);
+                        (sd, sg)
+                    });
+                if let Some((sd, seg)) = best {
+                    let sd_ball = cncsim_voxel::sd_sweep(pts[i], &seg.from, &seg.to, &ball_only);
+                    println!(
+                        "  【诊断】T{} 啃刀段 from tip({:.3},{:.3},{:.3}) ax({:.2},{:.2},{:.2}) → to tip({:.3},{:.3},{:.3}) ax({:.2},{:.2},{:.2})：全刀形 sd={sd:.3} / 只球头 sd={sd_ball:.3}",
+                        h.tool,
+                        seg.from.tip.x, seg.from.tip.y, seg.from.tip.z,
+                        seg.from.axis.x, seg.from.axis.y, seg.from.axis.z,
+                        seg.to.tip.x, seg.to.tip.y, seg.to.tip.z,
+                        seg.to.axis.x, seg.to.axis.y, seg.to.axis.z,
+                    );
+                }
+            }
             println!(
                 "  └ 最深过切 ({:.2},{:.2},{:.2})：T{} 第 {} 行 / {:.2} mm",
                 pts[i].x,

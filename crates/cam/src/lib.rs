@@ -371,6 +371,12 @@ pub struct Process {
     pub check_shank: bool,
     /// 刀杆与工件的最小间隙（mm）。
     pub shank_clearance_mm: f64,
+    /// **精加工扫掠闸门**：drop-cutter 的球心在两列之间直线插值，跨窄槽/陡壁
+    /// 时两端球心都干净、中间的扫掠面却陷进设计面（实测每道稳定啃 0.3 mm）。
+    /// 开了它，每段在 1/4、1/2、3/4 三处查"球心到设计面 ≥ R−0.03"，
+    /// 啃的段直接断开（宁可留料，留给五轴曲面道/清根道补）——
+    /// 与五轴曲面道的 `sweep_ok` 同一口径。
+    pub finish_sweep_gate: bool,
     /// 遇到多层（中空/孔洞/倒扣）时**不拒收**，只把够不到的部分留在料里。
     ///
     /// 3 轴高度场天然只能加工"每个 XY 列的上表面"：孔、内腔、倒扣的背面它切不到。
@@ -395,6 +401,7 @@ impl Default for Process {
             spindle_rpm: 8000,
             check_shank: true,
             shank_clearance_mm: 0.5,
+            finish_sweep_gate: true,
             allow_undercut: false,
         }
     }
@@ -1279,6 +1286,39 @@ fn rough_level(
     }
 }
 
+/// **精加工段的扫掠闸门**：返回 run 里"啃设计面"的段下标（1..len）。
+///
+/// 两端球心都干净（`min_dist ≥ R−0.03`）不代表中间干净：球心在两列之间
+/// 直线插值，跨窄槽/陡壁时中间的扫掠面会陷进设计面。逐列闸门原理上拦不住
+/// （两端各自检查都过），必须在**段**上查——与五轴曲面道的 `sweep_ok`
+/// 同一口径，只是这里查的是"球心插值线"，那里查的是整根刀杆+球面。
+///
+/// 采样 1/4、1/2、3/4 三处：光滑曲面上球心弦高 ≈ dx²/(8(R+ρ)) ≈ 0.002 mm，
+/// 远小于 0.03 的容差，不会误报；真跨槽时中间样本 min_dist 直接掉到
+/// R−0.27，一击命中。
+fn sweep_breaks(index: &MeshIndex, run: &[DVec3], r: f64) -> Vec<usize> {
+    let need = (r - 0.03).max(0.0);
+    if need <= 0.0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in 1..run.len() {
+        let (a, b) = (run[i - 1], run[i]);
+        for &t in &[0.25, 0.5, 0.75] {
+            let c = DVec3::new(
+                a.x + (b.x - a.x) * t,
+                a.y + (b.y - a.y) * t,
+                a.z + (b.z - a.z) * t + r,
+            );
+            if index.min_dist(c, need) < need {
+                out.push(i);
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// 平行精加工：球头刀沿面法向偏置，行距由 `finish_stepover` 决定。
 #[allow(clippy::too_many_arguments)]
 fn finish_pass(
@@ -1301,6 +1341,9 @@ fn finish_pass(
     // 弦高 ≈ dx²/(8(R+ρ))。用行距当采样步长会在曲面上啃出 0.03 mm 的弦切过切
     // （实测），把 dx 收到 sample_mm 后降到 0.002 mm 量级。
     let dx = p.sample_mm.min(step);
+    // 陡坎阈值：光滑面（坡度 ≤ 75°）相邻列落差 ≤ tan75°·dx ≈ 3.7·dx，
+    // 取 6·dx（≥1 mm）留 60% 余量。竖直壁的落差是整个壁高，远超它。
+    let cliff = (6.0 * dx).max(1.0);
     let n_lines = (((stock.size().y) / step).ceil() as usize).max(1);
     let mut flip = false;
     for j in 0..=n_lines {
@@ -1371,7 +1414,24 @@ fn finish_pass(
                 other => other,
             };
             match tip {
-                Some(t) => pts.push(t),
+                Some(t) => {
+                    // **陡坎断开**：高度场在竖直壁处是"悬崖"——相邻列的最高点
+                    // 从壁底直接跳到壁顶（落差可以是整个工件高度）。把两列的
+                    // 刀尖用 G1 连起来，球头/刀盘就会从壁上铲过去（实测桌腿件
+                    // 稳定啃 0.27~0.32 mm，归因 63% 是它）。光滑面上相邻列的
+                    // 落差 ≤ tan(75°)·dx（坡度门槛的极值），超过它就是陡坎，
+                    // 断开成两段：各自抬刀再下刀，壁面留给曲面道/清根道。
+                    if let Some(last_t) = pts.last()
+                        && (t.z - last_t.z).abs() > cliff
+                    {
+                        if pts.len() >= 2 {
+                            runs.push(std::mem::take(&mut pts));
+                        } else {
+                            pts.clear();
+                        }
+                    }
+                    pts.push(t);
+                }
                 None => {
                     if pts.len() >= 2 {
                         runs.push(std::mem::take(&mut pts));
@@ -1389,6 +1449,29 @@ fn finish_pass(
             for r in &mut runs {
                 r.reverse();
             }
+        }
+        // ── 扫掠闸门：把"啃设计面"的段断开 ──
+        // 断开后两段各自收抬刀，中间留料；没有网格索引（无倒扣/等径柄）时跳过。
+        if p.finish_sweep_gate && let Some(ix) = index {
+            let mut split = Vec::with_capacity(runs.len());
+            for run in runs {
+                let breaks = sweep_breaks(ix, &run, r);
+                if breaks.is_empty() {
+                    split.push(run);
+                    continue;
+                }
+                let mut start = 0usize;
+                for b in breaks {
+                    if b - start >= 2 {
+                        split.push(run[start..b].to_vec());
+                    }
+                    start = b;
+                }
+                if run.len() - start >= 2 {
+                    split.push(run[start..].to_vec());
+                }
+            }
+            runs = split;
         }
         flip = !flip;
         for run in runs {
