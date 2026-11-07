@@ -600,7 +600,14 @@ fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: 
     // 可那个点在 z=6 处离轴只有 0.01 mm。**圆柱的判据必须沿轴连续**，
     // 不能靠稀疏的"高度"抽样。
     let step = (0.8 * r).clamp(0.25, 1.0);
-    for t in [0.2, 0.4, 0.6, 0.8] {
+    // **位姿数随转角加密**：刀轴在段内 slerp，转角大时刀杆（长 `flute`）
+    // 横向摆动 = flute·sin(θ/2·2)——固定 2 个刀杆采样位姿会漏掉中间的摆动
+    // （实测叶轮 T53 段内转 33°，刀杆扫过叶片 0.40 mm）。每 ~6° 一个位姿，
+    // 至少 4 个（与旧口径一致）、至多 16 个（只有跨棱的段才会到）。
+    let theta = na.dot(nb).clamp(-1.0, 1.0).acos();
+    let n_t = (((theta / 0.105).ceil() as usize) + 1).clamp(4, 16);
+    for k in 0..n_t {
+        let t = (k + 1) as f64 / (n_t as f64 + 1.0);
         // **刀轴按 slerp 插值**（与 `Pose::lerp_slerp` 同口径），球心再按
         // `tip + R·a` 现算——不能拿两端球心做 lerp：两端轴差 60° 时
         // lerp 出来的球心比真实位置短 `R(1−cos30°)`。
@@ -609,14 +616,12 @@ fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: 
         if ix.min_dist(tip + ax * r, need) < need {
             return false;
         }
-        if t == 0.4 || t == 0.6 {
-            let mut z = r + step;
-            while z <= flute {
-                if ix.min_dist(tip + ax * z, need) < need {
-                    return false;
-                }
-                z += step;
+        let mut z = r + step;
+        while z <= flute {
+            if ix.min_dist(tip + ax * z, need) < need {
+                return false;
             }
+            z += step;
         }
     }
     true
