@@ -1694,7 +1694,8 @@ fn run_cam_multi(
             let mut o = cncsim_cam::surface::SurfaceOpts::new(tool.clone(), tn, stock);
             o.max_tilt_deg = surface_tilt_from_args().unwrap_or(60.0);
             o.link_mm = (2.0 * step).clamp(0.5, 3.0);
-            o.out_step_mm = (1.2 * tool.radius()).clamp(0.3, 1.2);
+            o.out_step_mm = surface_step_from_args()
+                .unwrap_or_else(|| (1.2 * tool.radius()).clamp(0.3, 1.2));
             o.feed_mm_min = 800.0;
             match cncsim_cam::surface::generate_surface(tris, stock, &targets, &o) {
                 Ok(sx) => {
@@ -2396,6 +2397,56 @@ M30
         }
     }
 
+    // ── 体积对账：解析扫掠体 vs 体素去料 ──
+    //
+    // 两个口径各说各话时（§47.1：解析 97.8%、体素 F1 0.868），先问一句"料到底
+    // 去了多少"。解析这边把毛坯按格子采样、逐点问"在不在扫掠体并集里"，
+    // 得到的是**与体素 h 无关**的去除体积；体素那边是积分出来的。
+    // 两个数对得上 → 切削本身没问题，差在网格提取；对不上 → 仿真或段表有问题。
+    if args_flag("--vcheck") {
+        let step = (h * 1.5).max(0.6);
+        let n = |v: f64| (v / step).ceil().max(1.0) as usize;
+        let (nx, ny, nz) = (n(stock.size().x), n(stock.size().y), n(stock.size().z));
+        let mut pts = Vec::with_capacity(nx * ny * nz);
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    pts.push(cncsim_math::DVec3::new(
+                        stock.min.x + (i as f64 + 0.5) * step,
+                        stock.min.y + (j as f64 + 0.5) * step,
+                        stock.min.z + (k as f64 + 0.5) * step,
+                    ));
+                }
+            }
+        }
+        // 先验一件事：**设计场的零点在不在网格上**。设计场是窄带 i8 场，
+        // 如果它的零面系统性偏出去 0.1 mm，那么任何"切到位"的刀路都会在体素
+        // 口径里显示成"切多了"——这会正好造出 §47.1 那个矛盾。
+        let sd: Vec<f64> = samples.iter().map(|(p, _, _)| design.sdf(*p)).collect();
+        let mean = sd.iter().sum::<f64>() / sd.len().max(1) as f64;
+        let maxabs = sd.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        let out_of_band = sd.iter().filter(|v| v.abs() >= 0.29).count();
+        println!(
+            "设计场零点：{} 个网格点 → 平均 {:+.4} mm / 最大 |{:.4}| / 超出窄带 {} 点",
+            sd.len(),
+            mean,
+            maxabs,
+            out_of_band
+        );
+        let d = cncsim_sim::compare::sweep_deviation(&out.cut_segs, &table, &pts, 1.0);
+        let inside = d.iter().filter(|v| **v < 0.0).count();
+        let va = inside as f64 * step * step * step;
+        let vb = out.report.removed_volume_mm3;
+        println!(
+            "体积对账（{:.1} mm 格 / {} 点）：解析扫掠体 {:.1} mm³ / 体素去料 {:.1} mm³ / 差 {:+.1}%",
+            step,
+            pts.len(),
+            va,
+            vb,
+            (va - vb) / vb.max(1e-9) * 100.0
+        );
+    }
+
     // ── 相似度：Hausdorff / Chamfer / F1 / IoU / 法向一致 ──
     //
     // 前面的"名义曲面偏差"是**单向**的（设计面 → 实际面），它看不见"落在设计面
@@ -2427,12 +2478,14 @@ M30
             sim.f_score, sim.precision, sim.recall
         );
         println!(
-            "  ├ IoU {:.4} / Dice {:.4} / 法向一致 {:.3} / 偏置 {:+.3} mm → {}",
+            "  ├ IoU {:.4} / Dice {:.4} / 法向一致 {:.3} / 偏置 {:+.3} mm → {}（体素差：切多 {} / 没切到 {}）",
             sim.iou,
             sim.dice,
             sim.normal_consistency,
             sim.bias_mm,
-            sim.verdict()
+            sim.verdict(),
+            sim.only_design,
+            sim.only_actual
         );
         if sim.design_saturated + sim.actual_saturated > 0 {
             println!(
@@ -3025,6 +3078,15 @@ fn surface_tilt_from_args() -> Option<f64> {
         .find(|(a, _)| a == "--surface-tilt")
         .and_then(|(_, v)| v.parse::<f64>().ok())
         .filter(|v| *v >= 0.0)
+}
+
+fn surface_step_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--surface-step")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
 }
 
 fn surface_d_from_args() -> Option<f64> {

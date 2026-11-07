@@ -691,7 +691,7 @@ fn order_runs(
     let mut used = vec![false; n];
     let mut out: Vec<Vec<usize>> = Vec::with_capacity(n);
     // 起点：z 最高的链（从上面往下做，落差小）
-    let mut cur = (0..n)
+    let cur = (0..n)
         .max_by(|a, b| {
             let za = tips[runs[*a][0]].z;
             let zb = tips[runs[*b][0]].z;

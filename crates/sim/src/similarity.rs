@@ -68,6 +68,10 @@ pub struct Similarity {
     pub iou: f64,
     /// `2|A∩B|/(|A|+|B|)`。
     pub dice: f64,
+    /// 设计是实心、实际是空的体素数（**切多了**）。
+    pub only_design: usize,
+    /// 设计是空的、实际是实心的体素数（**没切到**）。
+    pub only_actual: usize,
 }
 
 impl Similarity {
@@ -228,6 +232,8 @@ pub fn compare(
             }
         }
     }
+    s.only_design = only_a;
+    s.only_actual = only_b;
     if union > 0 {
         s.iou = inter as f64 / union as f64;
         let tot = 2 * inter + only_a + only_b;
