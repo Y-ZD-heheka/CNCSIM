@@ -49,6 +49,10 @@ pub struct SurfaceOpts {
     pub gate_tol_mm: f64,
     /// A 轴行程上限（度）。
     pub max_a_deg: f64,
+    /// 刀轴可以在法向周围歪多少度（`0` = 只用纯法向）。
+    ///
+    /// 歪刀轴只为了让开障碍：球在 `p` 的接触点与刀轴无关，形状不变。
+    pub max_tilt_deg: f64,
     pub spindle_rpm: u32,
     pub feed_mm_min: f64,
     pub plunge_mm_min: f64,
@@ -72,6 +76,7 @@ impl SurfaceOpts {
             shank_clearance_mm: 0.3,
             gate_tol_mm: 0.03,
             max_a_deg: crate::rotary::A_LIMIT_DEG,
+            max_tilt_deg: 40.0,
             spindle_rpm: 12_000,
             feed_mm_min: 600.0,
             plunge_mm_min: 200.0,
@@ -89,6 +94,8 @@ pub struct SurfaceStats {
     pub accepted: usize,
     /// A 超行程（刀摆不到那个法向）。
     pub a_rejected: usize,
+    /// **歪刀轴才通过**的点数：纯法向会被刀杆挡住，歪一点就让开了。
+    pub axis_retried: usize,
     /// 球面会啃进设计面（凹处塞不下这么大的球）。
     pub gouge_rejected: usize,
     /// 刀杆会撞到别处（通道太窄/深腔）。
@@ -154,33 +161,54 @@ pub fn generate_surface(
     let mut pts: Vec<DVec3> = Vec::new();
     let mut nrm: Vec<DVec3> = Vec::new();
     let mut axs: Vec<DVec3> = Vec::new();
+    // 上一个通过点的刀轴：候选按"与它最像"排序，保证轴场连续
+    let mut last_axis: Option<DVec3> = None;
     for &(p, n) in targets {
         let n = n.normalize();
         if !n.length_squared().is_finite() || !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite())
         {
             continue;
         }
-        let a = feasible_axis(n, opts.max_a_deg);
-        if a.dot(n) <= 0.0 {
-            // 刀轴落在设计面背后：球只能从里面顶，切不了
-            st.a_rejected += 1;
-            continue;
-        }
         // 球心 `p + R·n`：`p` 自己在球面上，所以最近距离天然 = R；只有**别的面**
-        // 比 R 更近才说明塞不下（凹坑/窄槽）。这一条比"看得到"严格得多。
+        // 比 R 更近才说明塞不下（凹坑/窄槽）。这一条比"看得到"严格得多，
+        // 而且**与刀轴无关**——先判它，最便宜的拒绝放最前面。
         let need = (r - opts.gate_tol_mm).max(1e-6);
         if ix.min_dist(p + n * r, need) < need {
             st.gouge_rejected += 1;
             continue;
         }
-        let tip = p + (n - a) * r;
-        if shank_hits_axis(&ix, tip, a, &opts.tool, opts.gate_tol_mm, opts.shank_clearance_mm) {
-            st.shank_rejected += 1;
-            continue;
+        // 刀轴搜索：先试法向本身，不行就在锥面上转。
+        //
+        // 这是叶轮上最大的一笔：残料点里 73% 是"刀杆蹭到对面叶片"被拒的。
+        // 刀轴偏转 `R(n−a)` 那点补偿对形状没有影响（球照样在 `p` 相切），
+        // 但**刀杆整根跟着摆**——歪一点就能让开对面那片叶子。
+        let mut pick: Option<(DVec3, bool)> = None;
+        for (k, a) in axis_candidates(n, opts.max_a_deg, opts.max_tilt_deg, last_axis)
+            .into_iter()
+            .enumerate()
+        {
+            if a.dot(n) <= 0.0 {
+                continue; // 轴跑到设计面背后：球只能从里面顶
+            }
+            let tip = p + (n - a) * r;
+            if !shank_hits_axis(&ix, tip, a, &opts.tool, opts.gate_tol_mm, opts.shank_clearance_mm)
+            {
+                pick = Some((a, k > 0));
+                break;
+            }
         }
-        pts.push(p);
-        nrm.push(n);
-        axs.push(a);
+        match pick {
+            Some((a, tilted)) => {
+                if tilted {
+                    st.axis_retried += 1;
+                }
+                pts.push(p);
+                nrm.push(n);
+                axs.push(a);
+                last_axis = Some(a);
+            }
+            None => st.shank_rejected += 1,
+        }
     }
     st.accepted = pts.len();
     if pts.is_empty() {
@@ -322,6 +350,39 @@ fn feasible_axis(n: DVec3, max_a_deg: f64) -> DVec3 {
     (dir * t.sin() + DVec3::Z * t.cos()).normalize()
 }
 
+/// 候选刀轴：法向本身，再在 ±`tilt_deg` 的锥面上按 8 个方位各取半步/整步。
+///
+/// 排在最前的是"不歪"的解，所以绝大多数点第一次就命中；只有被刀杆拦住的点
+/// 才会往下试。每个候选都过 [`feasible_axis`]，所以永远在 A 行程内。
+fn axis_candidates(n: DVec3, max_a_deg: f64, tilt_deg: f64, prefer: Option<DVec3>) -> Vec<DVec3> {
+    let mut out = vec![feasible_axis(n, max_a_deg)];
+    if tilt_deg <= 0.0 {
+        return out;
+    }
+    let f = crate::Frame::from_dir(n);
+    // `rot` 的列是局部 x/y/z 在世界里的方向
+    let x = DVec3::new(f.rot[0][0], f.rot[1][0], f.rot[2][0]);
+    let y = DVec3::new(f.rot[0][1], f.rot[1][1], f.rot[2][1]);
+    for frac in [0.6, 1.0] {
+        let th = (tilt_deg * frac).to_radians();
+        let (st, ct) = th.sin_cos();
+        let mut ring: Vec<DVec3> = (0..8)
+            .map(|k| {
+                let phi = k as f64 / 8.0 * std::f64::consts::TAU;
+                let (sp, cp) = phi.sin_cos();
+                (n * ct + (x * cp + y * sp) * st).normalize()
+            })
+            .collect();
+        // **同一圈里挑"跟上一个点最像"的那个**：刀轴在面上要连续，否则相邻
+        // 两块之间轴摆 50°，机器抖、刃部圆柱还会扫出一片（实测 0.50 mm）。
+        if let Some(p) = prefer {
+            ring.sort_by(|a, b| b.dot(p).total_cmp(&a.dot(p)));
+        }
+        out.extend(ring.into_iter().map(|a| feasible_axis(a, max_a_deg)));
+    }
+    out
+}
+
 /// 刀杆/刃部圆柱会不会碰到工件——**沿任意刀轴**。
 ///
 /// 两段用两套判据，这是从实测里分出来的：
@@ -390,28 +451,44 @@ struct Geo {
 fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: Geo) -> bool {
     let Geo { r, tol, flute } = g;
     let need = (r - tol).max(1e-6);
-    let ca = a + na * r;
-    let cb = b + nb * r;
-    // 刃部圆柱上取两个高度：2R（贴着球）与刃长的一半（深一点的地方）
-    let h2 = (2.0 * r).min(flute).max(r);
-    let h3 = (0.5 * flute).max(h2);
+    // 刃部圆柱沿轴**密采样**（步长 ≤ 0.5R）。
+    //
+    // 早先在 1/4/8/12/16 mm 五个高度上查，漏了 0.49 mm：设计面点在 z=6，
+    // 而采样在 4 和 8——两个采样点离它 2 mm，读数 2 mm ≫ R，判"安全"，
+    // 可那个点在 z=6 处离轴只有 0.01 mm。**圆柱的判据必须沿轴连续**，
+    // 不能靠稀疏的"高度"抽样。
+    let step = (0.8 * r).clamp(0.25, 1.0);
     for t in [0.2, 0.4, 0.6, 0.8] {
-        let c = ca + (cb - ca) * t;
-        if ix.min_dist(c, need) < need {
+        // **刀轴按 slerp 插值**（与 `Pose::lerp_slerp` 同口径），球心再按
+        // `tip + R·a` 现算——不能拿两端球心做 lerp：两端轴差 60° 时
+        // lerp 出来的球心比真实位置短 `R(1−cos30°)`。
+        let ax = slerp_axis(na, nb, t);
+        let tip = a + (b - a) * t;
+        if ix.min_dist(tip + ax * r, need) < need {
             return false;
         }
-        // 中间两个位置查刃部圆柱（端点的姿态单独判过，不必重复）
         if t == 0.4 || t == 0.6 {
-            let ax = (na + (nb - na) * t).normalize();
-            let tip = a + (b - a) * t;
-            for h in [h2, h3] {
-                if ix.min_dist(tip + ax * h, need) < need {
+            let mut z = r + step;
+            while z <= flute {
+                if ix.min_dist(tip + ax * z, need) < need {
                     return false;
                 }
+                z += step;
             }
         }
     }
     true
+}
+
+/// 两个刀轴之间的球面插值（与 `Pose::lerp_slerp` 同一口径）。
+fn slerp_axis(a: DVec3, b: DVec3, t: f64) -> DVec3 {
+    let d = a.dot(b).clamp(-1.0, 1.0);
+    let th = d.acos();
+    if th < 1e-6 || th > std::f64::consts::PI - 1e-6 {
+        return a;
+    }
+    let s = th.sin();
+    (a * (((1.0 - t) * th).sin() / s) + b * ((t * th).sin() / s)).normalize()
 }
 
 /// 最近邻串链，带**方向偏好**（避免来回锯齿）和**扫掠闸门**（不许穿墙连）。
@@ -495,10 +572,10 @@ fn chain(
                             if d > link || d < 1e-9 {
                                 continue;
                             }
-                            // **法向差 > 60° 不连**：那是另一个面（棱的对面）。
+                            // **刀轴差 > 45° 不连**：那是另一个面（棱的对面），或者姿态急转。
                             // 连过去意味着一个块里刀轴转 60° 以上，刃部圆柱会扫平
                             // 中间那条棱——实测最深 0.67 mm 就是这么来的。
-                            if nrm[cur].dot(nrm[c]) < 0.5 {
+                            if nrm[cur].dot(nrm[c]) < 45f64.to_radians().cos() {
                                 continue;
                             }
                             // 方向偏好：**同样是邻居时优先往前走**，权重 0.9 足够
@@ -563,7 +640,10 @@ fn decimate(
         if acc < step {
             continue;
         }
-        if sweep_ok(ix, pts[last], nrm[last], pts[w[1]], nrm[w[1]], g) {
+        // 抽稀不能把"两段各转 30°"合成"一块转 60°"：轴摆太大时机器抖，
+        // 刃部圆柱还会扫出一片（实测块内轴摆 60° 啃 0.50 mm）。
+        let ok_axis = nrm[last].dot(nrm[w[1]]) >= 30f64.to_radians().cos();
+        if ok_axis && sweep_ok(ix, pts[last], nrm[last], pts[w[1]], nrm[w[1]], g) {
             out.push(w[1]);
             last = w[1];
             acc = 0.0;
@@ -793,6 +873,67 @@ mod tests {
         let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
         let runs = chain(&pts, &nrm, 1.5, &ix, g);
         assert_eq!(runs.len(), 2, "隔墙的两点必须分成两条链：{runs:?}");
+    }
+
+    /// 候选刀轴：**第一个是法向本身**，全都在 A 行程内、都在设计面外侧。
+    #[test]
+    fn axis_candidates_start_at_the_normal_and_stay_feasible() {
+        let n = DVec3::new(0.3, -0.4, 0.866).normalize();
+        let c = axis_candidates(n, 110.0, 40.0, None);
+        assert_eq!(c[0], n, "第一个候选必须是不歪的法向");
+        assert_eq!(c.len(), 17, "1 + 8（40°）+ 8（24°）= 17");
+        for a in &c {
+            assert!((a.length() - 1.0).abs() < 1e-9, "必须是单位向量：{a:?}");
+            assert!(a.dot(n) > 0.0, "刀轴不能跑到设计面背后：{a:?}");
+            assert!(crate::rotary::ac_of(*a).0 <= 110.0 + 1e-9, "不能超 A 行程：{a:?}");
+        }
+        // 关掉倾斜就只剩一个
+        assert_eq!(axis_candidates(n, 110.0, 0.0, None).len(), 1);
+        // 给一个偏好轴，同圈里离它最近的排最前
+        let prefer = DVec3::new(-1.0, 0.0, 0.0);
+        let c2 = axis_candidates(DVec3::Z, 110.0, 40.0, Some(prefer));
+        let ring1 = &c2[1..9];
+        let best = ring1
+            .iter()
+            .map(|a| a.dot(prefer))
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (c2[1].dot(prefer) - best).abs() < 1e-12,
+            "同圈里该把最贴偏好轴的那个排最前：{:?}",
+            c2[1]
+        );
+    }
+
+    /// **刀杆挡住时歪刀轴能救**：高墙旁边的地面点，竖直下去刀杆贴墙太近，
+    /// 往反方向歪 40° 就让开了。这是叶轮上 69% 的残料点靠的那一招。
+    #[test]
+    fn tilted_axis_clears_a_tall_wall_the_normal_axis_hits() {
+        // 地面 z=0（x ∈ [-2, 1.2]），一堵高墙在 x = 1.2（0..10 高）
+        let f = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
+        let mesh = vec![
+            [f(-2.0, -2.0, 0.0), f(1.2, -2.0, 0.0), f(1.2, 2.0, 0.0)],
+            [f(-2.0, -2.0, 0.0), f(1.2, 2.0, 0.0), f(-2.0, 2.0, 0.0)],
+            [f(1.2, -2.0, 0.0), f(1.2, 2.0, 0.0), f(1.2, 2.0, 10.0)],
+            [f(1.2, -2.0, 0.0), f(1.2, 2.0, 10.0), f(1.2, -2.0, 10.0)],
+        ];
+        let st = Stock {
+            min: DVec3::new(-2.0, -2.0, 0.0),
+            max: DVec3::new(1.2, 2.0, 10.0),
+        };
+        let targets = vec![(DVec3::new(0.5, 0.0, 0.0), DVec3::Z)];
+        // 刃长 3：3 mm 以下是刃部（离墙 0.7 > 0.5−0.03，没问题），
+        // 3 mm 以上是刀杆（要 0.5+0.3=0.8，0.7 差一点 → 竖直必撞）
+        let tool = ToolSpec::ball(1, 1.0, 3.0);
+
+        let mut o = SurfaceOpts::new(tool.clone(), 1, st);
+        o.max_tilt_deg = 0.0;
+        let flat = generate_surface(&mesh, st, &targets, &o).expect("不报错");
+        assert_eq!(flat.stats.shank_rejected, 1, "竖直下去刀杆该撞墙");
+
+        o.max_tilt_deg = 40.0;
+        let tilted = generate_surface(&mesh, st, &targets, &o).expect("不报错");
+        assert_eq!(tilted.stats.accepted, 1, "歪 40° 该能进");
+        assert_eq!(tilted.stats.axis_retried, 1, "而且必须是靠歪刀轴进来的");
     }
 
     /// 抽稀：0..10 共 11 个点、间距 1、抽稀 3 → 0,3,6,9 + 末点 10。

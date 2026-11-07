@@ -1692,6 +1692,7 @@ fn run_cam_multi(
             // Ø6 平底刀），实测把过切从 1.2% 抬到 6.8%、最深 2.92 mm。
             let tool = cncsim_cam::ToolSpec::ball(tn, ds, flute);
             let mut o = cncsim_cam::surface::SurfaceOpts::new(tool.clone(), tn, stock);
+            o.max_tilt_deg = surface_tilt_from_args().unwrap_or(40.0);
             o.link_mm = (2.0 * step).clamp(0.5, 3.0);
             o.out_step_mm = (1.2 * tool.radius()).clamp(0.3, 1.2);
             o.feed_mm_min = 800.0;
@@ -1699,8 +1700,9 @@ fn run_cam_multi(
                 Ok(sx) => {
                     let st = sx.stats;
                     println!(
-                        "  └ Ø{ds:.1} 长颈球头（刃长 {flute:.0}）：通过 {} 点 / A超程 {} / 球面塞不下 {} / 刀杆撞 {} / 切入啃 {} → {} 条链 / {} 块 / 切 {:.1} m",
+                        "  └ Ø{ds:.1} 长颈球头（刃长 {flute:.0}）：通过 {} 点（其中 {} 点靠歪刀轴）/ A超程 {} / 球面塞不下 {} / 刀杆撞 {} / 切入啃 {} → {} 条链 / {} 块 / 切 {:.1} m",
                         st.accepted,
+                        st.axis_retried,
                         st.a_rejected,
                         st.gouge_rejected,
                         st.shank_rejected,
@@ -3014,6 +3016,15 @@ fn slope_deg() -> f64 {
 }
 
 /// `--finish-step <mm>`：精加工行距（默认 0.4×刀径）。
+fn surface_tilt_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--surface-tilt")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v >= 0.0)
+}
+
 fn surface_d_from_args() -> Option<f64> {
     std::env::args()
         .skip(1)

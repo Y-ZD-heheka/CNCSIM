@@ -272,7 +272,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <h1 id="agentsmd">AGENTS.md</h1><div class="meta"><span class="chip hi">CAM</span><span class="chip hi">精度</span><span class="chip">口径</span></div>
 <blockquote>
 <p>给 AI agent / 新接手者的入口。<strong>先读这一页，再读 <code>docs/项目记忆.md</code>。</strong></p>
-<p>最后更新：2026-11-07 · 14 crate / <strong>544 测试全绿</strong> / 5 个外部依赖全最新
+<p>最后更新：2026-11-07 · 14 crate / <strong>546 测试全绿</strong> / 5 个外部依赖全最新
 （<code>cargo clippy</code> 有 8 条历史遗留告警，见 §2 注；sim / app 零告警）</p>
 </blockquote>
 <hr />
@@ -616,6 +616,10 @@ testdata/         golden CSV + design_box.stl
 <td>✅ <code>ball_hits</code>：球心到<strong>真网格</strong>的距离 ≥ <code>R − 0.03</code>（高度场看不见悬伸，小刀会钻到下面啃 0.27 mm）。清根道的刀杆判据改判"侵入 ≤0.15"而不是"留 0.5 间隙"——凹角里刀本来就是相切的</td>
 </tr>
 <tr>
+<td>歪刀轴（五轴曲面道）</td>
+<td>✅ <code>axis_candidates</code>：纯法向 → 24°/40° 锥面 × 8 方位，每个候选过 A 行程；同圈按"与上一点最像"排序保证连续；串链 &gt;45° 不连。<strong>歪轴不改变切出来的形状</strong>（<code>tip = p + R(n−a)</code> 补偿），只改变刀杆去哪——叶轮 1 <strong>68%</strong>、叶轮 2 <strong>71%</strong> 的通过点是靠它进来的。叶轮 1 78.8 → <strong>91.2%</strong>、叶轮 2 47.3 → <strong>95.3%</strong>，过切不涨（1.4% / 0.3%）。<code>--surface-tilt</code> 可调（默认 40°）。见 §45</td>
+</tr>
+<tr>
 <td>五轴曲面法向点铣</td>
 <td>✅ <code>cam::surface</code>：<strong>不经过高度场</strong>，球心放在 <code>p + R·n</code>、刀轴沿 <code>n</code>，球在设计面 <code>p</code> 相切。核心恒等式 <code>tip = p + R(n − a)</code> —— <strong>刀轴 <code>a</code> 是自由的</strong>，法向超出 A 行程就把轴拉到 110° 极限、刀尖偏 <code>R(n−a)</code>，球照样相切（叶轮 1 的 45% 残料点原本栽在 A 超程，改后 0）。三道闸门：球面 <code>R−0.03</code> / 刃部圆柱 <code>R−0.03</code> / 刀杆 <code>R+0.3</code>；串链每段都过 <code>sweep_ok</code>（不许穿墙），法向差 &gt;60° 不连。桌腿件 91.6 → <strong>93.9%</strong>、不可达面 57.9 → <strong>73.5%</strong>，过切不变；叶轮 1 61.7 → <strong>78.8%</strong>、残料 37.0 → 19.8%。默认 <code>--surface-d = min(精刀, Ø1.0)</code>，<code>--no-surface</code> 关。见 §44</td>
 </tr>
@@ -672,13 +676,11 @@ testdata/         golden CSV + design_box.stl
 <hr />
 <h2 id="6">6. 下一步（按价值排序）</h2>
 <ol start="0">
-<li>~~<strong>五轴曲面法向点铣</strong>~~ ✅ 做完了（§44）：叶轮 1 61.7% → <strong>78.8%</strong>，残料
-   37.0% → 19.8%，过切不变。<strong>侧刃铣没做</strong>（要先把网格拟合成直纹面，对非直纹
-   叶片无解）——现在这条路子对任意网格成立，代价是点铣的切长。
-   下一步最该动的是<strong>五轴开粗 / 更细颈的刀</strong>：叶轮 1 的残料里 73% 被刀杆拦掉、<blockquote>
-<p>1 mm 的 3.8 万点需要开粗才切得到底。</p>
-</blockquote>
-</li>
+<li>~~<strong>五轴曲面法向点铣 + 歪刀轴</strong>~~ ✅ 做完了（§44/§45）：叶轮 1 61.7% →
+   <strong>91.2%</strong>、叶轮 2 47.3% → <strong>95.3%</strong>，过切 1.4% / 0.3%，残料 7.4% / 4.3%。
+   <strong>侧刃铣没做</strong>（要先把网格拟合成直纹面，对非直纹叶片无解）。
+   下一步最该动的是<strong>点铣的代价</strong>：叶轮 2 切长 33.6 m ≈ 42 min（800 mm/min），
+   而侧刃铣只要几米；另外夹具/刀柄的碰撞还没接（只查了刀具母线）。</li>
 <li>~~<strong>凹角清根</strong>~~ ✅ 做完了（§41.2）：91.6% → 93.7%，过切不变，切长 +29%。
    再往上被"刀径 vs 公差"卡住：90° 凹角要落进 ±0.15 得 R ≤ 0.36，再小断刀。</li>
 <li><strong>二次装夹（翻面）</strong>：桌腿件 13.6% 的面积在单次装夹下几何不可达
