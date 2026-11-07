@@ -272,7 +272,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <h1 id="agentsmd">AGENTS.md</h1><div class="meta"><span class="chip hi">CAM</span><span class="chip hi">精度</span><span class="chip">口径</span></div>
 <blockquote>
 <p>给 AI agent / 新接手者的入口。<strong>先读这一页，再读 <code>docs/项目记忆.md</code>。</strong></p>
-<p>最后更新：2026-11-07 · 14 crate / <strong>546 测试全绿</strong> / 5 个外部依赖全最新
+<p>最后更新：2026-11-07 · 14 crate / <strong>548 测试全绿</strong> / 5 个外部依赖全最新
 （<code>cargo clippy</code> 有 8 条历史遗留告警，见 §2 注；sim / app 零告警）</p>
 </blockquote>
 <hr />
@@ -616,8 +616,16 @@ testdata/         golden CSV + design_box.stl
 <td>✅ <code>ball_hits</code>：球心到<strong>真网格</strong>的距离 ≥ <code>R − 0.03</code>（高度场看不见悬伸，小刀会钻到下面啃 0.27 mm）。清根道的刀杆判据改判"侵入 ≤0.15"而不是"留 0.5 间隙"——凹角里刀本来就是相切的</td>
 </tr>
 <tr>
+<td>点铣的代价</td>
+<td>✅ 退刀改 <code>G0</code>、进刀只留最后 1 mm 进给（前面 17 mm 快移）、链按"离上一条终点最近"重排（可整条反向）。叶轮 1 切长 55 → <strong>12.3 m</strong>、叶轮 2 33.6 → <strong>8.4 m</strong>、桌腿件 5.6 → <strong>1.2 m</strong>，合格率一位不差。报告行现在带 <code>切 / 空移 / 链间擦料</code>，切长只算真切削</td>
+</tr>
+<tr>
+<td>链间快移擦料</td>
+<td>✅ <code>link_ok</code> 按 0.5 mm 步距扫快移轨迹（刀尖 + 刃部圆柱）——仿真里 <code>G0</code> 不计切削，撞了也看不见。叶轮 1 原本 <strong>46/1225（3.8%）</strong> 条会擦到工件；链排序先取最近三条、优先选不擦料的 → <strong>12（1.0%）</strong>。剩下的留给后处理（真实 CAM 也在这里报碰撞）</td>
+</tr>
+<tr>
 <td>歪刀轴（五轴曲面道）</td>
-<td>✅ <code>axis_candidates</code>：纯法向 → 24°/40° 锥面 × 8 方位，每个候选过 A 行程；同圈按"与上一点最像"排序保证连续；串链 &gt;45° 不连。<strong>歪轴不改变切出来的形状</strong>（<code>tip = p + R(n−a)</code> 补偿），只改变刀杆去哪——叶轮 1 <strong>68%</strong>、叶轮 2 <strong>71%</strong> 的通过点是靠它进来的。叶轮 1 78.8 → <strong>91.2%</strong>、叶轮 2 47.3 → <strong>95.3%</strong>，过切不涨（1.4% / 0.3%）。<code>--surface-tilt</code> 可调（默认 40°）。见 §45</td>
+<td>✅ <code>axis_candidates</code>：纯法向 → 24°/40° 锥面 × 8 方位，每个候选过 A 行程；同圈按"与上一点最像"排序保证连续；串链 &gt;45° 不连。<strong>歪轴不改变切出来的形状</strong>（<code>tip = p + R(n−a)</code> 补偿），只改变刀杆去哪——叶轮 1 <strong>68%</strong>、叶轮 2 <strong>71%</strong> 的通过点是靠它进来的。叶轮 1 78.8 → <strong>98.2%</strong>、叶轮 2 47.3 → <strong>98.0%</strong>，过切 1.5% / 0.4%。<strong>倾角才是最后一根杠杆</strong>：40° → 91.2%、60° → 98.2%、75° → 98.1%。<code>--surface-tilt</code> 可调（默认 60°）。见 §45/§47</td>
 </tr>
 <tr>
 <td>五轴曲面法向点铣</td>
@@ -676,11 +684,14 @@ testdata/         golden CSV + design_box.stl
 <hr />
 <h2 id="6">6. 下一步（按价值排序）</h2>
 <ol start="0">
-<li>~~<strong>五轴曲面法向点铣 + 歪刀轴</strong>~~ ✅ 做完了（§44/§45）：叶轮 1 61.7% →
-   <strong>91.2%</strong>、叶轮 2 47.3% → <strong>95.3%</strong>，过切 1.4% / 0.3%，残料 7.4% / 4.3%。
+<li>~~<strong>五轴曲面法向点铣 + 歪刀轴（60°）</strong>~~ ✅ 做完了（§44/§45/§47）：叶轮 1
+   61.7% → <strong>98.2%</strong>、叶轮 2 47.3% → <strong>98.0%</strong>，过切 1.5% / 0.4%，
+   残料 0.2% / 1.6%。
    <strong>侧刃铣没做</strong>（要先把网格拟合成直纹面，对非直纹叶片无解）。
-   下一步最该动的是<strong>点铣的代价</strong>：叶轮 2 切长 33.6 m ≈ 42 min（800 mm/min），
-   而侧刃铣只要几米；另外夹具/刀柄的碰撞还没接（只查了刀具母线）。</li>
+   点铣的代价已经压过一轮（§46）：叶轮 1 切长 55 → 12.3 m、叶轮 2 33.6 → 8.4 m，
+   空移也从"比切长还长"降到可控。下一步：<strong>沿曲面流线走刀</strong>（现在是最邻近串链，
+   行距靠采样点密度）和<strong>夹具/刀柄碰撞</strong>（只查了刀具母线）；
+   还有 12 条链间快移会擦料，需要绕安全面的链接策略。</li>
 <li>~~<strong>凹角清根</strong>~~ ✅ 做完了（§41.2）：91.6% → 93.7%，过切不变，切长 +29%。
    再往上被"刀径 vs 公差"卡住：90° 凹角要落进 ±0.15 得 R ≤ 0.36，再小断刀。</li>
 <li><strong>二次装夹（翻面）</strong>：桌腿件 13.6% 的面积在单次装夹下几何不可达

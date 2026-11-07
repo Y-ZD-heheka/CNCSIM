@@ -1692,7 +1692,7 @@ fn run_cam_multi(
             // Ø6 平底刀），实测把过切从 1.2% 抬到 6.8%、最深 2.92 mm。
             let tool = cncsim_cam::ToolSpec::ball(tn, ds, flute);
             let mut o = cncsim_cam::surface::SurfaceOpts::new(tool.clone(), tn, stock);
-            o.max_tilt_deg = surface_tilt_from_args().unwrap_or(40.0);
+            o.max_tilt_deg = surface_tilt_from_args().unwrap_or(60.0);
             o.link_mm = (2.0 * step).clamp(0.5, 3.0);
             o.out_step_mm = (1.2 * tool.radius()).clamp(0.3, 1.2);
             o.feed_mm_min = 800.0;
@@ -1700,7 +1700,7 @@ fn run_cam_multi(
                 Ok(sx) => {
                     let st = sx.stats;
                     println!(
-                        "  └ Ø{ds:.1} 长颈球头（刃长 {flute:.0}）：通过 {} 点（其中 {} 点靠歪刀轴）/ A超程 {} / 球面塞不下 {} / 刀杆撞 {} / 切入啃 {} → {} 条链 / {} 块 / 切 {:.1} m",
+                        "  └ Ø{ds:.1} 长颈球头（刃长 {flute:.0}）：通过 {} 点（其中 {} 点靠歪刀轴）/ A超程 {} / 球面塞不下 {} / 刀杆撞 {} / 切入啃 {} → {} 条链 / {} 块 / 切 {:.1} m / 空移 {:.1} m / 链间擦料 {} 处",
                         st.accepted,
                         st.axis_retried,
                         st.a_rejected,
@@ -1709,7 +1709,9 @@ fn run_cam_multi(
                         st.plunge_rejected,
                         st.runs,
                         st.moves,
-                        st.cut_mm / 1000.0
+                        st.cut_mm / 1000.0,
+                        st.rapid_mm / 1000.0,
+                        st.link_unsafe
                     );
                     surf_frag = sx.gcode;
                     surf_tool = Some(tool);

@@ -52,6 +52,7 @@ pub struct SurfaceOpts {
     /// 刀轴可以在法向周围歪多少度（`0` = 只用纯法向）。
     ///
     /// 歪刀轴只为了让开障碍：球在 `p` 的接触点与刀轴无关，形状不变。
+    /// 实测叶轮 1：40° → 91.2% / 60° → **98.2%** / 75° → 98.1%（没更多收益）。
     pub max_tilt_deg: f64,
     pub spindle_rpm: u32,
     pub feed_mm_min: f64,
@@ -76,7 +77,7 @@ impl SurfaceOpts {
             shank_clearance_mm: 0.3,
             gate_tol_mm: 0.03,
             max_a_deg: crate::rotary::A_LIMIT_DEG,
-            max_tilt_deg: 40.0,
+            max_tilt_deg: 60.0,
             spindle_rpm: 12_000,
             feed_mm_min: 600.0,
             plunge_mm_min: 200.0,
@@ -102,6 +103,8 @@ pub struct SurfaceStats {
     pub shank_rejected: usize,
     /// 沿法向切入那一刀本身会啃（相邻特征挡在法向上）。
     pub plunge_rejected: usize,
+    /// 链间快移里**会擦到工件**的条数（仿真不计，实机会撞）。
+    pub link_unsafe: usize,
     /// 连成的折线条数。
     pub runs: usize,
     /// 实际输出的 G 代码运动块数。
@@ -238,6 +241,9 @@ pub fn generate_surface(
     let flute = g.flute;
     let runs = chain(&tips, &axs, opts.link_mm(), &ix, g);
     st.runs = runs.len();
+    // 把链按"离上一条链的终点最近"重排（可整条反向）。链的顺序本来是种子顺序，
+    // 跟空间没关系——1225 条链之间的快移加起来比切长还长。
+    let runs = order_runs(runs, &tips, &axs, &ix, g, g.flute + 2.0);
 
     // ── 出 G 代码 ──
     let mut e = Sink::new();
@@ -259,6 +265,8 @@ pub fn generate_surface(
 
     let lift = opts.lift_mm;
     let mut st_last: Option<usize> = None;
+    // 上一条链退刀后的位姿：用来检查链间快移
+    let mut prev_end: Option<(DVec3, DVec3)> = None;
     for run in &runs {
         // 抽稀：沿弧长每 `out_step` 留一个点，首尾必留
         let kept = decimate(run, &tips, &axs, opts.out_step_mm, &ix, g);
@@ -273,11 +281,25 @@ pub fn generate_surface(
             continue;
         }
         let (a0, c0) = crate::rotary::ac_of(a0v);
-        // 摆姿态 → 到起点上方（沿刀轴退 lift）→ 沿刀轴切入。
-        // 姿态先摆、后移动：`G0` 不切材料（仿真口径），实机靠后处理做碰撞检查。
-        e.line(&format!("G0 A{a0:.3} C{c0:.3}"));
+        // 摆姿态 → 快移到起点上方（沿刀轴退 lift）→ **快移**下到 1 mm 余量 →
+        // 最后 1 mm 才进给。
+        //
+        // 两处是纯为省时间：`lift = 刃长 + 2 = 18 mm`，如果这 18 mm 全用
+        // G1 F200 下刀，每条链 5.4 s——叶轮 1 有 1225 条链，光下刀就 110 min。
+        // 而已验证过整条下刀路径（`sweep_ok`）是空的，所以除了最后贴上去的
+        // 那 1 mm，前面都可以快移。
         let up0 = t0 + a0v * lift;
+        if let Some((pt, pa)) = prev_end
+            && !link_ok(&ix, pt, pa, up0, a0v, g)
+        {
+            st.link_unsafe += 1;
+        }
+        e.line(&format!("G0 A{a0:.3} C{c0:.3}"));
         e.line(&format!("G0 X{:.4} Y{:.4} Z{:.4}", up0.x, up0.y, up0.z));
+        let near = t0 + a0v * 1.0;
+        if lift > 1.0 + 1e-9 {
+            e.line(&format!("G0 X{:.4} Y{:.4} Z{:.4}", near.x, near.y, near.z));
+        }
         e.line(&format!(
             "G1 X{:.4} Y{:.4} Z{:.4} A{a0:.3} C{c0:.3} F{:.0}",
             t0.x, t0.y, t0.z, opts.plunge_mm_min
@@ -300,7 +322,11 @@ pub fn generate_surface(
             st.plunge_rejected += 1;
             continue;
         }
-        e.line(&format!("G1 X{:.4} Y{:.4} Z{:.4}", up.x, up.y, up.z));
+        // 退刀用 **G0**：沿刀轴离开工件，`sweep_ok` 已经验证这条路上没有料。
+        // 用 G1 的话每条链 18 mm × 2（进+退）全算进切长——叶轮 1 的 55 m 里
+        // 44 m 是这段空行程，真正的切削只有 11 m。
+        e.line(&format!("G0 X{:.4} Y{:.4} Z{:.4}", up.x, up.y, up.z));
+        prev_end = Some((up, axs[last]));
         st_last = Some(last);
     }
     // **收尾必须自己把刀退出去**：多工序的收尾是 `G49` + `G53 Z<安全高度>`，
@@ -615,6 +641,117 @@ fn chain(
         runs.push(run);
     }
     runs
+}
+
+/// 链与链之间的**快移**会不会从工件里穿过去。
+///
+/// 这一段是 5 轴联动快移（`G0` 带 A/C），仿真里不计切削，所以过切表上看不见它；
+/// 但实机会真的撞上去。这里按 1 mm 步距扫一遍刀尖轨迹 + 刃部圆柱，只用于**计数
+/// 报警**，不改刀路。
+fn link_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: Geo) -> bool {
+    let Geo { r, tol, flute } = g;
+    let need = (r - tol).max(1e-6);
+    let len = (b - a).length();
+    // 步距 0.5 mm 且至少 2 段：1 mm 的链按 1 mm 步距只会取到两个端点，
+    // 中间那堵墙正好从采样缝里漏过去（测试里抓到的）。
+    let n = ((len / 0.5).ceil() as usize).clamp(2, 128);
+    for k in 0..=n {
+        let t = k as f64 / n as f64;
+        let ax = slerp_axis(na, nb, t);
+        let tip = a + (b - a) * t;
+        if ix.min_dist(tip + ax * r, need) < need {
+            return false;
+        }
+        for h in [(2.0 * r).min(flute), 0.5 * flute] {
+            if ix.min_dist(tip + ax * h, need) < need {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 贪心排序：从位置最高的一条链出发，每次挑"起点或终点离当前位置最近"的链，
+/// 必要时整条反向（折线反着走是合法的）。
+///
+/// 链的顺序原本是种子顺序（`for seed in 0..n`），跟空间分布毫无关系。
+/// 叶轮 1 有 1225 条链，按种子顺序的平均跳距比切长还长。
+fn order_runs(
+    runs: Vec<Vec<usize>>,
+    tips: &[DVec3],
+    axs: &[DVec3],
+    ix: &crate::MeshIndex,
+    g: Geo,
+    lift: f64,
+) -> Vec<Vec<usize>> {
+    let n = runs.len();
+    if n <= 1 {
+        return runs;
+    }
+    let mut used = vec![false; n];
+    let mut out: Vec<Vec<usize>> = Vec::with_capacity(n);
+    // 起点：z 最高的链（从上面往下做，落差小）
+    let mut cur = (0..n)
+        .max_by(|a, b| {
+            let za = tips[runs[*a][0]].z;
+            let zb = tips[runs[*b][0]].z;
+            za.total_cmp(&zb)
+        })
+        .unwrap_or(0);
+    used[cur] = true;
+    out.push(runs[cur].clone());
+    let mut at = *runs[cur].last().unwrap();
+    for _ in 1..n {
+        // 先按距离排出前三名，再**优先取快移不擦料的那条**。只排最近的会撞：
+        // 实测叶轮 1 有 46/1225 条链间快移会从叶片的另一侧穿过去。
+        let mut cand: Vec<(f64, usize, bool)> = Vec::new();
+        for (k, r) in runs.iter().enumerate() {
+            if used[k] {
+                continue;
+            }
+            let d0 = (tips[r[0]] - tips[at]).length();
+            let d1 = (tips[*r.last().unwrap()] - tips[at]).length();
+            cand.push(if d0 <= d1 {
+                (d0, k, false)
+            } else {
+                (d1, k, true)
+            });
+        }
+        cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let pick = cand
+            .iter()
+            .take(3)
+            .find(|(_, k, rev)| {
+                let r = &runs[*k];
+                let (s0, s1) = if *rev {
+                    (*r.last().unwrap(), r[0])
+                } else {
+                    (r[0], *r.last().unwrap())
+                };
+                link_ok(
+                    ix,
+                    tips[at] + axs[at] * lift,
+                    axs[at],
+                    tips[s0] + axs[s0] * lift,
+                    axs[s0],
+                    g,
+                ) && {
+                    let _ = s1;
+                    true
+                }
+            })
+            .or_else(|| cand.first());
+        let Some((_, k, rev)) = pick else { break };
+        let (k, rev) = (*k, *rev);
+        used[k] = true;
+        let mut r = runs[k].clone();
+        if rev {
+            r.reverse();
+        }
+        at = *r.last().unwrap();
+        out.push(r);
+    }
+    out
 }
 
 /// 沿弧长抽稀：每 `step` 留一个点，**首尾必留**。
@@ -934,6 +1071,63 @@ mod tests {
         let tilted = generate_surface(&mesh, st, &targets, &o).expect("不报错");
         assert_eq!(tilted.stats.accepted, 1, "歪 40° 该能进");
         assert_eq!(tilted.stats.axis_retried, 1, "而且必须是靠歪刀轴进来的");
+    }
+
+    /// 链排序：**按空间就近**，必要时整条反向。
+    ///
+    /// 种子顺序是 `for seed in 0..n`，跟空间无关；1225 条链按种子顺序跳，
+    /// 空移比切长还长（§46）。
+    #[test]
+    fn runs_are_reordered_by_proximity_and_may_be_reversed() {
+        // 三条链：x≈0（z 最高，作起点）、x≈10、x≈20
+        let tips: Vec<DVec3> = vec![
+            DVec3::new(0.0, 0.0, 2.0),
+            DVec3::new(0.0, 1.0, 2.0),
+            DVec3::new(0.0, 2.0, 2.0),
+            DVec3::new(20.0, 0.0, 0.0),
+            DVec3::new(20.0, 1.0, 0.0),
+            DVec3::new(10.0, 0.0, 0.0),
+            DVec3::new(10.0, 1.0, 0.0),
+        ];
+        // 链 A: 0,1,2（x=0）；链 B: 3,4（x=20）；链 C: 5,6（x=10，起点离 A 的终点远）
+        let runs = vec![vec![0, 1, 2], vec![3, 4], vec![5, 6]];
+        let axs = vec![DVec3::Z; tips.len()];
+        let ix = crate::MeshIndex::build(&[], stock());
+        let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
+        let out = order_runs(runs, &tips, &axs, &ix, g, 12.0);
+        assert_eq!(out.len(), 3);
+        // 从 z 最高的一条开始 → 链 A（z=0/1/2 里最高 2）……
+        // 但更关键的是：A 之后必须接离它最近的 C（x=10，可反向），最后 B
+        assert_eq!(out[0], vec![0, 1, 2], "起点链：{:?}", out[0]);
+        assert_eq!(out[1], vec![6, 5], "应接最近的 C 且反向：{:?}", out[1]);
+        assert_eq!(out[2], vec![3, 4], "最后才是 B：{:?}", out[2]);
+    }
+
+    /// 链间快移**不许穿墙**：两个点分别在薄墙两侧时判"擦料"。
+    #[test]
+    fn link_check_refuses_to_cross_a_wall() {
+        let wall = vec![
+            [
+                DVec3::new(0.5, -5.0, -5.0),
+                DVec3::new(0.5, 5.0, -5.0),
+                DVec3::new(0.5, 5.0, 5.0),
+            ],
+            [
+                DVec3::new(0.5, -5.0, -5.0),
+                DVec3::new(0.5, 5.0, 5.0),
+                DVec3::new(0.5, -5.0, 5.0),
+            ],
+        ];
+        let ix = crate::MeshIndex::build(&wall, stock());
+        let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
+        let a = DVec3::new(0.0, 0.0, 0.0);
+        let same = DVec3::new(0.0, 0.0, 2.0);
+        let across = DVec3::new(1.0, 0.0, 0.0);
+        assert!(link_ok(&ix, a, DVec3::Z, same, DVec3::Z, g), "同侧该放行");
+        assert!(
+            !link_ok(&ix, a, DVec3::Z, across, DVec3::Z, g),
+            "跨墙该判擦料"
+        );
     }
 
     /// 抽稀：0..10 共 11 个点、间距 1、抽稀 3 → 0,3,6,9 + 末点 10。
