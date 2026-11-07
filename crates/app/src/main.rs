@@ -1247,8 +1247,32 @@ fn run_cam_multi(
     model: &std::path::Path,
     tris: &[cncsim_cam::Tri],
     stock: cncsim_cam::Stock,
-    dirs: Vec<cncsim_math::DVec3>,
+    mut dirs: Vec<cncsim_math::DVec3>,
 ) {
+    // `--no-side`：**扔掉 ±X/±Y 这两道**。
+    //
+    // 实测桌腿件（h=0.6，清根 + 翻面 + 曲面道）：
+    //
+    //   11 道（含 ±X/±Y）：97.8% / 过切 **1.2%** / 残料 1.0%
+    //    7 道（去 ±X/±Y）：97.6% / 过切 **0.1%** / 残料 2.3%
+    //
+    // 侧向工序是**定轴高度场**，每列只认最上面那层，遇到倒扣就多啃 0.3 mm
+    // （过切归因 T6/T16/T14 全在这几道）。五轴曲面道已经把它们活干了，
+    // 而且干得准。合格率只差 0.2 个点，过切差 10 倍——**过切是废品，残料不是**。
+    //
+    // **但别当默认**：叶轮 1 去掉侧向道是 94.7%（原来是 98.2%）——叶片通道的
+    // 大块料还得靠侧向工序开出来，五轴曲面道只做面不做量。所以这条只对
+    // "侧向道会啃倒扣、而曲面道覆盖得动"的件（桌腿件这类）成立。
+    if !args_flag("--no-surface") && args_flag("--no-side") {
+        let before = dirs.len();
+        dirs.retain(|d| d.z.abs() > 0.5);
+        if dirs.len() != before {
+            println!(
+                "侧向工序：--no-side 去掉 {} 道 ±X/±Y（五轴曲面道覆盖它们，过切少一个量级）",
+                before - dirs.len()
+            );
+        }
+    }
     use cncsim_cam::multi::{Pass, generate_plan};
 
     // 工艺不设限的前提是"知道每条路能走多远"：回转件上 RTCP（刀轴逐点跟法向）

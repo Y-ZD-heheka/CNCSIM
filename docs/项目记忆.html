@@ -486,6 +486,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#471">47.1 一个还没解释清楚的矛盾（如实记下）</a></li>
 </ul>
 </li>
+<li><a href="#48-no-side11-07">48. 侧向工序是过切的主要来源（--no-side，11-07 续四）</a></li>
 </ul>
 </div>
 
@@ -4894,6 +4895,39 @@ h 不再卡验收（h=0.6 与 h=1.0 的解析数字完全一致），只影响�
 验收继续看解析值，IoU/F1 只能当"整体像不像"的粗指标，不能说"IoU 0.95 = 差 5%"。
 要把这件事彻底钉死，得用<strong>同一套采样</strong>同时算"解析去除体积"和"解析残留体积"，
 而不是一个解析一个体素。</p>
+<h2 id="48-no-side11-07">48. 侧向工序是过切的主要来源（<code>--no-side</code>，11-07 续四）</h2>
+<p>桌腿件的过切一直卡在 1.2%（1901 点、最大 0.32 mm），归因表里全是 T6/T16/T14
+——<strong>±X/±Y 那几道定轴侧向工序</strong>。它们每列只认最上面那层，遇到倒扣就多啃。</p>
+<p>把侧向道去掉（只留 +Z + 编排 + 翻面 + 曲面道）：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>桌腿件 h=0.6</th>
+<th>合格</th>
+<th>过切</th>
+<th>残料</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>11 道（含 ±X/±Y）</td>
+<td>97.8%</td>
+<td><strong>1.2%</strong></td>
+<td>1.0%</td>
+</tr>
+<tr>
+<td>7 道（<code>--no-side</code>）</td>
+<td>97.6%</td>
+<td><strong>0.1%</strong></td>
+<td>2.3%</td>
+</tr>
+</tbody>
+</table></div>
+<p>合格率只差 0.2 个点，<strong>过切差 10 倍</strong>。过切是废品，残料不是——所以这个件该关侧向。</p>
+<p><strong>但别当默认</strong>：叶轮 1 同样关掉是 <strong>94.7%</strong>（原 98.2%）——叶片通道里的大块料
+还得靠侧向工序开出来，五轴曲面道只做面不做量。所以 <code>--no-side</code> 是<strong>开关不是默认</strong>，
+判据是"侧向道会不会啃倒扣 + 曲面道覆盖得动"。现在靠人判断，将来应该由
+"每道工序的过切贡献"自动决定（归因表已经有这个数据）。</p>
 </main>
 </div>
 <script>
