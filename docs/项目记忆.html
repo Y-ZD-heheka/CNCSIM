@@ -496,6 +496,13 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#_83">顺带</a></li>
 </ul>
 </li>
+<li><a href="#50">50. 沿曲面流线走刀：做了，但没有收益（默认关）</a><ul>
+<li><a href="#_84">做法</a></li>
+<li><a href="#1h10">两版实测（叶轮 1，h=1.0，解析口径）</a></li>
+<li><a href="#_85">为什么没用（想清楚了再记）</a></li>
+<li><a href="#_86">处置</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -5116,6 +5123,69 @@ h 不再卡验收（h=0.6 与 h=1.0 的解析数字完全一致），只影响�
 <h3 id="_83">顺带</h3>
 <p>六把刀的<strong>完整中轴剖面图</strong>（1px 线稿）已按 Ø6 柄 + 30° 缩颈重画，六把同一比例
 （4.25 px/mm），粗细可直接比较。</p>
+<h2 id="50">50. 沿曲面流线走刀：做了，但没有收益（默认关）</h2>
+<p>"提高质量"——先做了流线，因为 §46 说"下一步是沿曲面流线走刀"。</p>
+<h3 id="_84">做法</h3>
+<p><code>flow_field</code>：每点的邻域法向差在切平面上做 2×2 结构张量，<strong>小特征值</strong>的方向就是
+法向变化最慢的方向 = 流线方向（等参线）。两轮邻域平均平滑。串链打分改成：</p>
+<div class="codehilite" data-lang="text"><pre style="line-height: 125%;"><span></span><code>score = 距离 × (1 + 1.5·(1−|v·flow|) + 0.8·(1−v·上一步))
+</code></pre></div>
+
+<h3 id="1h10">两版实测（叶轮 1，h=1.0，解析口径）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>纯最近邻</th>
+<th>流向 v1（无同面过滤）</th>
+<th>流向 v2（同面邻域）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>链数</td>
+<td>1427</td>
+<td>1411</td>
+<td><strong>1385</strong></td>
+</tr>
+<tr>
+<td>切长</td>
+<td><strong>14.9 m</strong></td>
+<td>15.4 m</td>
+<td>15.2 m</td>
+</tr>
+<tr>
+<td>空移</td>
+<td>66.4 m</td>
+<td>65.4 m</td>
+<td><strong>63.9 m</strong></td>
+</tr>
+<tr>
+<td>过切</td>
+<td><strong>1.5%</strong></td>
+<td>1.7%</td>
+<td>1.6%</td>
+</tr>
+<tr>
+<td>合格</td>
+<td>96.5%</td>
+<td>96.4%</td>
+<td>96.5%</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>v1 是负收益</strong>：1.5 mm 邻域跨过 2~3 mm 厚的叶片，把背面的法向混进结构张量。
+v2 加了"法向差 &gt;45° 的邻居不算"（与串链闸门同一口径）后才到持平：链 −3%、
+空移 −3.8%，但<strong>切长 +2%、块数 +311</strong>——链变长的代价是块更碎。</p>
+<h3 id="_85">为什么没用（想清楚了再记）</h3>
+<p>链的形状<strong>不是成本主体</strong>。叶轮 1 的 64 m 空移里，主体是 1385 条链 × 2 次
+18 mm 进退刀 = 50 m——只要链数不变，链怎么走都省不了。要省时间得让表面
+<strong>连成整片</strong>（提高点的通过率），而不是把碎块串得更好看。</p>
+<h3 id="_86">处置</h3>
+<ul>
+<li><code>follow_flow</code> <strong>默认 false</strong>，<code>--flow</code> 打开（留作实验）。</li>
+<li>两条测试保留：圆柱面上流向必须沿母线；带流向也必须覆盖全部点。</li>
+</ul>
 </main>
 </div>
 <script>

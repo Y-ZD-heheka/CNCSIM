@@ -1716,6 +1716,7 @@ fn run_cam_multi(
             // Ø6 平底刀），实测把过切从 1.2% 抬到 6.8%、最深 2.92 mm。
             let tool = cncsim_cam::ToolSpec::ball(tn, ds, flute).with_shank(shank_d());
             let mut o = cncsim_cam::surface::SurfaceOpts::new(tool.clone(), tn, stock);
+            o.follow_flow = args_flag("--flow");
             o.max_tilt_deg = surface_tilt_from_args().unwrap_or(60.0);
             o.link_mm = (2.0 * step).clamp(0.5, 3.0);
             o.out_step_mm = surface_step_from_args()

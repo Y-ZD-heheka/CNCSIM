@@ -49,6 +49,12 @@ pub struct SurfaceOpts {
     pub gate_tol_mm: f64,
     /// A 轴行程上限（度）。
     pub max_a_deg: f64,
+    /// 串链时是否沿**局部流向**（曲率最小的切向）走。
+    ///
+    /// **默认关**：实测它对切除量没有帮助，见 §50——叶轮 1 沿流向 1385 条链 /
+    /// 切长 15.2 m / 过切 1.6%，纯最近邻 1427 条 / 14.9 m / 1.5%。链是变长了
+    /// （−3%），但块数 +311、切长 +2%，净收益为负。留给 `--flow` 做实验。
+    pub follow_flow: bool,
     /// 刀轴可以在法向周围歪多少度（`0` = 只用纯法向）。
     ///
     /// 歪刀轴只为了让开障碍：球在 `p` 的接触点与刀轴无关，形状不变。
@@ -76,6 +82,7 @@ impl SurfaceOpts {
             lift_mm: flute + 2.0,
             shank_clearance_mm: 0.3,
             gate_tol_mm: 0.03,
+            follow_flow: false,
             max_a_deg: crate::rotary::A_LIMIT_DEG,
             max_tilt_deg: 60.0,
             spindle_rpm: 12_000,
@@ -239,7 +246,13 @@ pub fn generate_surface(
         flute: opts.tool.flute_mm.max(r),
     };
     let flute = g.flute;
-    let runs = chain(&tips, &axs, opts.link_mm(), &ix, g);
+    // 流向场：邻域半径取 2.5×link（太小噪声大、太大把棱线两侧混在一起）
+    let flow = if opts.follow_flow {
+        Some(flow_field(&tips, &axs, opts.link_mm() * 2.5))
+    } else {
+        None
+    };
+    let runs = chain(&tips, &axs, opts.link_mm(), &ix, g, flow.as_deref());
     st.runs = runs.len();
     // 把链按"离上一条链的终点最近"重排（可整条反向）。链的顺序本来是种子顺序，
     // 跟空间没关系——1225 条链之间的快移加起来比切长还长。
@@ -529,6 +542,163 @@ fn slerp_axis(a: DVec3, b: DVec3, t: f64) -> DVec3 {
     (a * (((1.0 - t) * th).sin() / s) + b * ((t * th).sin() / s)).normalize()
 }
 
+/// 切平面上的两个正交基。
+fn tangent_basis(n: DVec3) -> (DVec3, DVec3) {
+    let a = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+    let u = n.cross(a).normalize();
+    let v = n.cross(u).normalize();
+    (u, v)
+}
+
+/// **局部流向场**：每点沿"曲率最小"的切向（等参线 / 等高线的方向）。
+///
+/// 为什么要这个：串链原本只按"最近"连，走出来的是一条条随机折线——方向随时
+/// 掉头，行距由残料点密度决定。沿曲率小的方向走有两件好处：
+///
+/// * 刀路**顺**，块内刀轴转动小（刃部圆柱扫出来的误差也小）；
+/// * 相邻两条链之间的行距近似恒定 = 刀花均匀，而不是有的地方叠切、有的地方漏。
+///
+/// 做法：邻域内法向差在切平面上的分布做 2×2 结构张量
+/// `M = Σ (δn·u, δn·v)ᵀ(δn·u, δn·v)`。它的**大**特征值方向是法向变化最快的
+/// 方向（横跨棱线），**小**特征值方向就是流线方向。
+///
+/// 平坦处张量退化（法向几乎不变），返回任意切向——那种地方走哪个方向都一样，
+/// 由 `chain` 的连续性项决定。
+fn flow_field(pts: &[DVec3], nrm: &[DVec3], cell: f64) -> Vec<DVec3> {
+    let n = pts.len();
+    let mut out = vec![DVec3::ZERO; n];
+    if n == 0 {
+        return out;
+    }
+    let mut lo = DVec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut hi = DVec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for p in pts {
+        lo = DVec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = DVec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    }
+    let c = cell.max(1e-6);
+    let dim = |a: f64, b: f64| (((b - a) / c).floor() as i64 + 1).max(1) as usize;
+    let (nx, ny, nz) = (dim(lo.x, hi.x), dim(lo.y, hi.y), dim(lo.z, hi.z));
+    let idx = |p: DVec3| -> (i64, i64, i64) {
+        (
+            (((p.x - lo.x) / c).floor() as i64).clamp(0, nx as i64 - 1),
+            (((p.y - lo.y) / c).floor() as i64).clamp(0, ny as i64 - 1),
+            (((p.z - lo.z) / c).floor() as i64).clamp(0, nz as i64 - 1),
+        )
+    };
+    let key = |i: i64, j: i64, k: i64| (k as usize * ny + j as usize) * nx + i as usize;
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny * nz];
+    for (i, p) in pts.iter().enumerate() {
+        let (a, b, d) = idx(*p);
+        buckets[key(a, b, d)].push(i as u32);
+    }
+
+    for i in 0..n {
+        let n0 = nrm[i];
+        let (u, v) = tangent_basis(n0);
+        let (mut aa, mut bb, mut cc) = (0.0f64, 0.0f64, 0.0f64);
+        let (ci, cj, ck) = idx(pts[i]);
+        for dk in -1..=1 {
+            let k = ck + dk;
+            if k < 0 || k >= nz as i64 {
+                continue;
+            }
+            for dj in -1..=1 {
+                let j = cj + dj;
+                if j < 0 || j >= ny as i64 {
+                    continue;
+                }
+                for di in -1..=1 {
+                    let ii = ci + di;
+                    if ii < 0 || ii >= nx as i64 {
+                        continue;
+                    }
+                    for &jj in &buckets[key(ii, j, k)] {
+                        let jj = jj as usize;
+                        if jj == i {
+                            continue;
+                        }
+                        // **只取同面的邻居**：叶片厚度 2~3 mm，1.5 mm 的邻域很容易
+                        // 跨到背面去，那里的法向差接近 180°，会把结构张量搅成一团
+                        // 噪声（实测叶轮上沿流向反而切长 +3%、过切 +0.2 点）。
+                        if nrm[jj].dot(n0) < 45f64.to_radians().cos() {
+                            continue;
+                        }
+                        let dn = nrm[jj] - n0;
+                        let x = dn.dot(u);
+                        let y = dn.dot(v);
+                        aa += x * x;
+                        bb += x * y;
+                        cc += y * y;
+                    }
+                }
+            }
+        }
+        let tr = aa + cc;
+        if tr < 1e-12 {
+            out[i] = u;
+            continue;
+        }
+        // 小特征值 + 对应特征向量（2×2 对称，闭式解）
+        let det = aa * cc - bb * bb;
+        let disc = (tr * tr * 0.25 - det).max(0.0).sqrt();
+        let l_min = tr * 0.5 - disc;
+        let (mut ex, mut ey) = (bb, -(aa - l_min));
+        if ex * ex + ey * ey < 1e-18 {
+            ex = 1.0;
+            ey = 0.0;
+        }
+        let m = (ex * ex + ey * ey).sqrt();
+        out[i] = (u * (ex / m) + v * (ey / m)).normalize();
+    }
+
+    // 平滑两轮：单点的结构张量在叶片这种扭面上噪声大，取邻居平均（投影回切平面）。
+    // 不投影会慢慢长出法向分量，链就会"飘"离曲面。
+    for _ in 0..2 {
+        let mut next = out.clone();
+        for i in 0..n {
+            let (ci, cj, ck) = idx(pts[i]);
+            let (u, v) = tangent_basis(nrm[i]);
+            let (mut sx, mut sy, mut cn) = (0.0f64, 0.0f64, 0.0f64);
+            for dk in -1..=1 {
+                let k = ck + dk;
+                if k < 0 || k >= nz as i64 {
+                    continue;
+                }
+                for dj in -1..=1 {
+                    let j = cj + dj;
+                    if j < 0 || j >= ny as i64 {
+                        continue;
+                    }
+                    for di in -1..=1 {
+                        let ii = ci + di;
+                        if ii < 0 || ii >= nx as i64 {
+                            continue;
+                        }
+                        for &jj in &buckets[key(ii, j, k)] {
+                            let jj = jj as usize;
+                            if nrm[jj].dot(nrm[i]) < 45f64.to_radians().cos() {
+                                continue;
+                            }
+                            let f = out[jj];
+                            // 流线方向无正负：统一到与当前方向同侧再平均
+                            let sgn = if f.dot(out[i]) < 0.0 { -1.0 } else { 1.0 };
+                            sx += f.dot(u) * sgn;
+                            sy += f.dot(v) * sgn;
+                            cn += 1.0;
+                        }
+                    }
+                }
+            }
+            if cn > 0.0 && (sx * sx + sy * sy) > 1e-12 {
+                next[i] = (u * sx + v * sy).normalize();
+            }
+        }
+        out = next;
+    }
+    out
+}
+
 /// 最近邻串链，带**方向偏好**（避免来回锯齿）和**扫掠闸门**（不许穿墙连）。
 ///
 /// 返回的是 `pts` 的下标序列。网格哈希的格边长 = `link`，所以邻居必在
@@ -539,6 +709,7 @@ fn chain(
     link: f64,
     ix: &crate::MeshIndex,
     g: Geo,
+    flow: Option<&[DVec3]>,
 ) -> Vec<Vec<usize>> {
     let n = pts.len();
     if n == 0 {
@@ -616,15 +787,22 @@ fn chain(
                             if nrm[cur].dot(nrm[c]) < 45f64.to_radians().cos() {
                                 continue;
                             }
-                            // 方向偏好：**同样是邻居时优先往前走**，权重 0.9 足够
-                            // 压住"回头的近邻"，又不至于为了直行跑很远。
-                            let score = match dir {
-                                Some(u) => {
-                                    let dot = (v * (1.0 / d)).dot(u).clamp(-1.0, 1.0);
-                                    d * (1.0 + 0.9 * (1.0 - dot))
-                                }
-                                None => d,
+                            // 打分 = 距离 × (1 + 偏离流线的罚 + 偏离上一步的罚)。
+                            //
+                            //   * **流线项**（权 1.5）：沿曲率最小的方向走，链才长、
+                            //     行距才均匀。方向无正负，取 `abs`。
+                            //   * **连续项**（权 0.8）：压住"回头"，免得在一条流线上
+                            //     来回锯齿。两项一起才定得住 180° 的歧义。
+                            let vn = v * (1.0 / d);
+                            let align = match flow {
+                                Some(f) => vn.dot(f[cur]).abs().clamp(0.0, 1.0),
+                                None => 1.0,
                             };
+                            let cont = match dir {
+                                Some(u) => vn.dot(u).max(0.0),
+                                None => 1.0,
+                            };
+                            let score = d * (1.0 + 1.5 * (1.0 - align) + 0.8 * (1.0 - cont));
                             cand.push((score, c));
                         }
                     }
@@ -986,7 +1164,7 @@ mod tests {
         // 空网格 → `min_dist` 恒为 ∞ → 扫掠闸门全放行（这里只测拓扑）
         let ix = crate::MeshIndex::build(&[], stock());
         let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
-        let runs = chain(&pts, &nrm, 1.5, &ix, g);
+        let runs = chain(&pts, &nrm, 1.5, &ix, g, None);
         assert_eq!(runs.len(), 1, "3×3 点阵在 link=1.5 下应连成一条：{runs:?}");
         assert_eq!(runs[0].len(), 9);
         let mut seen = runs[0].clone();
@@ -1020,7 +1198,7 @@ mod tests {
         let nrm = vec![DVec3::new(-1.0, 0.0, 0.0), DVec3::new(1.0, 0.0, 0.0)];
         let ix = crate::MeshIndex::build(&wall, stock());
         let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
-        let runs = chain(&pts, &nrm, 1.5, &ix, g);
+        let runs = chain(&pts, &nrm, 1.5, &ix, g, None);
         assert_eq!(runs.len(), 2, "隔墙的两点必须分成两条链：{runs:?}");
     }
 
@@ -1140,6 +1318,54 @@ mod tests {
             !link_ok(&ix, a, DVec3::Z, across, DVec3::Z, g),
             "跨墙该判擦料"
         );
+    }
+
+    /// 流向场：圆柱面上必须沿**母线**（曲率 0），不是绕圆周（曲率 1/R）。
+    ///
+    /// 这是"行距均匀"的几何前提：绕圆周走，每圈的曲率半径都是 R，刀轴一直在转；
+    /// 沿母线走，曲率为 0，刀轴只在跨圈时转。
+    #[test]
+    fn flow_field_follows_the_cylinder_axis() {
+        let r = 5.0;
+        let mut pts = Vec::new();
+        let mut nrm = Vec::new();
+        for i in 0..48 {
+            let th = i as f64 / 48.0 * std::f64::consts::TAU;
+            for j in 0..6 {
+                pts.push(DVec3::new(r * th.cos(), r * th.sin(), j as f64 * 0.5));
+                nrm.push(DVec3::new(th.cos(), th.sin(), 0.0));
+            }
+        }
+        let f = flow_field(&pts, &nrm, 1.2);
+        let along = f.iter().filter(|d| d.z.abs() > 0.9).count();
+        assert!(
+            along * 10 >= f.len() * 9,
+            "圆柱面上流向该沿 z 轴：{along}/{}",
+            f.len()
+        );
+    }
+
+    /// 流向不能把覆盖弄丢：同 3×3 点阵，带流向也必须连成一条、每点出现一次。
+    #[test]
+    fn flow_guided_chain_still_covers_every_point() {
+        let pts: Vec<DVec3> = (0..3)
+            .flat_map(|i| (0..3).map(move |j| DVec3::new(i as f64, j as f64, 0.0)))
+            .collect();
+        let nrm = vec![DVec3::Z; pts.len()];
+        let ix = crate::MeshIndex::build(&[], stock());
+        let g = Geo {
+            r: 0.5,
+            tol: 0.03,
+            flute: 10.0,
+        };
+        let f = flow_field(&pts, &nrm, 2.0);
+        let runs = chain(&pts, &nrm, 1.5, &ix, g, Some(&f));
+        let mut seen: Vec<usize> = runs.iter().flatten().copied().collect();
+        let total = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(total, 9, "每个点只该出现一次：{total}");
+        assert_eq!(seen.len(), 9, "9 个点都要被覆盖");
     }
 
     /// 抽稀：0..10 共 11 个点、间距 1、抽稀 3 → 0,3,6,9 + 末点 10。
