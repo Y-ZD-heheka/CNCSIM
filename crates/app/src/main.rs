@@ -960,8 +960,8 @@ fn run_cam(model: &std::path::Path) {
     let short = stock.size().x.min(stock.size().y);
     let d_rough = 6.0f64.min(0.35 * short).max(1.0);
     let d_finish = 4.0f64.min(d_rough * 0.7).max(0.8);
-    let rough = cncsim_cam::ToolSpec::flat(1, d_rough, 20.0);
-    let finish = cncsim_cam::ToolSpec::ball(2, d_finish, 20.0);
+    let rough = cncsim_cam::ToolSpec::flat(1, d_rough, 20.0).with_shank(shank_d());
+    let finish = cncsim_cam::ToolSpec::ball(2, d_finish, 20.0).with_shank(shank_d());
     let sample = (short / 200.0).clamp(0.2, 0.6);
     let process = cncsim_cam::Process {
         stock_allowance_mm: 0.2,
@@ -1309,7 +1309,7 @@ fn run_cam_multi(
     let d_finish = finish_d_from_args()
         .unwrap_or_else(|| (short / 18.0).clamp(0.8, 3.0).min(d_rough * 0.6))
         .clamp(0.4, d_rough);
-    let rough = cncsim_cam::ToolSpec::flat(0, d_rough, 20.0);
+    let rough = cncsim_cam::ToolSpec::flat(0, d_rough, 20.0).with_shank(shank_d());
 
     // ── 开粗参数：按**最大材料去除率**定，同时留够精加工余量 ──
     //
@@ -1343,9 +1343,9 @@ fn run_cam_multi(
     };
     // 球头精加工用 `--flat-finish` 换成平底刀（走 drop-cutter，见 cam 的 finish_pass）
     let finish = if args_flag("--flat-finish") {
-        cncsim_cam::ToolSpec::flat(0, d_finish, 20.0)
+        cncsim_cam::ToolSpec::flat(0, d_finish, 20.0).with_shank(shank_d())
     } else {
-        cncsim_cam::ToolSpec::ball(0, d_finish, 20.0)
+        cncsim_cam::ToolSpec::ball(0, d_finish, 20.0).with_shank(shank_d())
     };
 
     println!(
@@ -1630,7 +1630,7 @@ fn run_cam_multi(
                     // 刃长 3 mm：清根刀是**长颈小刀**，不是 20 mm 刃的常规球头——
                     // 刃长写 20 会让刀杆检查把"悬伸下面 20 mm 处的料"也判成碰撞，
                     // 实测一次就误杀 1474 个清根点。
-                    finish: cncsim_cam::ToolSpec::ball(0, d_rest, 3.0),
+                    finish: cncsim_cam::ToolSpec::ball(0, d_rest, 3.0).with_shank(shank_d()),
                     rest: Some(pts),
                     process: Some(rp.clone()),
                 });
@@ -1714,7 +1714,7 @@ fn run_cam_multi(
             // **刀号必须写进 `ToolSpec`**：G 代码里的 `T23` 只是文本，仿真按
             // `ToolTable::by_number` 找母线。刀号写成 0 会让仿真用错刀（退到第一把
             // Ø6 平底刀），实测把过切从 1.2% 抬到 6.8%、最深 2.92 mm。
-            let tool = cncsim_cam::ToolSpec::ball(tn, ds, flute);
+            let tool = cncsim_cam::ToolSpec::ball(tn, ds, flute).with_shank(shank_d());
             let mut o = cncsim_cam::surface::SurfaceOpts::new(tool.clone(), tn, stock);
             o.max_tilt_deg = surface_tilt_from_args().unwrap_or(60.0);
             o.link_mm = (2.0 * step).clamp(0.5, 3.0);
@@ -2637,10 +2637,10 @@ fn run_cam_rotary(model: &std::path::Path, tris: &[cncsim_cam::Tri], stock: cncs
     println!(
         "选刀：尖球 R{tip_r:.2}（Ø{d_fin:.1}）/ 粗 Ø{d_rough:.1} / 步距 {step_deg:.2}° × {step_z:.2} mm"
     );
-    let rough_tool = cncsim_cam::ToolSpec::flat(1, d_rough, 20.0);
+    let rough_tool = cncsim_cam::ToolSpec::flat(1, d_rough, 20.0).with_shank(shank_d());
     // 颈长 2.5×D。**不要**轻易缩短：改成 1.2×D 后同一份 G 代码切出来是一根
     // 圆柱（整窗全空气/整窗全料交替），说明"短颈"在这套扫掠里不是简单收益。
-    let tool = cncsim_cam::ToolSpec::tapered(2, d_fin, 10.0, d_fin * 2.5);
+    let tool = cncsim_cam::ToolSpec::tapered(2, d_fin, 10.0, d_fin * 2.5).with_shank(shank_d());
     let job = RotaryJob {
         mesh: tris,
         stock,
@@ -3129,6 +3129,18 @@ fn surface_flute_from_args() -> Option<f64> {
         .find(|(a, _)| a == "--surface-flute")
         .and_then(|(_, v)| v.parse::<f64>().ok())
         .filter(|v| *v > 0.0)
+}
+
+/// 刀柄直径（mm）。默认 **6.0** —— 真实刀具统一 Ø6 h6 夹持，小刃径的刀经
+/// 缩颈扩到 Ø6。`--shank-d 0` 恢复"等径柄"的旧行为（用于和历史数字对拍）。
+fn shank_d() -> f64 {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--shank-d")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v >= 0.0)
+        .unwrap_or(6.0)
 }
 
 fn rest_d_from_args() -> Option<f64> {

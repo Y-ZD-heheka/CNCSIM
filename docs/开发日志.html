@@ -427,6 +427,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </li>
 <li><a href="#60-1-912-982-2-953-98011-07">倾角 60°：叶轮 1 91.2% → 98.2%，叶轮 2 95.3% → 98.0%（11-07 续三）</a></li>
+<li><a href="#611-07">刀柄是 Ø6，不是刃径（11-07 下午）</a></li>
 <li><a href="#_115">数字演进一览</a></li>
 </ul>
 </div>
@@ -3828,6 +3829,49 @@ CAM 读它，超出就 <code>min(1, 200/r, 340/h)×0.99</code> 等比缩小，�
 <p>60° 到底，75° 不再有收益。默认改 60°。叶轮 2 同步 95.3 → <strong>98.0%</strong>（残料 1.6%）。
 代价：切长 12.3 → 16.0 m、块数 +28%。</p>
 <p>同一倾角下 Ø0.8 是 91.0%（Ø1.0 91.2%）——<strong>刀径已经不是杠杆了，倾角才是</strong>。</p>
+<hr />
+<h2 id="611-07">刀柄是 Ø6，不是刃径（11-07 下午）</h2>
+<p>"所有刀具的直径都是 6mm"——一句话戳破了一个一直没检查的假设。</p>
+<p><code>ToolSpec::to_tool_def()</code> 里刀柄半径写的是 <code>top_radius()</code>（刃顶半径），所以仿真里的
+"刀杆"是<strong>和刃部同径的细杆</strong>。真实刀具统一 Ø6 h6 夹持，小刃径经缩颈扩到 Ø6。</p>
+<p>改动：<code>shank_diameter</code> 字段 + <code>shank_radius()</code> + 柄剖面改成"刃顶 → 30° 缩颈 → Ø6"，
+两处碰撞检查（三轴 <code>shank_hits</code> / 五轴 <code>shank_hits_axis</code>）都改用柄径，
+CLI <code>--shank-d</code>（默认 6.0）。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>等径柄（旧）</th>
+<th>Ø6 柄（真实）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>叶轮 1</td>
+<td>98.2% / 0.2% / 1.5%</td>
+<td><strong>96.4% / 2.5% / 1.2%</strong></td>
+</tr>
+<tr>
+<td>桌腿件</td>
+<td>97.8% / 1.0% / 1.2%</td>
+<td><strong>96.6% / 2.2% / 1.2%</strong></td>
+</tr>
+<tr>
+<td>叶轮刀杆撞</td>
+<td>1420</td>
+<td>10700（7.5×）</td>
+</tr>
+<tr>
+<td>桌腿清根避让</td>
+<td>49 点</td>
+<td>3090 点</td>
+</tr>
+</tbody>
+</table></div>
+<p>两个反直觉：<strong>过切变少</strong>（严格检查剔掉"歪轴硬挤"的点）、<strong>可达面变好</strong>
+（叶轮 97.2 → 97.6%）。真实代价只有 1~2 个点的残料。
+<code>--shank-d 0</code> 逐位复现旧值，两条口径可并存对拍。</p>
+<p>六把刀的完整中轴剖面图也按 Ø6 柄重画（同一比例 4.25 px/mm）。</p>
 <hr />
 <h2 id="_115">数字演进一览</h2>
 <div class="table-wrap"><table>

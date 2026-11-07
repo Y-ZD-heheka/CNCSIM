@@ -442,7 +442,7 @@ fn shank_hits_axis(
         z += step;
     }
     // ② 刀杆：必须留间隙
-    let shank_r = tool.top_radius().max(r);
+    let shank_r = tool.shank_radius().max(r);
     let need_s = (shank_r + clearance).max(1e-3);
     let mut z = flute_end;
     while z <= flute_end + 20.0 {

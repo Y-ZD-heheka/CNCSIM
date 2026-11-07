@@ -487,6 +487,14 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </li>
 <li><a href="#48-no-side11-07">48. 侧向工序是过切的主要来源（--no-side，11-07 续四）</a></li>
+<li><a href="#49-611-07">49. 刀柄是 Ø6，不是刃径（11-07 下午）</a><ul>
+<li><a href="#_80">发现</a></li>
+<li><a href="#_81">改动</a></li>
+<li><a href="#_82">数字（解析口径）</a></li>
+<li><a href="#_83">没做</a></li>
+<li><a href="#_84">顺带</a></li>
+</ul>
+</li>
 </ul>
 </div>
 
@@ -4963,6 +4971,109 @@ h 不再卡验收（h=0.6 与 h=1.0 的解析数字完全一致），只影响�
 还得靠侧向工序开出来，五轴曲面道只做面不做量。所以 <code>--no-side</code> 是<strong>开关不是默认</strong>，
 判据是"侧向道会不会啃倒扣 + 曲面道覆盖得动"。现在靠人判断，将来应该由
 "每道工序的过切贡献"自动决定（归因表已经有这个数据）。</p>
+<h2 id="49-611-07">49. 刀柄是 Ø6，不是刃径（11-07 下午）</h2>
+<p>一句"所有刀具的直径都是 6mm"戳破了一个一直没被检查的隐含假设。</p>
+<h3 id="_80">发现</h3>
+<p><code>ToolSpec::to_tool_def()</code> 里刀柄半径写的是 <code>top_radius()</code>（<strong>刃顶半径</strong>）：</p>
+<div class="codehilite" data-lang="rust"><pre style="line-height: 125%;"><span></span><code><span style="color: #C678DD">let</span><span style="color: #ABB2BF"> </span><span style="color: #E06C75">r_shank</span><span style="color: #ABB2BF"> </span><span style="color: #56B6C2">=</span><span style="color: #ABB2BF"> </span><span style="color: #E5C07B">self</span><span style="color: #ABB2BF">.</span><span style="color: #E06C75">top_radius</span><span style="color: #ABB2BF">();   </span><span style="color: #7F848E">// Ø1.0 长颈刀 → 0.5</span>
+</code></pre></div>
+
+<p>所以仿真里的"刀杆"是一根<strong>和刃部同径的细杆</strong>：Ø1.0 刀的柄按 Ø1.0 查，Ø0.7 刀的柄
+按 Ø0.7 查。真实刀具统一 <strong>Ø6 h6 夹持</strong>，小刃径经缩颈扩到 Ø6——碰撞检查一直偏乐观。</p>
+<h3 id="_81">改动</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>位置</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ToolSpec.shank_diameter</code></td>
+<td>新字段。<code>0</code> = 等径柄（保留旧行为，用于对拍）</td>
+</tr>
+<tr>
+<td><code>ToolSpec::shank_radius()</code></td>
+<td><code>max(刃顶半径, shank_diameter/2)</code></td>
+</tr>
+<tr>
+<td><code>to_tool_def()</code></td>
+<td>shank 剖面改成 <strong>刃顶 → 30° 缩颈 → Ø6 → 顶</strong> 五段折线</td>
+</tr>
+<tr>
+<td><code>shank_hits</code> / <code>surface::shank_hits_axis</code></td>
+<td>都改吃 <code>shank_radius()</code></td>
+</tr>
+<tr>
+<td>CLI <code>--shank-d</code></td>
+<td>默认 <strong>6.0</strong>；<code>0</code> 恢复等径柄</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="_82">数字（解析口径）</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th></th>
+<th>等径柄（旧）</th>
+<th><strong>Ø6 柄（真实）</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>叶轮 1 合格</td>
+<td>98.2%</td>
+<td><strong>96.4%</strong></td>
+</tr>
+<tr>
+<td>叶轮 1 残料</td>
+<td>0.2%</td>
+<td>2.5%</td>
+</tr>
+<tr>
+<td>叶轮 1 过切</td>
+<td>1.5%</td>
+<td><strong>1.2%</strong></td>
+</tr>
+<tr>
+<td>叶轮 1 刀杆撞</td>
+<td>1420</td>
+<td>10700（7.5×）</td>
+</tr>
+<tr>
+<td>桌腿件 合格</td>
+<td>97.8%</td>
+<td><strong>96.6%</strong></td>
+</tr>
+<tr>
+<td>桌腿件 残料</td>
+<td>1.0%</td>
+<td>2.2%</td>
+</tr>
+<tr>
+<td>桌腿件 清根刀杆避让</td>
+<td>49 点</td>
+<td><strong>3090 点</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>两个反直觉的地方：</p>
+<ol>
+<li><strong>过切变少了</strong>（叶轮 1.5% → 1.2%，可达面 2.6% → 2.0%）。严格检查剔掉的
+   正是"歪轴歪太多、刀柄硬挤进去"的那批点——它们本来就在过切的边缘。</li>
+<li><strong>可达面反而变好</strong>（97.2% → 97.6%）。同上。</li>
+</ol>
+<p>所以真实的代价是 <strong>1~2 个点的残料</strong>，不是崩溃。<code>--shank-d 0</code> 能<strong>逐位复现</strong>
+旧的 98.2%，两条口径可以并存对拍。</p>
+<h3 id="_83">没做</h3>
+<ul>
+<li>没有按 Ø6 柄重跑全量仿真：体积 / 相似度 / F1 / IoU 仍是等径柄口径（§47 那批）。</li>
+<li><code>reach</code> 的可见性判据里也没带柄径——它只用射线，与刀具无关。</li>
+</ul>
+<h3 id="_84">顺带</h3>
+<p>六把刀的<strong>完整中轴剖面图</strong>（1px 线稿）已按 Ø6 柄 + 30° 缩颈重画，六把同一比例
+（4.25 px/mm），粗细可直接比较。</p>
 </main>
 </div>
 <script>

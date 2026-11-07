@@ -150,6 +150,12 @@ pub struct ToolSpec {
     pub flute_mm: f64,
     /// 锥度球头的半角（度）。其它刀型忽略。
     pub taper_half_deg: f64,
+    /// **刀柄直径**（mm）。`0` = 与刃部同径的"等径柄"（旧行为，用于历史对拍）。
+    ///
+    /// 真实刀具统一 **Ø6 h6 夹持**：小刃径的刀经缩颈扩到 6，Ø6 段在刃长以上。
+    /// 之前这里隐式等于刃径（Ø1.0 刀的"刀杆"只有 Ø1.0），碰撞检查因此偏乐观
+    /// ——叶轮报"刀杆撞 1420 点"是按细杆算的，真实 Ø6 柄在叶片通道里会撞更多。
+    pub shank_diameter: f64,
 }
 
 impl ToolSpec {
@@ -160,6 +166,7 @@ impl ToolSpec {
             diameter,
             flute_mm,
             taper_half_deg: 0.0,
+            shank_diameter: 0.0,
         }
     }
 
@@ -170,6 +177,7 @@ impl ToolSpec {
             diameter,
             flute_mm,
             taper_half_deg: 0.0,
+            shank_diameter: 0.0,
         }
     }
 
@@ -183,6 +191,26 @@ impl ToolSpec {
             diameter: tip_diameter,
             flute_mm,
             taper_half_deg: half_angle_deg.max(0.0),
+            shank_diameter: 0.0,
+        }
+    }
+
+    /// 设定刀柄直径（链式）。`d = 0` 保持"等径柄"。
+    pub fn with_shank(mut self, d: f64) -> Self {
+        self.shank_diameter = d.max(0.0);
+        self
+    }
+
+    /// 刀柄半径：有 `shank_diameter` 就用它，否则退回"刃顶半径"（等径柄）。
+    ///
+    /// **碰撞检查必须用这个**，不能用 `top_radius()`——后者是切削部的最大
+    /// 半径，对 Ø1 长颈刀只有 0.5，会把"Ø6 柄撞到对面叶片"这件事漏掉。
+    pub fn shank_radius(&self) -> f64 {
+        let r_cut = self.top_radius();
+        if self.shank_diameter > 0.0 {
+            (self.shank_diameter * 0.5).max(r_cut)
+        } else {
+            r_cut
         }
     }
 
@@ -216,8 +244,16 @@ impl ToolSpec {
     /// "CAM 按 φ6 算的刀路、仿真按 φ5 查的碰撞"。
     pub fn to_tool_def(&self) -> ToolDef {
         let r = self.radius();
-        let r_shank = self.top_radius();
+        let r_cut = self.top_radius();
+        let r_shank = self.shank_radius();
         let top = self.flute_mm + 20.0;
+        // 缩颈：从刃顶按 **30° 半角**扩到柄径（真实长颈刀就是这个形状；
+        // Ø6 平底刀的 r_shank == r_cut，缩颈长度退化为 0）。
+        let taper_len = if r_shank > r_cut + 1e-9 {
+            (r_shank - r_cut) / 30f64.to_radians().tan()
+        } else {
+            0.0
+        };
         ToolDef {
             number: self.number,
             kind: match self.kind {
@@ -225,13 +261,13 @@ impl ToolSpec {
                 ToolKind::Ball => CutterKind::Ball,
                 ToolKind::TaperedBall => CutterKind::TaperedBall,
             },
-            diameter: 2.0 * r_shank,
+            diameter: 2.0 * r_cut,
             corner_radius: if self.kind == ToolKind::Flat { 0.0 } else { r },
             flute_length: self.flute_mm,
-            // 刀杆按**切削段最大半径**走：锥度刀用尖端半径会得到"刀杆比刀还细"的怪形状
             shank: Profile::new(vec![
                 DVec2::new(0.0, self.flute_mm),
-                DVec2::new(r_shank, self.flute_mm),
+                DVec2::new(r_cut, self.flute_mm),
+                DVec2::new(r_shank, self.flute_mm + taper_len),
                 DVec2::new(r_shank, top),
                 DVec2::new(0.0, top),
             ]),
@@ -760,7 +796,8 @@ fn pt_tri_dist2(p: DVec3, t: &Tri) -> f64 {
 pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance: f64) -> bool {
     let r = tool.radius();
     let flute = tool.flute_mm.max(r);
-    let shank_r = tool.top_radius().max(r);
+    // **真实刀柄直径**（Ø6），不是刃径——见 `ToolSpec::shank_diameter`
+    let shank_r = tool.shank_radius().max(r);
     let len = flute + 20.0;
     let step = (shank_r * 0.8).clamp(0.5, 2.0);
     // **只从刃长以上开始查**：刀刃段（球 + 同半径柱）由 drop-cutter 保证不侵入，

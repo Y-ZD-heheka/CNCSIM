@@ -604,6 +604,10 @@ testdata/         golden CSV + design_box.stl
 <td>✅ <code>ap = 1.0×D</code>、<code>ae = 0.7×D</code>、<code>vf = 600+120D</code>，MRR 打印出来（Ø6 时 33.3 cm³/min）；法向留量 0.3 mm 给精加工</td>
 </tr>
 <tr>
+<td>刀柄直径</td>
+<td>✅ <code>ToolSpec.shank_diameter</code> + <code>shank_radius()</code>，CLI <code>--shank-d</code>（默认 <strong>6.0</strong>，真实刀具统一 Ø6 h6 夹持）。<code>to_tool_def()</code> 的柄剖面改成 <strong>刃顶 → 30° 缩颈 → Ø6 → 顶</strong>，<code>shank_hits</code> 与 <code>surface::shank_hits_axis</code> 都改吃 <code>shank_radius()</code>。<strong>之前柄等于刃径，碰撞检查偏乐观</strong>：叶轮 1 98.2% → <strong>96.4%</strong>（残料 0.2 → 2.5%）、桌腿件 97.8% → <strong>96.6%</strong>；过切反而更少（1.5 → 1.2%），因为被拒的正是"歪轴硬挤"的点。<code>--shank-d 0</code> 逐位复现旧值（§49）</td>
+</tr>
+<tr>
 <td>工件包络</td>
 <td>✅ <code>MachineConfig.work</code>（Ø400 / 高 340）：件装不下就<strong>自动等比缩小</strong>（<code>min(1, 200/r, 340/h)×0.99</code>，中心取毛坯 XY 中心 + 底面），比例打印出来；<code>--no-shrink</code> 保持原尺寸并标红。实测 Ø707×400 → 0.560× → Ø396×224</td>
 </tr>
