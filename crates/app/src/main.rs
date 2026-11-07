@@ -1729,6 +1729,20 @@ fn run_cam_multi(
             o.out_step_mm = surface_step_from_args()
                 .unwrap_or_else(|| (1.2 * tool.radius()).clamp(0.3, 1.2));
             o.feed_mm_min = 800.0;
+            // 进给自适应：默认开。`--no-feed-adapt` 回到全程恒定 F（对拍旧数字用）。
+            o.feed.adaptive = !args_flag("--no-feed-adapt");
+            if let Some(v) = num_arg("--feed-min") {
+                o.feed.min_ratio = (v / o.feed_mm_min).clamp(0.05, 1.0);
+            }
+            if let Some(v) = num_arg("--feed-low") {
+                o.feed.k_conc = v.max(0.0);
+            }
+            if let Some(v) = num_arg("--feed-win") {
+                o.feed.window_mm = v.max(0.0);
+            }
+            if let Some(v) = num_arg("--feed-turn") {
+                o.feed.k_turn = v.max(0.0);
+            }
             match cncsim_cam::surface::generate_surface(tris, stock, &targets, &o) {
                 Ok(sx) => {
                     let st = sx.stats;
@@ -1747,6 +1761,53 @@ fn run_cam_multi(
                         st.link_unsafe,
                         st.avg_link_lift
                     );
+                    // 进给调度：**几何指标不受影响**（F 不参与切除），这里只报
+                    // "降了多少、慢了多久"。`<0.8` 的比例是"真的被减速"的口径。
+                    let f = st.feed;
+                    println!(
+                        "  └ 进给：F{:.0}→最低 F{:.0}（{:.0}%）/ 平均 {:.0}% / <80% 的块 {:.0}% / F 字 {}（逐块写要 {}）/ 切削 {:.1} → {:.1} min（{:+.0}%）",
+                        o.feed_mm_min,
+                        f.min_vf,
+                        f.min_vf / o.feed_mm_min * 100.0,
+                        f.ratio() * 100.0,
+                        f.low_blocks as f64 / f.blocks.max(1) as f64 * 100.0,
+                        f.words,
+                        f.blocks,
+                        f.flat_time_s / 60.0,
+                        f.time_s / 60.0,
+                        (f.ratio() - 1.0) * 100.0
+                    );
+                    // 凹度分布 + "换个 k 会怎样"的估算：调参不能靠猜，也不能
+                    // 一个 k 跑一遍整件仿真（叶轮 14 分钟一趟）。
+                    let tot: usize = st.conc_hist.iter().sum();
+                    if tot > 0 {
+                        let hist: Vec<String> = st
+                            .conc_hist
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, n)| **n > 0)
+                            .map(|(i, n)| format!("{:.1}–{:.1}:{:.0}%", i as f64 / 10.0, (i + 1) as f64 / 10.0, *n as f64 / tot as f64 * 100.0))
+                            .collect();
+                        // 估算：每块 vf = vf_nom/(1+k·κR²)，κR 取桶中值（不看窗口/斜率，
+                        // 是下界——真实值会因为这层平滑略低）
+                        let est: Vec<String> = [0.3f64, 0.5, 0.7, 0.85, 1.0]
+                            .iter()
+                            .map(|k| {
+                                let t: f64 = st
+                                    .conc_hist
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, n)| {
+                                        let c = (i as f64 + 0.5) / 10.0;
+                                        *n as f64 / (1.0 + k * c * c)
+                                    })
+                                    .sum();
+                                format!("k{k:.2}:{:.0}%", tot as f64 / t * 100.0)
+                            })
+                            .collect();
+                        println!("  └ 凹度 κR 分布（按块）：{}", hist.join(" "));
+                        println!("  └ 名义进给保持率估算：{}", est.join(" "));
+                    }
                     surf_frag = sx.gcode;
                     surf_tool = Some(tool);
                 }
@@ -3214,6 +3275,17 @@ fn h_from_args() -> Option<f64> {
         .zip(std::env::args().skip(2))
         .find(|(a, _)| a == "--h")
         .and_then(|(_, v)| v.parse().ok())
+}
+
+/// `--名字 <值>`：一个数值参数，没有就返回 `None`。
+///
+/// 新参数统一走这里，不再一个参数抄一份 `std::env::args().zip(...)`。
+fn num_arg(name: &str) -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == name)
+        .and_then(|(_, v)| v.trim().parse::<f64>().ok())
 }
 
 fn args_flag(flag: &str) -> bool {

@@ -34,6 +34,7 @@
 //! 生成 → `cncsim_gcode::interpret` → `cncsim_sim::run` → 设计比对，
 //! 断言不过切、残留有界。生成器与验证器不互相依赖，避免"自己验自己"。
 
+pub mod feed;
 pub mod multi;
 pub mod rotary;
 pub mod surface;

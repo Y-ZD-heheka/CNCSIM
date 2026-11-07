@@ -63,6 +63,10 @@ pub struct SurfaceOpts {
     pub spindle_rpm: u32,
     pub feed_mm_min: f64,
     pub plunge_mm_min: f64,
+    /// **进给自适应**：按凹度逐块调制 F（见 [`crate::feed`]）。
+    ///
+    /// 默认开。关掉时全程 `feed_mm_min`（F 值不变，省掉重复的 `F` 字）。
+    pub feed: crate::feed::FeedOpts,
     /// 链间快速移动的安全高度（世界 Z，绝对）。
     pub safe_z_mm: f64,
 }
@@ -88,6 +92,7 @@ impl SurfaceOpts {
             spindle_rpm: 12_000,
             feed_mm_min: 600.0,
             plunge_mm_min: 200.0,
+            feed: crate::feed::FeedOpts::default(),
             safe_z_mm: stock.max.z + 5.0,
         }
     }
@@ -123,6 +128,15 @@ pub struct SurfaceStats {
     pub cut_mm: f64,
     /// 快移长度（mm）。
     pub rapid_mm: f64,
+    /// **进给调度**的结果：最低 F、按长度加权的平均比、切削时间。
+    pub feed: crate::feed::FeedStats,
+    /// 凹度 `κR ≥ 0.1` 的切削块数（"有多少块真的被减速"的几何侧口径）。
+    pub conc_blocks: usize,
+    /// 凹度直方图：`[i]` = `κR ∈ [i/10, (i+1)/10)` 的切削块数。
+    ///
+    /// 调 `k_conc` 全靠它：有了分布就能**算**出任意 `k` 下的平均进给比，
+    /// 不用一个 k 跑一遍 14 分钟的整件仿真。
+    pub conc_hist: [usize; 10],
 }
 
 pub struct SurfaceOut {
@@ -261,6 +275,18 @@ pub fn generate_surface(
     // 跟空间没关系——1225 条链之间的快移加起来比切长还长。
     let runs = order_runs(runs, &tips, &axs, &ix, g, g.flute + 2.0);
 
+    // ── 凹度（进给调度的几何输入） ──
+    //
+    // 一次算全：**只跟点云有关**，与链怎么串无关。邻域半径取 2.5×`link`
+    // （≈ 2.5 个采样间距，够撑一个二次拟合，又不会跨到隔壁叶片的背面）。
+    // 上限 1.5 mm：`2d/r²` 对半径 ρ 的圆有 `1 − r²/(12ρ²)` 的截断误差，
+    // 邻域越大越低估**尖**的凹角（r=1.5、ρ=0.8 时低估 29%），不能放任它涨。
+    let conc = if opts.feed.adaptive {
+        concavity(&pts, &nrm, (2.5 * opts.link_mm()).clamp(0.35, 1.5), r)
+    } else {
+        vec![0.0; pts.len()]
+    };
+
     // ── 出 G 代码 ──
     let mut e = Sink::new();
     e.line(&format!(
@@ -284,6 +310,12 @@ pub fn generate_surface(
     // 上一条链的**刀尖 + 刀轴**（不是退刀位）：用来算这一条链要退多高
     let mut prev_tip: Option<(DVec3, DVec3)> = None;
     let (mut lift_sum, mut lift_n) = (0.0f64, 0usize);
+    // G 代码里 `F` 是**模态**字：只在变化时写。跨链也要记住（G0 不改 F）。
+    // 初值 `None` 表示"文件里还没有出现过 F"——第一条下刀一定会写它。
+    #[allow(unused_assignments)]
+    let mut cur_f: Option<f64> = None;
+    // 实际写出的 F 字数（模态：与上一块相同就省）。报告里用它算省了多少字。
+    let mut f_words = 0usize;
     for run in &runs {
         // 链间转移的退刀量：按"这一段能不能过"自适应，不再固定 18 mm
         let lift = match prev_tip {
@@ -328,14 +360,56 @@ pub fn generate_surface(
             "G1 X{:.4} Y{:.4} Z{:.4} A{a0:.3} C{c0:.3} F{:.0}",
             t0.x, t0.y, t0.z, opts.plunge_mm_min
         ));
+        cur_f = Some(opts.plunge_mm_min);
+        f_words += 1;
         st.moves += 1;
-        for &i in &kept[1..] {
+
+        // ── 进给调度（一条链一次） ──
+        //
+        // 负载只取**几何**：块两端里更凹的那一个（从开阔处走进凹角的这一块，
+        // 必须以凹角的进给走完，不能"到了才刹车"）。路径转向角默认不参与
+        // （`k_turn = 0`）：点铣的链是最近邻串的，锯齿是链的噪声不是真拐角。
+        let nb = kept.len() - 1;
+        let mut seg = Vec::with_capacity(nb);
+        let mut load = Vec::with_capacity(nb);
+        for k in 1..kept.len() {
+            let (ia, ib) = (kept[k - 1], kept[k]);
+            seg.push((tips[ib] - tips[ia]).length());
+            let c = conc[ia].max(conc[ib]);
+            let mut l = crate::feed::load_of(c, 0.0, &opts.feed);
+            if opts.feed.k_turn > 0.0 {
+                l += opts.feed.k_turn * turn_at(&tips, &kept, k);
+            }
+            load.push(l);
+        }
+        let (vf, fs) = crate::feed::schedule(&seg, &load, opts.feed_mm_min, &opts.feed);
+        st.feed.merge(&fs);
+        if opts.feed.adaptive {
+            for k in 1..kept.len() {
+                let c = conc[kept[k - 1]].max(conc[kept[k]]);
+                st.conc_hist[((c * 10.0) as usize).min(9)] += 1;
+            }
+        }
+
+        for k in 1..kept.len() {
+            let i = kept[k];
             let (t, av) = (tips[i], axs[i]);
             let (a, c) = crate::rotary::ac_of(av);
-            e.line(&format!(
-                "G1 X{:.4} Y{:.4} Z{:.4} A{a:.3} C{c:.3} F{:.0}",
-                t.x, t.y, t.z, opts.feed_mm_min
-            ));
+            let f = vf[k - 1];
+            // `F` 是模态字：只在变化时写。一段一段写满是 3 万个 F 字，占 200 KB。
+            if cur_f.map(|x| (x - f).abs() > 1e-9).unwrap_or(true) {
+                e.line(&format!(
+                    "G1 X{:.4} Y{:.4} Z{:.4} A{a:.3} C{c:.3} F{f:.0}",
+                    t.x, t.y, t.z
+                ));
+                cur_f = Some(f);
+                f_words += 1;
+            } else {
+                e.line(&format!(
+                    "G1 X{:.4} Y{:.4} Z{:.4} A{a:.3} C{c:.3}",
+                    t.x, t.y, t.z
+                ));
+            }
             st.moves += 1;
         }
         // 沿刀轴退刀（只动 XYZ，姿态不变）。**出刀和进刀一样要查**：
@@ -356,6 +430,9 @@ pub fn generate_surface(
     if lift_n > 0 {
         st.avg_link_lift = lift_sum / lift_n as f64;
     }
+    // 和直方图同口径（按块），别用"点"当分母
+    st.conc_blocks = st.conc_hist.iter().skip(1).sum();
+    st.feed.words = f_words;
     // **收尾必须自己把刀退出去**：多工序的收尾是 `G49` + `G53 Z<安全高度>`，
     // 那是从"刀尖当前位置"竖直往上抬。三轴道没问题（每列上方都已切空），
     // 五轴道结束时刀尖在侧壁上、刀杆还歪着——竖直一抬就是从工件里穿出去。
@@ -556,12 +633,124 @@ fn slerp_axis(a: DVec3, b: DVec3, t: f64) -> DVec3 {
     (a * (((1.0 - t) * th).sin() / s) + b * ((t * th).sin() / s)).normalize()
 }
 
+/// 路径在 `kept[k]` 处的**转向角**，除以 60° 归一（`0` = 直行，`1` = 折返）。
+///
+/// 跨度取 ±2 块：单块方向在点铣的链上是噪声（相邻点间距 0.4 mm，抖动 0.1 mm
+/// 就是 14° 的假转角），跨两块才看得出真的走向变化。
+fn turn_at(tips: &[DVec3], kept: &[usize], k: usize) -> f64 {
+    let last = kept.len() - 1;
+    let back = k.min(2);
+    let fwd = (k + 2).min(last);
+    if back == 0 || fwd <= k {
+        return 0.0;
+    }
+    let a = tips[kept[k]] - tips[kept[k - back]];
+    let b = tips[kept[fwd]] - tips[kept[k]];
+    if a.length_squared() < 1e-18 || b.length_squared() < 1e-18 {
+        return 0.0;
+    }
+    let c = a.normalize().dot(b.normalize()).clamp(-1.0, 1.0);
+    (c.acos() / 60f64.to_radians()).clamp(0.0, 1.0)
+}
+
 /// 切平面上的两个正交基。
 fn tangent_basis(n: DVec3) -> (DVec3, DVec3) {
     let a = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
     let u = n.cross(a).normalize();
     let v = n.cross(u).normalize();
     (u, v)
+}
+
+/// **离散凹度** `κ·R`：0 = 平的或凸的，1 = 凹到与刀球同半径（球刚好塞满）。
+///
+/// 为什么需要它：进给自适应要一个"负载"的量，而"刀心到设计面的距离"在切点
+/// 处恒等于 `R`（球与它相切），给不出啮合。凹度是能直接算、且**方向明确**的
+/// 代理——凹处刀球被材料包住的角度更大，同样行距下去除量更大。
+///
+/// 算法：对每个邻居 `j` 算切平面偏距 `d_j = n_i·(p_j − p_i)`。曲面在 `p_i`
+/// 处与切平面相切，所以 `d` 没有一阶项，`d_j = κ_n(方向)·|p_j−p_i|²/2 + O(r³)`，
+/// 其中 `κ_n` 是那个方向的**法曲率**。于是 `2d_j/w_j` 就是该方向法曲率的估计，
+/// **取所有邻居的最大值** = 最大主曲率 `κ₁`。
+///
+/// 为什么取 **max** 而不是平均：① 刀球塞不塞得下由最弯的那个方向决定
+/// （凹到半径 = R 就进不去了，和球面闸门同一个判据）；② 叶轮的凹角是**槽**
+/// （一个方向弯、另一个方向直），平均曲率会把它算小一半。
+///
+/// 邻域用 3×3×3 网格，半径夹在 `cell` 内（更远的点 `O(r³)` 截断误差大）；
+/// 法向差 >45° 的邻居不要（相邻叶片的正反面会被混进来）。
+fn concavity(pts: &[DVec3], nrm: &[DVec3], cell: f64, r: f64) -> Vec<f64> {
+    let n = pts.len();
+    let mut out = vec![0.0f64; n];
+    if n == 0 {
+        return out;
+    }
+    let mut lo = DVec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut hi = DVec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for p in pts {
+        lo = DVec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = DVec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    }
+    let c = cell.max(1e-6);
+    let dim = |a: f64, b: f64| (((b - a) / c).floor() as i64 + 1).max(1) as usize;
+    let (nx, ny, nz) = (dim(lo.x, hi.x), dim(lo.y, hi.y), dim(lo.z, hi.z));
+    let idx = |p: DVec3| -> (i64, i64, i64) {
+        (
+            (((p.x - lo.x) / c).floor() as i64).clamp(0, nx as i64 - 1),
+            (((p.y - lo.y) / c).floor() as i64).clamp(0, ny as i64 - 1),
+            (((p.z - lo.z) / c).floor() as i64).clamp(0, nz as i64 - 1),
+        )
+    };
+    let key = |i: i64, j: i64, k: i64| (k as usize * ny + j as usize) * nx + i as usize;
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny * nz];
+    for (i, p) in pts.iter().enumerate() {
+        let (a, b, d) = idx(*p);
+        buckets[key(a, b, d)].push(i as u32);
+    }
+    let cos45 = 45f64.to_radians().cos();
+    let h2 = c * c;
+    // 太近的邻居（重合点 / 共边重复采样）`w→0`，比值会被放大成一个假尖角
+    let near2 = (0.15 * c) * (0.15 * c);
+    for i in 0..n {
+        let (ni, pi) = (nrm[i], pts[i]);
+        let (ci, cj, ck) = idx(pi);
+        let mut best: f64 = 0.0;
+        for dk in -1..=1 {
+            let k = ck + dk;
+            if k < 0 || k >= nz as i64 {
+                continue;
+            }
+            for dj in -1..=1 {
+                let j = cj + dj;
+                if j < 0 || j >= ny as i64 {
+                    continue;
+                }
+                for di in -1..=1 {
+                    let ii = ci + di;
+                    if ii < 0 || ii >= nx as i64 {
+                        continue;
+                    }
+                    for &jj in &buckets[key(ii, j, k)] {
+                        let jj = jj as usize;
+                        if jj == i || nrm[jj].dot(ni) < cos45 {
+                            continue;
+                        }
+                        let dp = pts[jj] - pi;
+                        let w = dp.length_squared();
+                        if w < near2 || w > h2 {
+                            continue;
+                        }
+                        let kn = 2.0 * ni.dot(dp) / w;
+                        if kn > best {
+                            best = kn;
+                        }
+                    }
+                }
+            }
+        }
+        // 乘 R：无量纲的"凹到几分之一个刀球"
+        out[i] = (best * r).clamp(0.0, 1.0);
+    }
+    out
 }
 
 /// **局部流向场**：每点沿"曲率最小"的切向（等参线 / 等高线的方向）。
@@ -1096,6 +1285,41 @@ mod tests {
             min: DVec3::ZERO,
             max: DVec3::new(20.0, 20.0, 10.0),
         }
+    }
+
+    /// 凹度的方向和量纲：槽内壁 `κR = R/ρ`，翻过来（凸）必须是 0。
+    ///
+    /// 取 max 主曲率而不是平均：槽是一个方向弯、另一个方向直，平均会小一半
+    /// （ρ=2 时平均给 0.125、max 给 0.25，而刀球只沿弯的那个方向被包住）。
+    #[test]
+    fn concavity_reads_the_groove_radius() {
+        let (rho, r) = (2.0f64, 0.5f64);
+        let mut pts = Vec::new();
+        let mut nrm = Vec::new();
+        for iy in 0..=8 {
+            let y = iy as f64 * 0.2;
+            // 槽底 ±40°：再往外法向转得太快，已经不是同一条"面"了
+            for it in 0..=40 {
+                let th = -0.7 + it as f64 * 0.035;
+                let (s, c) = (th.sin(), th.cos());
+                pts.push(DVec3::new(rho * s, y, -rho * c));
+                // 外法向指向槽心（凹）
+                nrm.push(DVec3::new(-s, 0.0, c));
+            }
+        }
+        let k = concavity(&pts, &nrm, 0.6, r);
+        // 槽底正中那一行
+        let mid = 4 * 41 + 20;
+        assert!(
+            (k[mid] - r / rho).abs() < 0.02,
+            "槽底凹度应为 R/ρ = {}，实测 {}",
+            r / rho,
+            k[mid]
+        );
+        // 法向翻过来 → 凸面 → 凹度归零
+        let out: Vec<DVec3> = nrm.iter().map(|n| -*n).collect();
+        let k2 = concavity(&pts, &out, 0.6, r);
+        assert!(k2.iter().all(|v| *v == 0.0), "凸面不该有凹度");
     }
 
     /// 平板上法向 +Z 的点：刀轴就是 +Z，刀尖应恰好落在**设计面**上。

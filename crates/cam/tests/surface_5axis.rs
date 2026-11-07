@@ -172,3 +172,133 @@ fn program_ends_with_the_tool_outside_the_part() {
         "收尾要抬到安全高度：{joined}"
     );
 }
+
+/// 进给自适应：凹的地方 F 要降下来，**切出来的点一个都不许动**。
+///
+/// 两件事一起验：
+///
+/// * **几何不变**：开/关自适应各跑一遍，把所有 `F` 字从 G 代码里剥掉之后，
+///   两份程序必须逐行相同——F 只改速度，不改刀尖去哪。
+/// * **该降的地方降了**：正弦波纹的波谷（`x ≈ 6`，凹、曲率半径 0.91）的 F
+///   明显低于名义值；波峰（`x ≈ 0`，凸，凹度必须为 0）仍是名义值。
+///   只看"F 变过"会被噪声骗过去，必须钉到位置上。
+#[test]
+fn adaptive_feed_slows_in_a_groove_without_moving_a_point() {
+    // z = A·cos(kx)，沿 Y 拉伸。波谷曲率半径 ρ = 1/(A·k²) = 0.91 > R0.5（球塞得下）
+    let (amp, k) = (4.0f64, std::f64::consts::TAU / 12.0);
+    let zc = 7.0;
+    let zof = |x: f64| zc + amp * (k * x).cos();
+    let zdev = |x: f64| -amp * k * (k * x).sin(); // dz/dx
+    let (x0, x1, y0, y1) = (0.2f64, 7.8f64, 3.0f64, 9.0f64);
+    let (nx, ny) = (38usize, 13usize);
+    let px = |ix: usize| x0 + (x1 - x0) * ix as f64 / nx as f64;
+    let py = |iy: usize| y0 + (y1 - y0) * iy as f64 / ny as f64;
+    let mut mesh = Vec::new();
+    for ix in 0..nx {
+        for iy in 0..ny {
+            let (xa, xb) = (px(ix), px(ix + 1));
+            let (ya, yb) = (py(iy), py(iy + 1));
+            let (za, zb) = (zof(xa), zof(xb));
+            let p = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
+            mesh.push([p(xa, ya, za), p(xb, ya, zb), p(xb, yb, zb)]);
+            mesh.push([p(xa, ya, za), p(xb, yb, zb), p(xa, yb, za)]);
+        }
+    }
+    // 目标点带真法向：n ∝ (−dz/dx, 0, 1)
+    let mut targets = Vec::new();
+    for ix in 0..=nx {
+        let x = px(ix);
+        for iy in 0..=ny {
+            targets.push((
+                DVec3::new(x, py(iy), zof(x)),
+                DVec3::new(-zdev(x), 0.0, 1.0).normalize(),
+            ));
+        }
+    }
+
+    let st = Stock::from_size(DVec3::new(20.0, 16.0, 14.0));
+    let tool = cncsim_cam::ToolSpec::ball(1, 1.0, 1.2);
+    let mut o = SurfaceOpts::new(tool, 1, st);
+    o.out_step_mm = 0.0; // 逐点出块：F 与点的对应关系才干净
+    o.safe_z_mm = SAFE_Z;
+
+    o.feed.adaptive = false;
+    let off = generate_surface(&mesh, st, &targets, &o).expect("关闭自适应也要能生成");
+    o.feed.adaptive = true;
+    let on = generate_surface(&mesh, st, &targets, &o).expect("开启自适应也要能生成");
+
+    assert_eq!(
+        off.stats.accepted, on.stats.accepted,
+        "F 不该改变通过闸门的点数"
+    );
+    assert!(
+        on.stats.accepted >= targets.len() * 8 / 10,
+        "波纹面至少 80% 该通过：{} / {}",
+        on.stats.accepted,
+        targets.len()
+    );
+
+    // ── 几何逐行相同（剥掉 F 字后）──
+    let strip = |g: &str| -> Vec<String> {
+        g.lines()
+            .map(|l| {
+                l.split_whitespace()
+                    .filter(|w| !w.starts_with('F'))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    };
+    let (a, b) = (strip(&off.gcode), strip(&on.gcode));
+    assert_eq!(a.len(), b.len(), "行数不该变");
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert_eq!(x, y, "第 {i} 行的几何被改动了：\n{x}\n{y}");
+    }
+
+    // ── F 随位置：波谷慢、波峰满速 ──
+    let mut cur_f = 0.0f64;
+    let (mut f_trough, mut f_crest) = (f64::INFINITY, 0.0f64);
+    for l in on.gcode.lines() {
+        if !l.starts_with("G1 ") {
+            continue;
+        }
+        let mut x = 0.0;
+        for w in l.split_whitespace() {
+            let (c, rest) = w.split_at(1);
+            let Ok(v) = rest.parse::<f64>() else { continue };
+            match c {
+                "X" => x = v,
+                "F" => cur_f = v,
+                _ => {}
+            }
+        }
+        if (x - 6.0).abs() < 0.3 {
+            f_trough = f_trough.min(cur_f);
+        } else if x < 1.0 {
+            f_crest = f_crest.max(cur_f);
+        }
+    }
+    let nom = o.feed_mm_min;
+    println!("波谷最低 F{f_trough:.0} / 波峰最高 F{f_crest:.0} / 名义 F{nom:.0}");
+    assert!(f_trough.is_finite(), "波谷没有采到切削块");
+    assert!(
+        f_trough < 0.85 * nom,
+        "波谷该减速：F{f_trough:.0} 应低于 {:.0}",
+        0.85 * nom
+    );
+    assert!(
+        f_crest > 0.95 * nom,
+        "波峰是凸的，不该减速：F{f_crest:.0}"
+    );
+    assert!(
+        on.stats.feed.time_s > off.stats.feed.time_s,
+        "降速必然让切削时间变长：{:.1}s → {:.1}s",
+        off.stats.feed.time_s,
+        on.stats.feed.time_s
+    );
+    assert!(
+        (off.stats.feed.min_vf - nom).abs() < 1e-9,
+        "关闭自适应时必须全程名义值：{}",
+        off.stats.feed.min_vf
+    );
+}
