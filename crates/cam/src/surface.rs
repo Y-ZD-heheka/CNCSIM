@@ -635,6 +635,33 @@ fn shank_hits_axis(ix: &crate::MeshIndex, tip: DVec3, axis: DVec3, g: &Geo) -> b
     ball_flute_hits(ix, tip, axis, g) || neck_shank_hits(ix, tip, axis, g)
 }
 
+/// 【诊断】直接调用段扫掠闸门（对拍"这段在不在检查路径上"）。
+/// 返回 `sweep_ok` 的判定与沿段最小净距（各层取最差）。
+pub fn sweep_ok_report(
+    mesh: &[crate::Tri],
+    stock: crate::Stock,
+    a: DVec3,
+    na: DVec3,
+    b: DVec3,
+    nb: DVec3,
+    tool: &ToolSpec,
+    tol: f64,
+    clear: f64,
+) -> (bool, f64) {
+    let ix = crate::MeshIndex::build(mesh, stock);
+    let g = Geo::of(tool, tol, clear);
+    let r = g.r;
+    let need_f = (r - g.tol).max(1e-6);
+    let mut worst = f64::INFINITY;
+    let mut z = r;
+    while z < g.flute {
+        worst = worst.min(min_sweep_dist(&ix, a, na, b, nb, z, need_f));
+        z += 1.0;
+    }
+    let ok = sweep_ok(&ix, a, na, b, nb, &g);
+    (ok, worst)
+}
+
 /// 【诊断】单个刀位姿下，整根刀各高度的净距报告。
 ///
 /// 返回 `(z, radius_at(z), min_dist_signed − need)`——裕量 < 0 的层会判碰撞。
@@ -724,81 +751,117 @@ impl Geo {
 ///   躺在曲面旁边的：球在 `p` 相切，圆柱却顺着法向伸出去。两个相邻点的法向差
 ///   几十度时，这根圆柱在块与块之间扫出一个扇面，能把旁边的面啃掉 `R` 量级
 ///   （实测 0.67 mm < R 0.75）。3 轴 drop-cutter 里不存在这个问题，因为刀轴恒定。
-fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: &Geo) -> bool {
-    // 刃部圆柱沿轴**密采样**（步长 ≤ 0.5R）。
-    //
-    // 早先在 1/4/8/12/16 mm 五个高度上查，漏了 0.49 mm：设计面点在 z=6，
-    // 而采样在 4 和 8——两个采样点离它 2 mm，读数 2 mm ≫ R，判"安全"，
-    // 可那个点在 z=6 处离轴只有 0.01 mm。**圆柱的判据必须沿轴连续**，
-    // 不能靠稀疏的"高度"抽样。
-    //
-    // **位姿数随转角加密**：刀轴在段内 slerp，转角大时刀杆（长 `flute`）
-    // 横向摆动 = flute·sin(θ/2·2)——固定 2 个刀杆采样位姿会漏掉中间的摆动
-    // （实测叶轮 T53 段内转 33~55°，刀杆扫过叶片 0.40 mm）。
-    //
-    // 步长取 **2°** 是被"薄叶片"卡出来的口径：位姿之间的弦长 = z·Δθ，
-    // 要保证**必有一个位姿落在叶片内部**（signed 闸门才拦得住），弦长必须
-    // 小于叶片厚度——叶轮叶片 ~0.8 mm、刃顶 z≈16 mm → Δθ < 0.8/16 rad ≈ 2.9°，
-    // 取 2°（弦 0.56 mm）留 40% 余量。4° 时弦 1.1 mm 可以**一步跨过** 0.8 mm
-    // 的叶片——位姿两侧都在空气里、signed 全部读正。跨棱的段（~55°）要
-    // 29 个位姿，只有它们付这个成本。
-    let theta = na.dot(nb).clamp(-1.0, 1.0).acos();
-    // 位姿数**按转角两级分层**：
-    // * θ ≥ 10°（大转角）：2° 密采样（弦长 < 叶片厚 0.8 mm，穿越必被 signed
-    //   拦下）+ 颈/柄全位姿——§56 的教训段全是这一类；
-    // * θ < 10°：固定 **3 个位姿**（t=1/4、1/2、3/4），颈/柄只查中点。依据：
-    //   段两端点已被逐点接受闸门保证干净，小转角 + 短段（≤ link 0.8 mm）的
-    //   中间读数近似端点插值，单谷情形中点兜住——串链 90% 以上的段都是这类，
-    //   2° 密采样对它们是白付的（叶轮实测曲面道时间再省 ~1/3）。
-    const TH_NECK: f64 = 10.0f64.to_radians();
-    let full_neck = theta >= TH_NECK;
-    let n_t = if full_neck {
-        (((theta / 0.035).ceil() as usize) + 1).clamp(4, 40)
-    } else {
-        3
-    };
-    for k in 0..n_t {
-        let t = (k + 1) as f64 / (n_t as f64 + 1.0);
-        // **刀轴按 slerp 插值**（与 `Pose::lerp_slerp` 同口径），球心再按
-        // `tip + R·a` 现算——不能拿两端球心做 lerp：两端轴差 60° 时
-        // lerp 出来的球心比真实位置短 `R(1−cos30°)`。
+/// 沿段参数 t∈[0,1]，z 层处轴线点到设计面的**最小带符号距离**。
+///
+/// 粗采样 5 点定位谷所在区间，黄金分割细化到 1e-3 段长——窄谷（侵入只存在
+/// 于位姿间极值瞬间，§56.4 实测 sd_tool 在 from/mid/to 全正而 sd_sweep=−0.39）
+/// 只要谷宽 > 0.1% 段长就能命中。整层远离（粗采样全部 > need + 0.4）时
+/// 跳过细化直接返回——大部分层走这条快路径。
+fn min_sweep_dist(
+    ix: &crate::MeshIndex,
+    a: DVec3,
+    na: DVec3,
+    b: DVec3,
+    nb: DVec3,
+    z: f64,
+    need: f64,
+) -> f64 {
+    let c = |t: f64| {
         let ax = slerp_axis(na, nb, t);
-        let tip = a + (b - a) * t;
-        // **整根刀**都查（球心 + 刃 + 等径避空颈 + 30° 锥 + Ø6 柄）——§56 的
-        // 教训：只查到刃长时，避空颈锥面在 33° 转角段里横扫叶片棱、啃
-        // 0.398 mm（叶轮 T53 的 399 点；"只球头 sd=+14" 证明啃的是刃部以外）。
-        // 逐点闸门（接受目标点时）只保证**位姿处**干净，段中间的颈/柄扫掠
-        // 只有这里管。
-        if ball_flute_hits(ix, tip, ax, g) {
-            return false;
-        }
-        if (full_neck || k * 2 + 1 == n_t) && neck_shank_hits(ix, tip, ax, g) {
-            return false;
+        a + (b - a) * t + ax * z
+    };
+    let f = |t: f64| ix.min_dist_signed(c(t), need + 0.5);
+    // 粗采样 5 点
+    let mut best_v = f64::INFINITY;
+    let mut bi = 2usize;
+    let mut v = [0.0f64; 5];
+    for (k, t) in [0.0, 0.25, 0.5, 0.75, 1.0].iter().enumerate() {
+        v[k] = f(*t);
+        if v[k] < best_v {
+            best_v = v[k];
+            bi = k;
         }
     }
-    true
+    // 快路径：整层远离（谷再深也深不过粗采样间距的数量级）——跳过细化
+    if best_v > need + 0.4 {
+        return best_v;
+    }
+    // 最小点相邻区间内黄金分割
+    let mut lo = ((bi as f64 - 1.0).max(0.0)) / 4.0;
+    let mut hi = ((bi as f64 + 1.0).min(4.0)) / 4.0;
+    let gr = (5.0f64.sqrt() - 1.0) / 2.0;
+    let mut x1 = hi - gr * (hi - lo);
+    let mut x2 = lo + gr * (hi - lo);
+    let mut f1 = f(x1);
+    let mut f2 = f(x2);
+    while hi - lo > 1e-3 {
+        if f1 < f2 {
+            hi = x2;
+            x2 = x1;
+            f2 = f1;
+            x1 = hi - gr * (hi - lo);
+            f1 = f(x1);
+        } else {
+            lo = x1;
+            x1 = x2;
+            f1 = f2;
+            x2 = lo + gr * (hi - lo);
+            f2 = f(x2);
+        }
+    }
+    best_v.min(f1).min(f2).min(f(lo)).min(f(hi))
 }
 
-/// 串链候选的**快速预检**：只查球心 + 刃部两个位姿的四个点。
+/// 球刀从 `a`（姿态 `na`）扫到 `b`（姿态 `nb`）时，**会不会啃到设计面**。
 ///
-/// 串链每个候选都要过一遍扫掠闸门，而被拒的候选（球面塞不下/刃部撞）多数
-/// 在这些便宜点上就能否掉——通过的才付整根刀 + 全部位姿的完整检查
-/// （`sweep_ok`，每位姿 ~117 个采样点）。省的是"反正要拒"的候选的全价。
-fn sweep_ok_quick(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: &Geo) -> bool {
-    let need = (g.r - g.tol).max(1e-6);
-    for t in [1.0 / 3.0, 2.0 / 3.0] {
-        let ax = slerp_axis(na, nb, t);
-        let tip = a + (b - a) * t;
-        if ix.min_dist_signed(tip + ax * g.r, need) < need {
-            return false;
-        }
-        for z in [(2.0 * g.r).min(g.flute), g.flute] {
-            if ix.min_dist_signed(tip + ax * z, need) < need {
-                return false;
-            }
-        }
+/// 两头都要查：
+///
+/// * **球**：球心轨迹上每一点的最近距离 ≥ `R − tol`（两端是已过闸门的接受点，
+///   只查中间）。
+/// * **刃部圆柱**：这一条是实测逼出来的。刀轴沿法向时，刃长那一段圆柱是**横着**
+///   躺在曲面旁边的：球在 `p` 相切，圆柱却顺着法向伸出去。两个相邻点的法向差
+///   几十度时，这根圆柱在块与块之间扫出一个扇面，能把旁边的面啃掉 `R` 量级
+///   （实测 0.67 mm < R 0.75）。3 轴 drop-cutter 里不存在这个问题，因为刀轴恒定。
+///
+/// **检查方式（§56.4 的根治）**：沿 t **连续**最小化，不是离散位姿采样。
+/// 位姿采样有原理性盲区——侵入只发生在位姿之间的极值瞬间（"窄谷"），采样再密
+/// 都可能一步跨过谷底。这里对刀形每个 z 层做黄金分割搜索"轴线点到设计面的
+/// 最小带符号距离"：刀形沿 z 平缓（圆柱恒定、锥线性），z 层可以粗；t 向连续，
+/// 谷窄到 0.1% 段长也能命中。z 层覆盖**整根刀**（刃 + 避空颈 + 30° 锥 + 柄
+/// ——§56.3：颈/柄的段中间扫掠曾无人检查）。
+fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: &Geo) -> bool {
+    let r = g.r;
+    // z 层网格：刀形沿 z 平缓（圆柱恒半径、锥线性），粗采样不漏层间极值。
+    // 层距按半径变化率定：刃部 4×旧步长、锥 1.0、柄 2.0。
+    let mut layers: Vec<(f64, f64)> = Vec::new();
+    let step = (r * 0.8).clamp(0.5, 2.0);
+    let need_f = (r - g.tol).max(1e-6);
+    let mut z = r;
+    while z < g.flute {
+        layers.push((z, need_f));
+        z += step * 4.0;
     }
-    true
+    layers.push((g.flute - 1e-6, need_f)); // 刃顶必查
+    let taper = g.tool.taper_len();
+    z = g.flute;
+    while z < g.tool.neck_top() + taper {
+        layers.push((z, g.tool.radius_at(z) + g.clear));
+        z += 1.0;
+    }
+    let shank_r = g.tool.shank_radius().max(r);
+    let need_s = (shank_r + g.clear).max(1e-3);
+    z = (g.tool.neck_top() + taper).max(g.flute);
+    while z <= g.tool.neck_top() + 20.0 {
+        layers.push((z, need_s));
+        z += 2.0;
+    }
+    // 层间完全独立 → 并行求值（`any` 短路；bool 结果与求值顺序无关，
+    // 与串行逐位一致）。曲面道 ~7 分钟的大头就是这里的串行版本。
+    layers
+        .par_iter()
+        .any(|&(z, need)| min_sweep_dist(ix, a, na, b, nb, z, need) < need)
+        .then(|| ())
+        .is_none()
 }
 
 /// 两个刀轴之间的球面插值（与 `Pose::lerp_slerp` 同一口径）。
@@ -1193,13 +1256,14 @@ fn chain(
             }
             // 由近到远试：**第一条几何上走得通的才算数**。穿墙的近邻再近也不能要——
             // 那正是上一版啃出 2.92 mm 的原因。
+            // 顺序**短路**：测到第一个通过就停（后面的候选不用付钱）。并行化的
+            // 收益在 sweep_ok **内部**的 32 个 z 层（层间独立、any 短路）——
+            // 这里若把候选也 collect 全量评估，短路就丢了（实测曲面道从
+            // 7 分钟塌到跑不完），并行必须保住"提前退出"。
             cand.sort_by(|a, b| a.0.total_cmp(&b.0));
             let next = cand
                 .iter()
-                .find(|(_, c)| {
-                    sweep_ok_quick(ix, pts[cur], nrm[cur], pts[*c], nrm[*c], g)
-                        && sweep_ok(ix, pts[cur], nrm[cur], pts[*c], nrm[*c], g)
-                })
+                .find(|(_, c)| sweep_ok(ix, pts[cur], nrm[cur], pts[*c], nrm[*c], g))
                 .map(|(_, c)| *c);
             match next {
                 Some(c) => {
@@ -1369,29 +1433,37 @@ fn decimate(
         return run.to_vec();
     }
     let mut out = vec![run[0]];
-    let mut last = run[0];
+    let mut last_pos = 0usize; // last 在 run 中的**位置**（不是下标——链可能往回连）
     let mut acc = 0.0;
-    for w in run.windows(2) {
-        acc += (pts[w[1]] - pts[w[0]]).length();
+    for wi in 1..run.len() {
+        let j = run[wi];
+        acc += (pts[j] - pts[run[wi - 1]]).length();
         if acc < step {
             continue;
         }
+        let i = run[last_pos];
         // 抽稀不能把"两段各转 30°"合成"一块转 60°"：轴摆太大时机器抖，
         // 刃部圆柱还会扫出一片（实测块内轴摆 60° 啃 0.50 mm）。
-        let ok_axis = nrm[last].dot(nrm[w[1]]) >= 30f64.to_radians().cos();
-        if ok_axis && sweep_ok(ix, pts[last], nrm[last], pts[w[1]], nrm[w[1]], g) {
-            out.push(w[1]);
-            last = w[1];
+        let ok_axis = nrm[i].dot(nrm[j]) >= 30f64.to_radians().cos();
+        if ok_axis && sweep_ok(ix, pts[i], nrm[i], pts[j], nrm[j], g) {
+            out.push(j);
+            last_pos = wi;
             acc = 0.0;
         } else {
-            // 直连不安全：把中间那点补回来（宁可多一块，也不啃）
-            out.push(w[0]);
-            last = w[0];
-            acc = (pts[w[1]] - pts[w[0]]).length();
+            // 直连 (last, j) 不安全：把 (last, j] 之间的**原始点**全部补回。
+            // 这些相邻原始段的扫掠已由 chain 逐步检查过——而自己发明任何
+            // 直连（比如 (last, w[0])）都没有闸门背书（§56.7 的洞：T53 的
+            // 57° 过切段就是"检查 (last,w[1]) 失败 → 补 w[0] → (last,w[0])
+            // 裸奔出码"漏出去的，闸门直查 false / 净距 −0.510）。
+            for p in last_pos + 1..=wi {
+                out.push(run[p]);
+            }
+            last_pos = wi;
+            acc = 0.0;
         }
     }
-    if *out.last().unwrap() != *run.last().unwrap() {
-        out.push(*run.last().unwrap());
+    if *out.last().unwrap() != run[run.len() - 1] {
+        out.push(run[run.len() - 1]);
     }
     out
 }

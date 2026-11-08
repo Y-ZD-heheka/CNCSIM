@@ -2231,6 +2231,16 @@ M30
                     // 若仿真侵入而 CAM 裕量全正，分歧就在刀形（profile vs radius_at）
                     // 或网格（MeshIndex 桶/reach）——这是 T53 一直漏网的原因。
                     if let Some(spec) = &surf_tool {
+                        // 【闸门直查】这段喂给 CAM 自己的 sweep_ok：false = CAM
+                        // 会拒（→ 段没走检查路径，找出码的洞）；true = 两口径
+                        // 对同一段分歧（→ 深挖 min_sweep_dist 的谷）。
+                        let (ok, worst) = cncsim_cam::surface::sweep_ok_report(
+                            tris, stock, seg.from.tip, seg.from.axis, seg.to.tip, seg.to.axis,
+                            spec, 0.03, 0.3,
+                        );
+                        println!(
+                            "  【闸门】sweep_ok(这段) = {ok} / 沿段刃部最小净距 {worst:+.3}（need 0.37）"
+                        );
                         let prof = &table.by_number(h.tool).unwrap().cutter;
                         for (label, t) in [("from", 0.0), ("mid", 0.5), ("to", 1.0)] {
                             let pose = seg.from.lerp_slerp(&seg.to, t);
