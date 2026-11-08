@@ -869,7 +869,9 @@ fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: 
     let r = g.r;
     // z 层网格：刀形沿 z 平缓（圆柱恒半径、锥线性），粗采样不漏层间极值。
     // 层距按半径变化率定：刃部 4×旧步长、锥 1.0、柄 2.0。
-    let mut layers: Vec<(f64, f64)> = Vec::new();
+    // 一次分配够（≤ 32 层）：`chain` 里这个函数被调几十万次，
+    // `Vec::new()` 的多次 realloc 是实打实的开销。
+    let mut layers: Vec<(f64, f64)> = Vec::with_capacity(32);
     let step = (r * 0.8).clamp(0.5, 2.0);
     let need_f = (r - g.tol).max(1e-6);
     let mut z = r;
