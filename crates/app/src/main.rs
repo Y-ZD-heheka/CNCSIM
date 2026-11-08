@@ -2160,6 +2160,7 @@ M30
 
     // ── 名义曲面逐点偏差：和回转链路同一套口径，直接回答"像不像原版" ──
     let pts = cncsim_voxel::meshvol::surface_points(tris, 0.8);
+    lap.lap("解析口径：设计面采样");
     let mut sd = cncsim_sim::surface_dev::SurfaceStats::default();
     let mut dev: Vec<f64> = Vec::new();
     if !dry {
@@ -2184,6 +2185,7 @@ M30
     // 只受浮点影响。两个口径并排，差值就是判据本身的分辨力误差。
     lap.lap(if dry { "刀路体检（dry）" } else { "仿真" });
     let dsw = cncsim_sim::compare::sweep_deviation(&out.cut_segs, &table, &pts, 1.0);
+    lap.lap("解析口径：扫掠偏差");
     let ss = cncsim_sim::compare::sweep_stats(&dsw, 0.15, 1.0);
     println!(
         "解析口径（扫掠体，与 h 无关）：{} 点 / 平均 |d| {:.3} / P95 {:.3} / 合格(±0.15) {:.1}% / 过切 {:.1}% / 残料 {:.1}% / 最大过切 {:+.2}",

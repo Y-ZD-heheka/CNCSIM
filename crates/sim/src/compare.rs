@@ -548,25 +548,45 @@ impl<'a> SweepIndex<'a> {
             },
             None => &self.all,
         };
-        let mut best = f64::INFINITY;
-        let mut best_i = None;
+        // **分支定界**：先用轴向距离算每段的**下界**（几十个浮点运算），
+        // 只对"下界比当前最好值还小"的段才跑昂贵的 `sd_sweep`。
+        //
+        // 实测叶轮每格 223 段、每个设计面点有 ~20 段的 AABB 真的盖住它（同一个
+        // 区域被十几道工序反复走过），原来的写法对这 20 段全跑 `sd_sweep`
+        // ——46 µs/点、339432 点要 15.7 s。下界一排，真正需要精确算的通常只有
+        // 2~3 段。**结果不变**：下界不大于当前最好值的段不可能是最小值。
+        let mut lower: Vec<(f64, usize)> = Vec::with_capacity(candidates.len());
         for &si in candidates {
             let si = si as usize;
             let (lo, hi) = self.boxes[si];
             if p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z {
                 continue;
             }
-            let s = &self.segments[si];
+            let (f, t) = (self.segments[si].from, self.segments[si].to);
             let (z0, z1, rmax, swing) = self.zb[si];
-            // 轴向下界（比 AABB 紧得多）：到两端轴线段取小，减去半径与摆动。
-            let (f, t) = (s.from, s.to);
             let d_axis = dist_pt_seg(p, f.tip + f.axis * z0, f.tip + f.axis * z1)
                 .min(dist_pt_seg(p, t.tip + t.axis * z0, t.tip + t.axis * z1));
-            if d_axis - rmax - swing > self.margin {
+            // 材料内部的段可能给出负的 sd，下界不能截到 0 以上——真正的 sd
+            // 下界是 `d_axis − rmax − swing`（可为负）。
+            let lb = d_axis - rmax - swing;
+            if lb > self.margin {
                 continue;
             }
+            lower.push((lb, si));
+        }
+        // 先算"下界最小"的那一段，拿到一个真实的 `best` 再用它剪其余。
+        lower.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut best = f64::INFINITY;
+        let mut best_i = None;
+        for (lb, si) in lower {
+            if lb > best {
+                break; // 后面的下界只会更大
+            }
+            let s = &self.segments[si];
             let sd = sd_sweep(p, &s.from, &s.to, self.cutters[si]);
-            if sd < best {
+            // 平票取段号小的：`attribute_points` 的归因会用到 `best_i`，
+            // 不能让遍历顺序决定"算谁的"。
+            if sd < best || (sd == best && best_i.is_none_or(|b| si < b)) {
                 best = sd;
                 best_i = Some(si);
             }

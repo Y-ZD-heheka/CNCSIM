@@ -497,6 +497,15 @@ pub fn generate_surface(
     }
     tt.lap("出码 decimate/emit");
 
+    if tt.on {
+        let c = SWEEP_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let rj = SWEEP_REJECTS.load(std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "    · sweep_ok 调用 {c}（拒绝 {rj}，每 {:.2} 次落一条链接）",
+            c as f64 / (st.moves.max(1) as f64)
+        );
+    }
+
     if lift_n > 0 {
         st.avg_link_lift = lift_sum / lift_n as f64;
     }
@@ -865,7 +874,14 @@ fn min_sweep_dist(
 /// 最小带符号距离"：刀形沿 z 平缓（圆柱恒定、锥线性），z 层可以粗；t 向连续，
 /// 谷窄到 0.1% 段长也能命中。z 层覆盖**整根刀**（刃 + 避空颈 + 30° 锥 + 柄
 /// ——§56.3：颈/柄的段中间扫掠曾无人检查）。
+// 【诊断】`chain`/`decimate` 里 `sweep_ok` 的调用与拒绝次数。
+// 用来回答"一条链接平均要试几次"——决定"两阶段草稿链"值不值得做。
+static SWEEP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SWEEP_REJECTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: &Geo) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    SWEEP_CALLS.fetch_add(1, Relaxed);
     let r = g.r;
     // z 层网格：刀形沿 z 平缓（圆柱恒半径、锥线性），粗采样不漏层间极值。
     // 层距按半径变化率定：刃部 4×旧步长、锥 1.0、柄 2.0。
@@ -895,11 +911,13 @@ fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: 
     }
     // 层间完全独立 → 并行求值（`any` 短路；bool 结果与求值顺序无关，
     // 与串行逐位一致）。曲面道 ~7 分钟的大头就是这里的串行版本。
-    layers
+    let hit = layers
         .par_iter()
-        .any(|&(z, need)| min_sweep_dist(ix, a, na, b, nb, z, need) < need)
-        .then(|| ())
-        .is_none()
+        .any(|&(z, need)| min_sweep_dist(ix, a, na, b, nb, z, need) < need);
+    if hit {
+        SWEEP_REJECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    !hit
 }
 
 /// 两个刀轴之间的球面插值（与 `Pose::lerp_slerp` 同一口径）。
