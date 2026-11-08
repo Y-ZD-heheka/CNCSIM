@@ -807,6 +807,8 @@ struct SegRig {
     b: DVec3,
     na: DVec3,
     nb: DVec3,
+    /// 两端刀轴夹角（`slerp` 的弧长）。中心轨迹的速度上界要用它。
+    theta: f64,
     /// `t = 0、1/4、1/2、3/4、1` 处的刀轴（所有层共用）。
     ///
     /// 两端也走 `slerp_axis` 而不是直接用 `na`/`nb`：`slerp` 末尾有一步
@@ -821,6 +823,7 @@ impl SegRig {
             b,
             na,
             nb,
+            theta: na.dot(nb).clamp(-1.0, 1.0).acos(),
             ac: [
                 slerp_axis(na, nb, 0.0),
                 slerp_axis(na, nb, 0.25),
@@ -839,6 +842,15 @@ impl SegRig {
     #[inline]
     fn center_at(&self, t: f64, z: f64) -> DVec3 {
         self.center(t, slerp_axis(self.na, self.nb, t), z)
+    }
+
+    /// 中心轨迹 `c(t)` 在 `z` 层上的**速度上界**（mm / 单位 t）：
+    /// `|dc/dt| ≤ |b − a| + z·θ`（刀尖线性插值 + 刀轴沿大圆走弧长 `θ`）。
+    /// 距离函数是 1-Lipschitz，所以 `[lo,hi]` 上的最小距离
+    /// `≥ 采样值 − (hi − lo)·motion`——黄金分割的提前收工就靠它。
+    #[inline]
+    fn motion(&self, z: f64) -> f64 {
+        (self.b - self.a).length() + z * self.theta
     }
 }
 
@@ -861,15 +873,21 @@ fn min_sweep_dist(ix: &crate::MeshIndex, rig: &SegRig, z: f64, need: f64) -> f64
             best_t = t;
         }
     }
-    // 快路径：整层远离（谷再深也深不过粗采样间距的数量级）——跳过细化。
-    //
-    // 注意这是个**近似**：`best_v` 是"窗口内的最小读数"，会随 `MeshIndex` 的
-    // 格子边长变（格子越大越容易看见远处三角形、读数越小、越不容易跳过）。
-    // 所以格子尺寸不是自由参数——它和这个阈值是一套的（§61 记录了实测差异）。
+    // **判决已定就收工**（与"跑满黄金分割"的判定完全一致）：
+    //   * 任何采样 < need → 这一层撞了，立即返回；
+    //   * 粗采样全部 > need + 0.4 → 整层远离（原有快路径；这是近似，读数会随
+    //     `MeshIndex` 格子边长变，所以格子尺寸和这个阈值是一套的，见 §61）。
+    if best_v < need {
+        return best_v;
+    }
     if best_v > need + 0.4 {
         return best_v;
     }
-    // 最小点相邻区间内黄金分割
+    // 最小点相邻区间内黄金分割。每轮用 Lipschitz 下界判一次"这一段能不能
+    // 证明安全"：`min(f1,f2) − (hi−lo)·motion ≥ need` 时区间内不可能有低于
+    // need 的点，直接收工——球心层（need = R − tol，余量恒为 0.03）因此从
+    // 12~15 轮降到 ~6 轮，而判定与跑满时**逐位一致**。
+    let motion = rig.motion(z);
     let mut lo = (best_t - 0.25).max(0.0);
     let mut hi = (best_t + 0.25).min(1.0);
     let gr = (5.0f64.sqrt() - 1.0) / 2.0;
@@ -877,7 +895,16 @@ fn min_sweep_dist(ix: &crate::MeshIndex, rig: &SegRig, z: f64, need: f64) -> f64
     let mut x2 = lo + gr * (hi - lo);
     let mut f1 = ix.min_dist_signed(rig.center_at(x1, z), reach);
     let mut f2 = ix.min_dist_signed(rig.center_at(x2, z), reach);
-    while hi - lo > 1e-3 {
+    loop {
+        if f1 < need || f2 < need {
+            return f1.min(f2);
+        }
+        if f1.min(f2) - (hi - lo) * motion >= need {
+            return f1.min(f2);
+        }
+        if hi - lo <= 1e-3 {
+            break;
+        }
         if f1 < f2 {
             hi = x2;
             x2 = x1;

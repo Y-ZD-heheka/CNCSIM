@@ -940,43 +940,78 @@ impl MeshIndex {
     }
 
     pub(crate) fn min_dist(&self, p: DVec3, reach: f64) -> f64 {
+        let mut best = f64::INFINITY;
+        self.scan_shells(p, reach, |ti, d2| {
+            if d2 < best {
+                best = d2;
+            }
+        });
+        best.sqrt()
+    }
+
+    /// 遍历 `p ± reach` 覆盖的格子，**按壳层由近到远**，并把每个三角形喂给 `f`。
+    ///
+    /// 为什么不是"窗口内三重循环全扫"：查询点绝大多数在**空气里**（实测点所在格
+    /// 平均只有 0.1 个三角形），所以 `best` 迟迟拿不到真值、格子级剪枝挂不上，
+    /// 一次查询要扫 111 个三角形。按壳层走就没这问题——第一个非空格子就给出真实
+    /// `best`，之后"最近点都比 best 远"的壳层整体收工。
+    ///
+    /// **精确性**：壳层 `r`（切比雪夫半径）里的格子，其 AABB 到 `p` 的距离
+    /// ≥ `(r−1)·cell`，所以 `best < ((r−1)·cell)²` 时后续壳层不可能含更近的
+    /// 三角形——提前收工不改任何读数。格内仍按格子 AABB 做同一道剪枝。
+    fn scan_shells<F: FnMut(usize, f64)>(&self, p: DVec3, reach: f64, mut f: F) {
         let (nx, ny) = (self.n[0], self.n[1]);
         let (i0, i1) = self.span(0, p.x, reach);
         let (j0, j1) = self.span(1, p.y, reach);
         let (k0, k1) = self.span(2, p.z, reach);
-        let mut best = f64::INFINITY;
-        // ① 先扫**点所在格**：它到 p 的距离是 0，里面一定有最近的候选之一，
-        //    拿到一个真实的 `best` 之后，②里的格子才有剪枝依据。
         let (ci, cj, ck) = self.cell_of(p);
-        for &ti in self.cell_tris((ck * ny + cj) * nx + ci) {
-            let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
-            if d2 < best {
-                best = d2;
+        let (i0, j0, k0) = (i0 as i64, j0 as i64, k0 as i64);
+        let (i1, j1, k1) = (i1 as i64, j1 as i64, k1 as i64);
+        let (ci, cj, ck) = (ci as i64, cj as i64, ck as i64);
+        let rmax = (ci - i0).max(i1 - ci).max(cj - j0).max(j1 - cj).max(ck - k0).max(k1 - ck);
+        // 剪枝门限随 best 变，所以用一个可变的 best 影子（`f` 自己也在更新它）
+        let mut seen = f64::INFINITY;
+        for r in 0..=rmax {
+            if r >= 2 {
+                let lo = (r - 1) as f64 * self.cell;
+                if seen < lo * lo {
+                    break;
+                }
             }
-        }
-        // ② 其余格：**格子 AABB 到 p 的下界都大于 `best` 就整格跳过**。
-        //    这是**精确**剪枝——被跳过的格子里每个三角形都远于当前最优，
-        //    不可能改变最小值。窗口内 8~200 个格子里通常只有 1~2 个需要扫。
-        for k in k0..=k1 {
-            for j in j0..=j1 {
-                let base = (k * ny + j) * nx;
-                for i in i0..=i1 {
-                    if i == ci && j == cj && k == ck {
+            for dk in -r..=r {
+                let k = ck + dk;
+                if k < k0 || k > k1 {
+                    continue;
+                }
+                for dj in -r..=r {
+                    let j = cj + dj;
+                    if j < j0 || j > j1 {
                         continue;
                     }
-                    if self.cell_dist2(p, i, j, k) > best {
-                        continue;
-                    }
-                    for &ti in self.cell_tris(base + i) {
-                        let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
-                        if d2 < best {
-                            best = d2;
+                    let base = (k * ny as i64 + j) * nx as i64;
+                    for di in -r..=r {
+                        if dk.abs() != r && dj.abs() != r && di.abs() != r {
+                            continue; // 非本壳层
+                        }
+                        let i = ci + di;
+                        if i < i0 || i > i1 {
+                            continue;
+                        }
+                        let cell = (base + i) as usize;
+                        if self.cell_dist2(p, i as usize, j as usize, k as usize) > seen {
+                            continue;
+                        }
+                        for &ti in self.cell_tris(cell) {
+                            let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
+                            if d2 < seen {
+                                seen = d2;
+                            }
+                            f(ti as usize, d2);
                         }
                     }
                 }
             }
         }
-        best.sqrt()
     }
 
     /// 查询点所在的格子（夹在范围内）。
@@ -1022,59 +1057,18 @@ impl MeshIndex {
     ///   面片边界、点积翻转符号——叶轮第一版实测残料 1.8% → 6.6%（合格
     ///   98.1% → 93.4%），全是叶根缝隙角落的假阳性；guard 后放行。
     pub(crate) fn min_dist_signed(&self, p: DVec3, reach: f64) -> f64 {
-        let (nx, ny) = (self.n[0], self.n[1]);
-        let (i0, i1) = self.span(0, p.x, reach);
-        let (j0, j1) = self.span(1, p.y, reach);
-        let (k0, k1) = self.span(2, p.z, reach);
         let (mut best, mut best_ti) = (f64::INFINITY, usize::MAX);
-        let (ci, cj, ck) = self.cell_of(p);
-        // ① 点所在格先扫（见 `min_dist` 的注释）
-        for &ti in self.cell_tris((ck * ny + cj) * nx + ci) {
-            let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
-            if d2 < best || (d2 == best && (ti as usize) < best_ti) {
+        self.scan_shells(p, reach, |ti, d2| {
+            // **等距平票取最小三角形号**：遍历顺序一变（壳层），不显式裁决就会
+            // 换一个等距三角形，`interior`/法向跟着变、符号翻转。
+            if d2 < best || (d2 == best && ti < best_ti) {
                 best = d2;
-                best_ti = ti as usize;
+                best_ti = ti;
             }
-        }
-        // ② 其余格按 `best` 精确剪枝
-        for k in k0..=k1 {
-            for j in j0..=j1 {
-                let base = (k * ny + j) * nx;
-                for i in i0..=i1 {
-                    if i == ci && j == cj && k == ck {
-                        continue;
-                    }
-                    if self.cell_dist2(p, i, j, k) > best {
-                        continue;
-                    }
-                    for &ti in self.cell_tris(base + i) {
-                        let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
-                        // **等距平票取最小三角形号**：二维桶按编号升序排，严格 `<`
-                        // 得到的正是这个；三维换了扫描顺序（k 在外层），不显式裁决
-                        // 会换一个等距三角形，`interior`/法向跟着变、符号翻转。
-                        if d2 < best || (d2 == best && (ti as usize) < best_ti) {
-                            best = d2;
-                            best_ti = ti as usize;
-                        }
-                    }
-                }
-            }
-        }
-        if !best.is_finite() {
+        });
+        if best_ti == usize::MAX || !best.is_finite() {
             return best;
         }
-        // 符号判定（性能关键路径：每次闸门查询都走这里）——分两级：
-        //
-        // * **快路径**：最近点落在三角形**内部**、且外法向**朝向**查询点
-        //   （`(p − q)·n > 0`）→ 刀在空气里，直接放行。闸门查询绝大多数
-        //   落在这里，射线奇偶（桶内全部三角形相交测试）一次都不用跑。
-        // * **其余情形交给裁决**：
-        //   - 封闭网格：射线奇偶是实体内外的**权威**——最近点在边/角上时
-        //     法向不可信（立方体测试里"正对剖分对角线的材质内点"就是
-        //     interior=false，法向口径会误放行），负候选更要复核（薄壁/缝隙
-        //     处法向可能翻转）。只有它们付 parity 的钱。
-        //   - 开网格（无 parity 可用）：interior-guard——最近点在三角形
-        //     内部且 `(p − q)·n < 0` 才判负；边/角乐观放行。
         self.sign_at(p, best_ti) * best.sqrt()
     }
 
