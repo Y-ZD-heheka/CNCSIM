@@ -149,6 +149,29 @@ pub struct SurfaceOut {
 ///
 /// 返回的 `gcode` 是一段**自包含**的片段（含换刀、`G43.4`、`G49` 收尾），
 /// 由调用方插到多工序程序的收尾指令之前——不在这里拼 `M30`。
+/// 曲面道内部阶段计时。`--timing` 打开（与 app 用同一个开关，库不引入依赖）。
+struct Timing {
+    t: std::time::Instant,
+    on: bool,
+}
+
+impl Timing {
+    fn new() -> Self {
+        Self {
+            t: std::time::Instant::now(),
+            on: std::env::args().any(|a| a == "--timing"),
+        }
+    }
+    fn lap(&mut self, name: &str) {
+        if !self.on {
+            self.t = std::time::Instant::now();
+            return;
+        }
+        println!("    · {name}：{:.2} s", self.t.elapsed().as_secs_f64());
+        self.t = std::time::Instant::now();
+    }
+}
+
 pub fn generate_surface(
     mesh: &[Tri],
     stock: Stock,
@@ -171,7 +194,9 @@ pub fn generate_surface(
             stats: st,
         });
     }
+    let mut tt = Timing::new();
     let ix = crate::MeshIndex::build(mesh, stock);
+    tt.lap("MeshIndex");
     let r = opts.tool.radius();
 
     // ── 闸门 ──
@@ -229,6 +254,8 @@ pub fn generate_surface(
         })
         .collect();
 
+    tt.lap("逐点预筛（并行）");
+
     // 上一个通过点的刀轴：候选按"与它最像"排序，保证轴场连续
     let mut last_axis: Option<DVec3> = None;
     for (ti, &(p, n)) in targets.iter().enumerate() {
@@ -269,6 +296,7 @@ pub fn generate_surface(
             None => st.shank_rejected += 1,
         }
     }
+    tt.lap("接受循环（查表）");
     st.accepted = pts.len();
     if pts.is_empty() {
         return Ok(SurfaceOut {
@@ -289,6 +317,8 @@ pub fn generate_surface(
     // 连之前要问一句"这条直线扫过去会不会啃到别处"。**必须问**：接受的点和被
     // 拒的点是混在一起的，两个相距 1 mm 的点中间可能正好隔着一道凸棱或一堵薄壁，
     // 直连过去球就从中间穿过去了（实测桌腿件 237 块里啃出 6.8% 过切、最深 2.92 mm）。
+    tt.lap("刀尖 / 法向归一");
+
     // 流向场：邻域半径取 2.5×link（太小噪声大、太大把棱线两侧混在一起）
     let flow = if opts.follow_flow {
         Some(flow_field(&tips, &axs, opts.link_mm() * 2.5))
@@ -299,7 +329,9 @@ pub fn generate_surface(
     st.runs = runs.len();
     // 把链按"离上一条链的终点最近"重排（可整条反向）。链的顺序本来是种子顺序，
     // 跟空间没关系——1225 条链之间的快移加起来比切长还长。
+    tt.lap("串链 chain");
     let runs = order_runs(runs, &tips, &axs, &ix, &g, g.flute + 2.0);
+    tt.lap("链重排 order_runs");
 
     // ── 凹度（进给调度的几何输入） ──
     //
@@ -312,6 +344,8 @@ pub fn generate_surface(
     } else {
         vec![0.0; pts.len()]
     };
+
+    tt.lap("凹度 concavity");
 
     // ── 出 G 代码 ──
     let mut e = Sink::new();
@@ -461,6 +495,8 @@ pub fn generate_surface(
         prev_tip = Some((tips[last], axs[last]));
         st_last = Some(last);
     }
+    tt.lap("出码 decimate/emit");
+
     if lift_n > 0 {
         st.avg_link_lift = lift_sum / lift_n as f64;
     }

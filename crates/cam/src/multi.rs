@@ -13,6 +13,7 @@
 
 use crate::{CamError, Frame, Job, Process, Program, Stats, Stock, ToolDef, ToolSpec, Tri};
 use cncsim_math::DVec3;
+use rayon::prelude::*;
 
 /// 一道工序。
 #[derive(Clone, Debug)]
@@ -104,38 +105,63 @@ pub fn generate_plan(
     let mut done = 0usize;
     let mut skipped: Vec<(usize, String)> = Vec::new();
 
-    for (i, pass) in passes.iter().enumerate() {
+    // ── 逐道生成：**并行**，拼接仍按顺序 ──
+    //
+    // 每一道是独立的：转进自己的局部系 → 高度场 → 出这一段 G 代码。道与道之间
+    // 只通过**输出顺序**相连（`(PASS i)`、A/C 摆角、`G49/G0 Z` 这几行由外层按
+    // 下标写），所以并行只改**求值顺序**不改结果——拼接、统计累加仍按下标串行，
+    // 输出与串行逐字节相同。叶轮 14 道 × 每道 20 层高度场，这是"刀路生成"
+    // 那一段的主要成本。
+    let prepped: Vec<_> = passes
+        .iter()
+        .enumerate()
+        .map(|(i, pass)| {
+            let mut rough = pass.rough.clone();
+            if let Some(t) = &mut rough {
+                // 刀号全局唯一：第 i 道 = 2i+1（粗）/ 2i+2（精）
+                t.number = (2 * i + 1) as u16;
+            }
+            let mut finish = pass.finish.clone();
+            finish.number = (2 * i + 2) as u16;
+            (i, pass, rough, finish)
+        })
+        .collect();
+    // `CNCSIM_SERIAL_PLAN=1` 退回串行（对拍用：并行必须与它逐字节一致）。
+    let serial = std::env::var("CNCSIM_SERIAL_PLAN").is_ok();
+    let run_one = |(i, pass, rough, finish): &(usize, &Pass, Option<ToolSpec>, ToolSpec)| {
+        let _ = i;
         let f = Frame::from_dir(pass.dir);
         let local_mesh: Vec<Tri> = mesh
             .iter()
             .map(|t| [f.unapply(t[0]), f.unapply(t[1]), f.unapply(t[2])])
             .collect();
-        let lstock = local_stock(stock, &f);
-
-        // 刀号全局唯一：第 i 道 = 2i+1（粗）/ 2i+2（精）
-        let mut rough = pass.rough.clone();
-        if let Some(t) = &mut rough {
-            t.number = (2 * i + 1) as u16;
-        }
-        let mut finish = pass.finish.clone();
-        finish.number = (2 * i + 2) as u16;
-
         let job = Job {
             mesh: &local_mesh,
-            stock: lstock,
+            stock: local_stock(stock, &f),
             rough: rough.clone(),
             finish: finish.clone(),
             process: pass.process.clone().unwrap_or_else(|| process.clone()),
             rest: pass.rest.as_deref(),
         };
+        // 单道失败不连坐：外层按下标收集 `skipped`
+        crate::generate_in(&job, Some(f)).map_err(|e| e.to_string())
+    };
+    let built: Vec<Result<crate::Program, String>> = if serial {
+        prepped.iter().map(run_one).collect()
+    } else {
+        prepped.par_iter().map(run_one).collect()
+    };
+
+    for ((i, pass, rough, finish), prog) in prepped.iter().zip(built) {
         // 单道失败就跳过，不让整份计划作废
-        let prog = match crate::generate_in(&job, Some(f)) {
+        let prog = match prog {
             Ok(p) => p,
             Err(e) => {
-                skipped.push((i, e.to_string()));
+                skipped.push((*i, e));
                 continue;
             }
         };
+        let (i, pass) = (*i, *pass);
 
         gcode.push_str(&format!(
             "(PASS {} dir {:.2},{:.2},{:.2})\n",
@@ -167,7 +193,7 @@ pub fn generate_plan(
         stats.finish_moves += prog.stats.finish_moves;
         stats.cut_mm += prog.stats.cut_mm;
         stats.rapid_mm += prog.stats.rapid_mm;
-        if let Some(t) = &rough {
+        if let Some(t) = rough {
             tools.push(t.to_tool_def());
         }
         tools.push(finish.to_tool_def());

@@ -454,6 +454,31 @@ struct SweepIndex<'a> {
     cutters: Vec<&'a Profile>,
     grid: Option<SegGrid>,
     all: Vec<u32>,
+    /// AABB/轴向下界的判据阈值（`|d| ≤ margin` 内保证精确）。
+    margin: f64,
+    /// 每段的**轴向包围**：`(z0, z1, max_r, swing)`。
+    ///
+    /// AABB 只是"轴对齐"的粗包围，刀具体却是**细长回转体**（Ø0.8 球 + 16 mm 刃
+    /// + Ø6 柄，全长 45 mm）——竖直摆放时它的 AABB 是 6×6×45，几乎盖住半个
+    /// 工件：一个设计面点会落进两百多个段的 AABB 里，每段都得跑一遍 `sd_sweep`
+    /// （实测每格 208 段、276754 个点 20 s）。
+    ///
+    /// 真正的判据是**到轴线的距离**：刀具体 ⊂ 轴线段 `[tip+a·z0, tip+a·z1]`
+    /// 周围 `max_r`。两端位姿各量一次取小，再减段内摆动 `swing`（刀尖位移 +
+    /// `z1·sinθ`），就得到真实距离的**下界**；下界都远于 `margin` 的段整段跳过。
+    /// 这是**纯剪枝**——`|d| ≤ margin` 的读数一个都不变。
+    zb: Vec<(f64, f64, f64, f64)>,
+}
+
+/// 点到线段 `[a, b]` 的距离。
+fn dist_pt_seg(p: DVec3, a: DVec3, b: DVec3) -> f64 {
+    let ab = b - a;
+    let l2 = ab.length_squared();
+    if l2 < 1e-18 {
+        return (p - a).length();
+    }
+    let t = ((p - a).dot(ab) / l2).clamp(0.0, 1.0);
+    (p - (a + ab * t)).length()
 }
 
 impl<'a> SweepIndex<'a> {
@@ -474,6 +499,18 @@ impl<'a> SweepIndex<'a> {
                 (lo - t, hi + t)
             })
             .collect();
+        let zb: Vec<(f64, f64, f64, f64)> = segments
+            .iter()
+            .zip(&cutters)
+            .map(|(s, cutter)| {
+                let pts = cutter.points();
+                let (a, b) = (pts[0].y, pts[pts.len() - 1].y);
+                let (z0, z1) = (a.min(b), a.max(b));
+                let theta = s.from.axis.dot(s.to.axis).clamp(-1.0, 1.0).acos();
+                let swing = (s.to.tip - s.from.tip).length() + z1 * theta.sin();
+                (z0, z1, cutter.max_radius(), swing)
+            })
+            .collect();
         let whole = boxes.iter().fold(None::<(DVec3, DVec3)>, |acc, (lo, hi)| {
             Some(match acc {
                 None => (*lo, *hi),
@@ -491,6 +528,8 @@ impl<'a> SweepIndex<'a> {
             cutters,
             grid,
             all: (0..segments.len() as u32).collect(),
+            margin,
+            zb,
         }
     }
 
@@ -518,6 +557,14 @@ impl<'a> SweepIndex<'a> {
                 continue;
             }
             let s = &self.segments[si];
+            let (z0, z1, rmax, swing) = self.zb[si];
+            // 轴向下界（比 AABB 紧得多）：到两端轴线段取小，减去半径与摆动。
+            let (f, t) = (s.from, s.to);
+            let d_axis = dist_pt_seg(p, f.tip + f.axis * z0, f.tip + f.axis * z1)
+                .min(dist_pt_seg(p, t.tip + t.axis * z0, t.tip + t.axis * z1));
+            if d_axis - rmax - swing > self.margin {
+                continue;
+            }
             let sd = sd_sweep(p, &s.from, &s.to, self.cutters[si]);
             if sd < best {
                 best = sd;
@@ -606,7 +653,24 @@ pub fn sweep_deviation(
     points: &[DVec3],
     margin: f64,
 ) -> Vec<f64> {
+    let t_build = std::time::Instant::now();
     let ix = SweepIndex::new(segments, tools, margin);
+    if std::env::args().any(|a| a == "--timing") {
+        let cells = ix.grid.as_ref().map(|g| g.buckets.len()).unwrap_or(0);
+        let avg = if cells > 0 {
+            ix.grid.as_ref().unwrap().buckets.iter().map(|b| b.len()).sum::<usize>() as f64
+                / cells as f64
+        } else {
+            ix.all.len() as f64
+        };
+        println!(
+            "    · SweepIndex 建表：{:.2} s / {} 段 / {} 格 / 平均每格 {:.0} 段",
+            t_build.elapsed().as_secs_f64(),
+            segments.len(),
+            cells,
+            avg
+        );
+    }
     let n = cncsim_voxel::par::worker_count();
     let chunks = (points.len() / 4000).clamp(1, n * 2).max(1);
     if chunks == 1 {

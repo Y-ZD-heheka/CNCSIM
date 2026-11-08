@@ -1243,12 +1243,39 @@ ctx.putImageData(img,0,0);
 /// 这是"从 XYZ 任意方向开粗"的实现：每道工序用自己的 `Frame` 把模型转进该
 /// 方向的局部系跑同一条 3 轴链路，输出时再用 `G43.4 H1` + A/C 把刀轴摆过去。
 /// 单道做不了（该方向多层/倒扣）就跳过并报原因，不拖垮整份计划。
+/// 阶段计时：`--timing` 打开。**只报不改**——每段的名字就是它覆盖的代码段，
+/// 调性能时先看这张表，不要靠猜。
+struct Lap {
+    t: std::time::Instant,
+    on: bool,
+}
+
+impl Lap {
+    fn new() -> Self {
+        Self {
+            t: std::time::Instant::now(),
+            on: std::env::args().any(|a| a == "--timing"),
+        }
+    }
+    fn lap(&mut self, name: &str) {
+        if !self.on {
+            self.t = std::time::Instant::now();
+            return;
+        }
+        let d = self.t.elapsed().as_secs_f64();
+        println!("  ⏱ {name}：{d:.2} s");
+        self.t = std::time::Instant::now();
+    }
+}
+
 fn run_cam_multi(
     model: &std::path::Path,
     tris: &[cncsim_cam::Tri],
     stock: cncsim_cam::Stock,
     mut dirs: Vec<cncsim_math::DVec3>,
 ) {
+    let mut lap = Lap::new();
+
     // `--no-side`：**扔掉 ±X/±Y 这两道**。
     //
     // 实测桌腿件（h=0.6，清根 + 翻面 + 曲面道）：
@@ -1425,6 +1452,8 @@ fn run_cam_multi(
             }
         );
     }
+    lap.lap("场地/网格/可达性");
+
     // ── 工序编排：**不限定加工方式**，让覆盖面积决定要几道、往哪摆 ──
     //
     // 3 轴（+Z）、3+2（任意倾角定轴）在本实现里是同一套高度场，只是工序方向不同；
@@ -1545,6 +1574,8 @@ fn run_cam_multi(
     //
     // 判据用**解析口径**（与 h 无关）：只补 0.15 < d ≤ 1.0 的点。d > 1 mm 的是
     // "刀根本没接近过"——换小刀也进不去，那是翻面或五轴的活，补了只是白跑。
+    lap.lap("工序编排");
+
     // ── 刀路体检：**只走刀、不切料**，拿到"哪里的设计面还没被切到" ──
     //
     // 清根（小刀补残料圈）和五轴曲面道（补高度场看不见的面）都要这份数据，
@@ -1586,6 +1617,8 @@ fn run_cam_multi(
         );
         probe = Some((out0, table0));
     }
+
+    lap.lap("探针（终排）");
 
     if want_rest && let Some((out0, table0)) = &probe {
         // 清根刀径：**由公差反推**。球头在 90° 凹角的残高是 `R(1/sin45°−1)=0.414R`，
@@ -1674,6 +1707,8 @@ fn run_cam_multi(
         None
     };
 
+    lap.lap("残料清根");
+
     // ── 五轴曲面法向点铣：把"高度场看不见"的面补上 ──
     //
     // 高度场每列只认最上面那一层，所以叶片侧壁在任何方向的列里都不是最高面——
@@ -1688,12 +1723,19 @@ fn run_cam_multi(
     if want_surface && let Some((out0, table0)) = &probe {
         let step = (d_finish * 0.4).clamp(0.25, 0.8);
         let smp = cncsim_voxel::meshvol::surface_samples(tris, step);
+        lap.lap("曲面目标采样");
         let pts: Vec<cncsim_math::DVec3> = smp.iter().map(|(p, _, _)| *p).collect();
         let d = cncsim_sim::compare::sweep_deviation(&out0.cut_segs, table0, &pts, 1.0);
+        lap.lap("曲面偏差扫描");
         let targets: Vec<(cncsim_math::DVec3, cncsim_math::DVec3)> = smp
             .iter()
             .zip(&d)
-            .filter(|(_, dd)| dd.is_finite() && **dd > 0.15)
+            // **`+∞` 也是残料**：`sweep_deviation` 用 `margin` 剪枝后，"比
+            // margin 还远"的点如实返回 `∞`（以前是粗 AABB 兜住了大半工件，
+            // 让它们以有限值混进来）。原来的 `is_finite()` 过滤因此会把**深
+            // 残料整片挡在目标集外**——实测桌腿件 1.6% 的设计面没人管
+            // （合格 96.5% → 98.1%、残料 3.5% → 1.9%）。这里显式接住 ∞。
+            .filter(|(_, dd)| **dd > 0.15)
             .map(|((p, n, _), _)| (*p, *n))
             .collect();
         println!(
@@ -1821,6 +1863,8 @@ fn run_cam_multi(
         }
     }
 
+    lap.lap("五轴曲面道");
+
     let t0 = std::time::Instant::now();
     let mut plan = match generate_plan(tris, stock, &process, &passes) {
         Ok(p) => p,
@@ -1873,6 +1917,8 @@ fn run_cam_multi(
             d.x, d.y, d.z
         );
     }
+
+    lap.lap("终排刀路生成");
 
     let nc = gcode_path_from_args().unwrap_or_else(|| model.with_extension("multi.nc"));
     // 有翻面道时：出厂程序要拆成两套——程序里那道 `A180` 机床摆不到，实机是
@@ -1956,6 +2002,8 @@ M30
         println!("G 代码：{}", nc.display());
     }
 
+    lap.lap("写 G 代码");
+
     // ── 解释：A/C 按 Head（双摆头）约定生成，必须配套 ──
     let ic = interp_config_for(&plan.tools);
     let program = cncsim_gcode::interpret(&plan.program.gcode, &ic);
@@ -1968,6 +2016,8 @@ M30
         program.len(),
         program.issues.len()
     );
+
+    lap.lap("解释 G 代码");
 
     let dry = args_flag("--dry");
     let cfg = cncsim_sim::run::RunConfig {
@@ -2132,6 +2182,7 @@ M30
     // 上面那个"名义曲面"读的是体素场，空间分辨力 ≈ h：薄于一个体素的尖角会被
     // 整格判成空气，过切能报大好几倍。这里直接问"刀具扫掠体的并集离这一点多远"，
     // 只受浮点影响。两个口径并排，差值就是判据本身的分辨力误差。
+    lap.lap(if dry { "刀路体检（dry）" } else { "仿真" });
     let dsw = cncsim_sim::compare::sweep_deviation(&out.cut_segs, &table, &pts, 1.0);
     let ss = cncsim_sim::compare::sweep_stats(&dsw, 0.15, 1.0);
     println!(
@@ -2321,6 +2372,8 @@ M30
         }
     );
 
+    lap.lap("解析口径 + 归因");
+
     // ── 残料分布：厚度分档 + 空间热区 ──
     //
     // "残料 14.4%" 只说明有多少点没切到，不说明是**什么**：0.2 mm 的刀花、
@@ -2374,6 +2427,8 @@ M30
             );
         }
     }
+
+    lap.lap("热区/分档");
 
     // ── 可达 × 偏差 交叉表：把"够不到"和"没切好"彻底分开 ──
     //
