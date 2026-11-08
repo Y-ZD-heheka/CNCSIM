@@ -27,6 +27,7 @@
 //! 覆盖面积一样能吃到，只是切长更长。两条路子对"像不像原版"是同一量级，
 //! 对"加工时间"侧刃铣更省。选它是因为可以先量出上限，再决定值不值得做侧刃。
 
+use rayon::prelude::*;
 use crate::{CamError, Stock, ToolKind, ToolSpec, Tri};
 use cncsim_math::DVec3;
 
@@ -187,20 +188,54 @@ pub fn generate_surface(
     // 实测叶轮 1 有 45% 的残料点栽在 A 超程上，这一改全部变成候选。
     let mut pts: Vec<DVec3> = Vec::new();
     let mut nrm: Vec<DVec3> = Vec::new();
+    let g = Geo::of(&opts.tool, opts.gate_tol_mm, opts.shank_clearance_mm);
+    let flute = g.flute;
     let mut axs: Vec<DVec3> = Vec::new();
+
+    // ── 逐点可行性**并行预筛**（曲面道最热的循环）──
+    //
+    // 一个候选轴可不可行，只由 (p, n, 轴) 决定——**与串链顺序无关**：
+    // `last_axis` 只影响主循环"挑哪一个"的顺序（`axis_candidates_indexed`
+    // 的基准下标不变量保证两者对得上）。所以每点 17 个候选 × 整根刀检查
+    // （~117 个采样点）可以全部提前、按线程摊开（叶轮 ~3400 万次查询，
+    // 原来全在单线程）；串行主循环退化为纯查表。
+    let pre: Vec<(bool, u32)> = targets
+        .par_iter()
+        .map(|&(p, n)| {
+            let n = n.normalize();
+            if !n.length_squared().is_finite()
+                || !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite())
+            {
+                return (false, 0);
+            }
+            // 球心 `p + R·n`：`p` 自己在球面上，所以最近距离天然 = R；只有**别的面**
+            // 比 R 更近才说明塞不下（凹坑/窄槽）。**signed**：球心万一在别的
+            // 面片材质里，无符号读数 = 深度（可能 ≥ need → 漏判），负值必拒。
+            let need = (r - opts.gate_tol_mm).max(1e-6);
+            if ix.min_dist_signed(p + n * r, need) < need {
+                return (false, 0);
+            }
+            let mut bits = 0u32;
+            for (k, a) in axis_candidates_indexed(n, opts.max_a_deg, opts.max_tilt_deg, None) {
+                if a.dot(n) <= 0.0 {
+                    continue; // 轴跑到设计面背后：球只能从里面顶
+                }
+                let tip = p + (n - a) * r;
+                if !shank_hits_axis(&ix, tip, a, &g) {
+                    bits |= 1 << k;
+                }
+            }
+            (true, bits)
+        })
+        .collect();
+
     // 上一个通过点的刀轴：候选按"与它最像"排序，保证轴场连续
     let mut last_axis: Option<DVec3> = None;
-    for &(p, n) in targets {
+    for (ti, &(p, n)) in targets.iter().enumerate() {
+        let (ball_ok, bits) = pre[ti];
         let n = n.normalize();
-        if !n.length_squared().is_finite() || !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite())
-        {
-            continue;
-        }
-        // 球心 `p + R·n`：`p` 自己在球面上，所以最近距离天然 = R；只有**别的面**
-        // 比 R 更近才说明塞不下（凹坑/窄槽）。这一条比"看得到"严格得多，
-        // 而且**与刀轴无关**——先判它，最便宜的拒绝放最前面。
-        let need = (r - opts.gate_tol_mm).max(1e-6);
-        if ix.min_dist(p + n * r, need) < need {
+        if !ball_ok {
+            // 球心塞不下（或输入非法）——**与刀轴无关**，最便宜的拒绝。
             st.gouge_rejected += 1;
             continue;
         }
@@ -209,17 +244,14 @@ pub fn generate_surface(
         // 这是叶轮上最大的一笔：残料点里 73% 是"刀杆蹭到对面叶片"被拒的。
         // 刀轴偏转 `R(n−a)` 那点补偿对形状没有影响（球照样在 `p` 相切），
         // 但**刀杆整根跟着摆**——歪一点就能让开对面那片叶子。
+        // 可行性已在上面的并行预筛里算好（位图），这里只按顺序挑。
         let mut pick: Option<(DVec3, bool)> = None;
-        for (k, a) in axis_candidates(n, opts.max_a_deg, opts.max_tilt_deg, last_axis)
-            .into_iter()
-            .enumerate()
+        for (k, a) in axis_candidates_indexed(n, opts.max_a_deg, opts.max_tilt_deg, last_axis)
         {
             if a.dot(n) <= 0.0 {
                 continue; // 轴跑到设计面背后：球只能从里面顶
             }
-            let tip = p + (n - a) * r;
-            if !shank_hits_axis(&ix, tip, a, &opts.tool, opts.gate_tol_mm, opts.shank_clearance_mm)
-            {
+            if bits & (1 << k) != 0 {
                 pick = Some((a, k > 0));
                 break;
             }
@@ -257,23 +289,17 @@ pub fn generate_surface(
     // 连之前要问一句"这条直线扫过去会不会啃到别处"。**必须问**：接受的点和被
     // 拒的点是混在一起的，两个相距 1 mm 的点中间可能正好隔着一道凸棱或一堵薄壁，
     // 直连过去球就从中间穿过去了（实测桌腿件 237 块里啃出 6.8% 过切、最深 2.92 mm）。
-    let g = Geo {
-        r,
-        tol: opts.gate_tol_mm,
-        flute: opts.tool.flute_mm.max(r),
-    };
-    let flute = g.flute;
     // 流向场：邻域半径取 2.5×link（太小噪声大、太大把棱线两侧混在一起）
     let flow = if opts.follow_flow {
         Some(flow_field(&tips, &axs, opts.link_mm() * 2.5))
     } else {
         None
     };
-    let runs = chain(&tips, &axs, opts.link_mm(), &ix, g, flow.as_deref());
+    let runs = chain(&tips, &axs, opts.link_mm(), &ix, &g, flow.as_deref());
     st.runs = runs.len();
     // 把链按"离上一条链的终点最近"重排（可整条反向）。链的顺序本来是种子顺序，
     // 跟空间没关系——1225 条链之间的快移加起来比切长还长。
-    let runs = order_runs(runs, &tips, &axs, &ix, g, g.flute + 2.0);
+    let runs = order_runs(runs, &tips, &axs, &ix, &g, g.flute + 2.0);
 
     // ── 凹度（进给调度的几何输入） ──
     //
@@ -316,23 +342,31 @@ pub fn generate_surface(
     let mut cur_f: Option<f64> = None;
     // 实际写出的 F 字数（模态：与上一块相同就省）。报告里用它算省了多少字。
     let mut f_words = 0usize;
-    for run in &runs {
+    // 抽稀**按链并行**：每条链的 decimate 互不依赖（每条几十~几百次段扫掠，
+    // 是曲面道最贵的一步），rayon 按线程摊开。链间顺序逻辑（min_link_lift、
+    // 出码顺序）保持串行——它们依赖"上一条链"的状态，天然串行。
+    let kepts: Vec<Vec<usize>> = {
+        let _t = std::time::Instant::now();
+        runs.par_iter()
+            .map(|run| decimate(run, &tips, &axs, opts.out_step_mm, &ix, &g))
+            .collect()
+    };
+    for (run, kept) in runs.iter().zip(&kepts) {
         // 链间转移的退刀量：按"这一段能不能过"自适应，不再固定 18 mm
         let lift = match prev_tip {
-            Some((pt, pa)) => min_link_lift(&ix, pt, pa, tips[run[0]], axs[run[0]], g, max_lift),
+            Some((pt, pa)) => min_link_lift(&ix, pt, pa, tips[run[0]], axs[run[0]], &g, max_lift),
             None => max_lift,
         };
         lift_sum += lift;
         lift_n += 1;
-        // 抽稀：沿弧长每 `out_step` 留一个点，首尾必留
-        let kept = decimate(run, &tips, &axs, opts.out_step_mm, &ix, g);
+        // 抽稀：沿弧长每 `out_step` 留一个点，首尾必留（见上，已并行算好）
         if kept.is_empty() {
             continue;
         }
         let i0 = kept[0];
         let (t0, a0v) = (tips[i0], axs[i0]);
         // 沿刀轴切入那一刀本身也可能啃（旁边有凸起挡在刀轴上）
-        if !sweep_ok(&ix, t0 + a0v * lift, a0v, t0, a0v, g) {
+        if !sweep_ok(&ix, t0 + a0v * lift, a0v, t0, a0v, &g) {
             st.plunge_rejected += 1;
             continue;
         }
@@ -346,7 +380,7 @@ pub fn generate_surface(
         // 那 1 mm，前面都可以快移。
         let up0 = t0 + a0v * lift;
         if let Some((pt, pa)) = prev_tip
-            && !link_ok(&ix, pt + pa * lift, pa, up0, a0v, g)
+            && !link_ok(&ix, pt + pa * lift, pa, up0, a0v, &g)
         {
             st.link_unsafe += 1;
         }
@@ -416,7 +450,7 @@ pub fn generate_surface(
         // 退刀方向是 +a，大多数时候是往空气里退，但凹腔里会撞对面的壁。
         let last = *kept.last().unwrap();
         let up = tips[last] + axs[last] * lift;
-        if !sweep_ok(&ix, tips[last], axs[last], up, axs[last], g) {
+        if !sweep_ok(&ix, tips[last], axs[last], up, axs[last], &g) {
             st.plunge_rejected += 1;
             continue;
         }
@@ -485,7 +519,24 @@ fn feasible_axis(n: DVec3, max_a_deg: f64) -> DVec3 {
 /// 排在最前的是"不歪"的解，所以绝大多数点第一次就命中；只有被刀杆拦住的点
 /// 才会往下试。每个候选都过 [`feasible_axis`]，所以永远在 A 行程内。
 fn axis_candidates(n: DVec3, max_a_deg: f64, tilt_deg: f64, prefer: Option<DVec3>) -> Vec<DVec3> {
-    let mut out = vec![feasible_axis(n, max_a_deg)];
+    axis_candidates_indexed(n, max_a_deg, tilt_deg, prefer)
+        .into_iter()
+        .map(|(_, a)| a)
+        .collect()
+}
+
+/// [`axis_candidates`] 的**带基准下标**版本：下标是候选在 `prefer = None`
+/// （基准顺序）里的位置，`prefer` 只重排顺序、**不改变下标→向量的对应**。
+///
+/// 这个不变量是逐点可行性**并行预筛**的基础：可行性位图按基准下标算好
+/// （与串链顺序无关），主循环按 `last_axis` 重排后照下标查位图即可。
+fn axis_candidates_indexed(
+    n: DVec3,
+    max_a_deg: f64,
+    tilt_deg: f64,
+    prefer: Option<DVec3>,
+) -> Vec<(usize, DVec3)> {
+    let mut out = vec![(0usize, feasible_axis(n, max_a_deg))];
     if tilt_deg <= 0.0 {
         return out;
     }
@@ -496,19 +547,20 @@ fn axis_candidates(n: DVec3, max_a_deg: f64, tilt_deg: f64, prefer: Option<DVec3
     for frac in [0.6, 1.0] {
         let th = (tilt_deg * frac).to_radians();
         let (st, ct) = th.sin_cos();
-        let mut ring: Vec<DVec3> = (0..8)
+        let mut ring: Vec<(usize, DVec3)> = (0..8)
             .map(|k| {
                 let phi = k as f64 / 8.0 * std::f64::consts::TAU;
                 let (sp, cp) = phi.sin_cos();
-                (n * ct + (x * cp + y * sp) * st).normalize()
+                let idx = out.len() + k;
+                (idx, (n * ct + (x * cp + y * sp) * st).normalize())
             })
             .collect();
         // **同一圈里挑"跟上一个点最像"的那个**：刀轴在面上要连续，否则相邻
         // 两块之间轴摆 50°，机器抖、刃部圆柱还会扫出一片（实测 0.50 mm）。
         if let Some(p) = prefer {
-            ring.sort_by(|a, b| b.dot(p).total_cmp(&a.dot(p)));
+            ring.sort_by(|a, b| b.1.dot(p).total_cmp(&a.1.dot(p)));
         }
-        out.extend(ring.into_iter().map(|a| feasible_axis(a, max_a_deg)));
+        out.extend(ring.into_iter().map(|(i, a)| (i, feasible_axis(a, max_a_deg))));
     }
     out
 }
@@ -524,45 +576,16 @@ fn axis_candidates(n: DVec3, max_a_deg: f64, tilt_deg: f64, prefer: Option<DVec3
 /// 早先只从刃长以上查，等于假设"刃部圆柱不会啃"——在 3 轴 drop-cutter 里成立
 /// （球已经保证刀柱在料外），五轴不成立：刀轴一歪，刃部圆柱就横着压在相邻面上。
 /// 实测桌腿件最深过切 0.67 mm 全在这一段。
-fn shank_hits_axis(
-    ix: &crate::MeshIndex,
-    tip: DVec3,
-    axis: DVec3,
-    tool: &ToolSpec,
-    tol: f64,
-    clearance: f64,
-) -> bool {
-    let r = tool.radius();
-    let flute_end = tool.flute_mm.max(r);
+/// 刃部段（球心 + 刃部圆柱）的碰撞检查。`shank_hits_axis` 的 ① 段，
+/// 拆出来是为了**按转角分层**：每个位姿都查刃部（便宜、常拒），
+/// 颈/柄只在需要时查（见 `neck_shank_hits`）。
+fn ball_flute_hits(ix: &crate::MeshIndex, tip: DVec3, axis: DVec3, g: &Geo) -> bool {
+    let r = g.r;
+    let need_f = (r - g.tol).max(1e-6);
     let step = (r * 0.8).clamp(0.5, 2.0);
-
-    // ① 刃部圆柱：与球同一口径
-    let need_f = (r - tol).max(1e-6);
     let mut z = r;
-    while z < flute_end {
-        if ix.min_dist(tip + axis * z, need_f) < need_f {
-            return true;
-        }
-        z += step;
-    }
-    // ② 避空缩颈：从刃顶按 30° 扩到柄径，**半径是变的**，按该高度的实际值查。
-    //    拿柄径一刀切会把这 4~5 mm 也当成 Ø6——Ø1 刀的避空段本来只有 Ø1→Ø3。
-    let taper = tool.taper_len();
-    let mut z = flute_end;
-    while z < tool.neck_top() + taper {
-        let rr = tool.radius_at(z);
-        let need = (rr + clearance).max(1e-3);
-        if ix.min_dist(tip + axis * z, need) < need {
-            return true;
-        }
-        z += 0.3;
-    }
-    // ③ Ø6 刀柄：半径恒定，用粗步长
-    let shank_r = tool.shank_radius().max(r);
-    let need_s = (shank_r + clearance).max(1e-3);
-    let mut z = (tool.neck_top() + taper).max(flute_end);
-    while z <= tool.neck_top() + 20.0 {
-        if ix.min_dist(tip + axis * z, need_s) < need_s {
+    while z < g.flute {
+        if ix.min_dist_signed(tip + axis * z, need_f) < need_f {
             return true;
         }
         z += step;
@@ -570,14 +593,123 @@ fn shank_hits_axis(
     false
 }
 
-/// 一串闸门共用的几何常量（刀半径、容差、刃长）。
+/// 颈/柄段（等径避空颈 + 30° 缩颈 + Ø6 柄）的碰撞检查。
+///
+/// 每位姿 ~50 个采样点（锥 0.3 步长 + 柄粗步长），是整根刀检查里最贵的部分
+/// ——段扫掠按转角分层查它（`sweep_ok`）。
+fn neck_shank_hits(ix: &crate::MeshIndex, tip: DVec3, axis: DVec3, g: &Geo) -> bool {
+    let r = g.r;
+    let clearance = g.clear;
+    let flute_end = g.flute;
+    let step = (r * 0.8).clamp(0.5, 2.0);
+    // ② 等径避空颈 + 30° 缩颈：从刃顶按实际半径查。
+    //    拿柄径一刀切会把这几毫米也当成 Ø6——Ø1 刀的避空段本来只有 Ø1→Ø3。
+    let taper = g.tool.taper_len();
+    let mut z = flute_end;
+    while z < g.tool.neck_top() + taper {
+        let rr = g.tool.radius_at(z);
+        let need = (rr + clearance).max(1e-3);
+        if ix.min_dist_signed(tip + axis * z, need) < need {
+            return true;
+        }
+        z += 0.3;
+    }
+    // ③ Ø6 刀柄：半径恒定，用粗步长
+    let shank_r = g.tool.shank_radius().max(r);
+    let need_s = (shank_r + clearance).max(1e-3);
+    let mut z = (g.tool.neck_top() + taper).max(flute_end);
+    while z <= g.tool.neck_top() + 20.0 {
+        if ix.min_dist_signed(tip + axis * z, need_s) < need_s {
+            return true;
+        }
+        z += step;
+    }
+    false
+}
+
+/// 整根刀（刃 + 颈/柄）的单一位姿碰撞检查。逐点接受闸门用；
+/// 段扫掠（`sweep_ok`）按转角分层调用上面两个分段版。
+fn shank_hits_axis(ix: &crate::MeshIndex, tip: DVec3, axis: DVec3, g: &Geo) -> bool {
+    ball_flute_hits(ix, tip, axis, g) || neck_shank_hits(ix, tip, axis, g)
+}
+
+/// 【诊断】单个刀位姿下，整根刀各高度的净距报告。
+///
+/// 返回 `(z, radius_at(z), min_dist_signed − need)`——裕量 < 0 的层会判碰撞。
+/// 采样网格与 `shank_hits_axis` 完全一致，只是**不短路、摊开读数**，
+/// 用于对拍 CAM 闸门口径与仿真扫掠口径（`sd_tool`/`sd_sweep`）：
+/// 若仿真报告侵入而这里全部为正，分歧出在刀形（profile vs `radius_at`）
+/// 或网格（MeshIndex 的桶/reach），一眼就能定位。
+pub fn axis_clearance_report(
+    mesh: &[crate::Tri],
+    stock: crate::Stock,
+    tip: DVec3,
+    axis: DVec3,
+    tool: &ToolSpec,
+    tol: f64,
+    clear: f64,
+) -> Vec<(f64, f64, f64)> {
+    let ix = crate::MeshIndex::build(mesh, stock);
+    let g = Geo::of(tool, tol, clear);
+    let r = g.r;
+    let flute_end = g.flute;
+    let step = (r * 0.8).clamp(0.5, 2.0);
+    let mut out = Vec::new();
+    let need_f = (r - tol).max(1e-6);
+    let mut z = r;
+    while z < flute_end {
+        let d = ix.min_dist_signed(tip + axis * z, need_f) - need_f;
+        out.push((z, r, d));
+        z += step;
+    }
+    let taper = tool.taper_len();
+    let mut z = flute_end;
+    while z < tool.neck_top() + taper {
+        let rr = tool.radius_at(z);
+        let need = (rr + clear).max(1e-3);
+        let d = ix.min_dist_signed(tip + axis * z, need) - need;
+        out.push((z, rr, d));
+        z += 0.3;
+    }
+    let shank_r = tool.shank_radius().max(r);
+    let need_s = (shank_r + clear).max(1e-3);
+    let mut z = (tool.neck_top() + taper).max(flute_end);
+    while z <= tool.neck_top() + 20.0 {
+        let d = ix.min_dist_signed(tip + axis * z, need_s) - need_s;
+        out.push((z, shank_r, d));
+        z += step;
+    }
+    out
+}
+
+/// 一串闸门共用的几何常量（刀半径、容差、刃长、**整根刀**）。
 ///
 /// 打成一包只是因为它们出双入对——判据本身各是各的，注释在各函数上。
-#[derive(Clone, Copy)]
+/// `tool` 是 §56 的教训：段扫掠只查刃部时，避空颈/柄在大转角段里横扫过
+/// 叶片棱（叶轮 T53 的 399 点、啃 0.398 mm，"只球头 sd=+14" 证明啃的
+/// 是刃部以外）——半径/颈长/柄径都必须从**出码用的同一把刀**取。
+#[derive(Clone)]
 struct Geo {
     r: f64,
     tol: f64,
     flute: f64,
+    tool: ToolSpec,
+    /// 颈/柄的避空间隙（`SurfaceOpts.shank_clearance_mm`）。
+    clear: f64,
+}
+
+impl Geo {
+    /// 从刀具与两个容差打包：`tol` = 过切容差（球/刃），`clear` = 颈/柄间隙。
+    fn of(tool: &ToolSpec, tol: f64, clear: f64) -> Self {
+        let r = tool.radius();
+        Self {
+            r,
+            tol,
+            flute: tool.flute_mm.max(r),
+            tool: tool.clone(),
+            clear,
+        }
+    }
 }
 
 /// 球刀从 `a`（姿态 `na`）扫到 `b`（姿态 `nb`）时，**会不会啃到设计面**。
@@ -590,22 +722,32 @@ struct Geo {
 ///   躺在曲面旁边的：球在 `p` 相切，圆柱却顺着法向伸出去。两个相邻点的法向差
 ///   几十度时，这根圆柱在块与块之间扫出一个扇面，能把旁边的面啃掉 `R` 量级
 ///   （实测 0.67 mm < R 0.75）。3 轴 drop-cutter 里不存在这个问题，因为刀轴恒定。
-fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: Geo) -> bool {
-    let Geo { r, tol, flute } = g;
-    let need = (r - tol).max(1e-6);
+fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: &Geo) -> bool {
     // 刃部圆柱沿轴**密采样**（步长 ≤ 0.5R）。
     //
     // 早先在 1/4/8/12/16 mm 五个高度上查，漏了 0.49 mm：设计面点在 z=6，
     // 而采样在 4 和 8——两个采样点离它 2 mm，读数 2 mm ≫ R，判"安全"，
     // 可那个点在 z=6 处离轴只有 0.01 mm。**圆柱的判据必须沿轴连续**，
     // 不能靠稀疏的"高度"抽样。
-    let step = (0.8 * r).clamp(0.25, 1.0);
+    //
     // **位姿数随转角加密**：刀轴在段内 slerp，转角大时刀杆（长 `flute`）
     // 横向摆动 = flute·sin(θ/2·2)——固定 2 个刀杆采样位姿会漏掉中间的摆动
-    // （实测叶轮 T53 段内转 33°，刀杆扫过叶片 0.40 mm）。每 ~6° 一个位姿，
-    // 至少 4 个（与旧口径一致）、至多 16 个（只有跨棱的段才会到）。
+    // （实测叶轮 T53 段内转 33~55°，刀杆扫过叶片 0.40 mm）。
+    //
+    // 步长取 **2°** 是被"薄叶片"卡出来的口径：位姿之间的弦长 = z·Δθ，
+    // 要保证**必有一个位姿落在叶片内部**（signed 闸门才拦得住），弦长必须
+    // 小于叶片厚度——叶轮叶片 ~0.8 mm、刃顶 z≈16 mm → Δθ < 0.8/16 rad ≈ 2.9°，
+    // 取 2°（弦 0.56 mm）留 40% 余量。4° 时弦 1.1 mm 可以**一步跨过** 0.8 mm
+    // 的叶片——位姿两侧都在空气里、signed 全部读正。跨棱的段（~55°）要
+    // 29 个位姿，只有它们付这个成本。
     let theta = na.dot(nb).clamp(-1.0, 1.0).acos();
-    let n_t = (((theta / 0.105).ceil() as usize) + 1).clamp(4, 16);
+    let n_t = (((theta / 0.035).ceil() as usize) + 1).clamp(4, 40);
+    // 颈/柄的分层阈值：θ ≥ 10° 的段（大转角、颈/柄横扫风险——§56 的教训段
+    // 都是 33~55°）**全位姿查**；小转角段只查**中点一次**。依据：段两端点的
+    // 逐点接受闸门已保证端位姿干净，小转角（θ<10°）+ 短段（≤ link 0.8 mm）
+    // 的中间读数近似端点插值，单谷情形中点位姿就能兜住。
+    const TH_NECK: f64 = 10.0f64.to_radians();
+    let full_neck = theta >= TH_NECK;
     for k in 0..n_t {
         let t = (k + 1) as f64 / (n_t as f64 + 1.0);
         // **刀轴按 slerp 插值**（与 `Pose::lerp_slerp` 同口径），球心再按
@@ -613,15 +755,40 @@ fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: 
         // lerp 出来的球心比真实位置短 `R(1−cos30°)`。
         let ax = slerp_axis(na, nb, t);
         let tip = a + (b - a) * t;
-        if ix.min_dist(tip + ax * r, need) < need {
+        // **整根刀**都查（球心 + 刃 + 等径避空颈 + 30° 锥 + Ø6 柄）——§56 的
+        // 教训：只查到刃长时，避空颈锥面在 33° 转角段里横扫叶片棱、啃
+        // 0.398 mm（叶轮 T53 的 399 点；"只球头 sd=+14" 证明啃的是刃部以外）。
+        // 逐点闸门（接受目标点时）只保证**位姿处**干净，段中间的颈/柄扫掠
+        // 只有这里管。
+        if ball_flute_hits(ix, tip, ax, g) {
             return false;
         }
-        let mut z = r + step;
-        while z <= flute {
-            if ix.min_dist(tip + ax * z, need) < need {
+        if full_neck || k * 2 + 1 == n_t {
+            if neck_shank_hits(ix, tip, ax, g) {
                 return false;
             }
-            z += step;
+        }
+    }
+    true
+}
+
+/// 串链候选的**快速预检**：只查球心 + 刃部两个位姿的四个点。
+///
+/// 串链每个候选都要过一遍扫掠闸门，而被拒的候选（球面塞不下/刃部撞）多数
+/// 在这些便宜点上就能否掉——通过的才付整根刀 + 全部位姿的完整检查
+/// （`sweep_ok`，每位姿 ~117 个采样点）。省的是"反正要拒"的候选的全价。
+fn sweep_ok_quick(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: &Geo) -> bool {
+    let need = (g.r - g.tol).max(1e-6);
+    for t in [1.0 / 3.0, 2.0 / 3.0] {
+        let ax = slerp_axis(na, nb, t);
+        let tip = a + (b - a) * t;
+        if ix.min_dist_signed(tip + ax * g.r, need) < need {
+            return false;
+        }
+        for z in [(2.0 * g.r).min(g.flute), g.flute] {
+            if ix.min_dist_signed(tip + ax * z, need) < need {
+                return false;
+            }
         }
     }
     true
@@ -715,7 +882,8 @@ fn concavity(pts: &[DVec3], nrm: &[DVec3], cell: f64, r: f64) -> Vec<f64> {
     let h2 = c * c;
     // 太近的邻居（重合点 / 共边重复采样）`w→0`，比值会被放大成一个假尖角
     let near2 = (0.15 * c) * (0.15 * c);
-    for i in 0..n {
+    // per-i 完全独立（buckets 只读）→ 并行。叶轮 ~19 万点 × 27 邻域桶。
+    out.par_iter_mut().enumerate().for_each(|(i, o)| {
         let (ni, pi) = (nrm[i], pts[i]);
         let (ci, cj, ck) = idx(pi);
         let mut best: f64 = 0.0;
@@ -753,8 +921,8 @@ fn concavity(pts: &[DVec3], nrm: &[DVec3], cell: f64, r: f64) -> Vec<f64> {
             }
         }
         // 乘 R：无量纲的"凹到几分之一个刀球"
-        out[i] = (best * r).clamp(0.0, 1.0);
-    }
+        *o = (best * r).clamp(0.0, 1.0);
+    });
     out
 }
 
@@ -916,7 +1084,7 @@ fn chain(
     nrm: &[DVec3],
     link: f64,
     ix: &crate::MeshIndex,
-    g: Geo,
+    g: &Geo,
     flow: Option<&[DVec3]>,
 ) -> Vec<Vec<usize>> {
     let n = pts.len();
@@ -1021,7 +1189,10 @@ fn chain(
             cand.sort_by(|a, b| a.0.total_cmp(&b.0));
             let next = cand
                 .iter()
-                .find(|(_, c)| sweep_ok(ix, pts[cur], nrm[cur], pts[*c], nrm[*c], g))
+                .find(|(_, c)| {
+                    sweep_ok_quick(ix, pts[cur], nrm[cur], pts[*c], nrm[*c], g)
+                        && sweep_ok(ix, pts[cur], nrm[cur], pts[*c], nrm[*c], g)
+                })
                 .map(|(_, c)| *c);
             match next {
                 Some(c) => {
@@ -1046,9 +1217,7 @@ fn chain(
 /// 这一段是 5 轴联动快移（`G0` 带 A/C），仿真里不计切削，所以过切表上看不见它；
 /// 但实机会真的撞上去。这里按 1 mm 步距扫一遍刀尖轨迹 + 刃部圆柱，只用于**计数
 /// 报警**，不改刀路。
-fn link_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: Geo) -> bool {
-    let Geo { r, tol, flute } = g;
-    let need = (r - tol).max(1e-6);
+fn link_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: &Geo) -> bool {
     let len = (b - a).length();
     // 步距 0.5 mm 且至少 2 段：1 mm 的链按 1 mm 步距只会取到两个端点，
     // 中间那堵墙正好从采样缝里漏过去（测试里抓到的）。
@@ -1057,13 +1226,13 @@ fn link_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: G
         let t = k as f64 / n as f64;
         let ax = slerp_axis(na, nb, t);
         let tip = a + (b - a) * t;
-        if ix.min_dist(tip + ax * r, need) < need {
+        // 整根刀（同 `sweep_ok`）——快移虽然不切削，擦到工件照样是事故。
+        // 颈/柄只查中点：link 只用于计数报警，不值得每位姿付 ~50 查询。
+        if ball_flute_hits(ix, tip, ax, g) {
             return false;
         }
-        for h in [(2.0 * r).min(flute), 0.5 * flute] {
-            if ix.min_dist(tip + ax * h, need) < need {
-                return false;
-            }
+        if k * 2 == n && neck_shank_hits(ix, tip, ax, g) {
+            return false;
         }
     }
     true
@@ -1081,7 +1250,7 @@ fn min_link_lift(
     na: DVec3,
     b: DVec3,
     nb: DVec3,
-    g: Geo,
+    g: &Geo,
     max_lift: f64,
 ) -> f64 {
     let mut d = 3.0f64.min(max_lift);
@@ -1104,7 +1273,7 @@ fn order_runs(
     tips: &[DVec3],
     axs: &[DVec3],
     ix: &crate::MeshIndex,
-    g: Geo,
+    g: &Geo,
     lift: f64,
 ) -> Vec<Vec<usize>> {
     let n = runs.len();
@@ -1187,7 +1356,7 @@ fn decimate(
     nrm: &[DVec3],
     step: f64,
     ix: &crate::MeshIndex,
-    g: Geo,
+    g: &Geo,
 ) -> Vec<usize> {
     if run.len() <= 2 || step <= 0.0 {
         return run.to_vec();
@@ -1365,10 +1534,11 @@ mod tests {
     fn downward_normals_are_tilted_into_the_a_stroke() {
         // 一小片天花板，目标点取在它下面（法向朝下）
         let p = DVec3::new(0.05, 0.05, 5.0);
+        // 绕序外向（法向 −Z）：signed 距离按外法向定符号，材质隐含在天花板上方
         let mesh = vec![[
             DVec3::new(0.0, 0.0, 5.0),
-            DVec3::new(0.1, 0.0, 5.0),
             DVec3::new(0.0, 0.1, 5.0),
+            DVec3::new(0.1, 0.0, 5.0),
         ]];
         let targets = vec![(p, DVec3::new(0.0, 0.0, -1.0))];
         let o = SurfaceOpts::new(ToolSpec::ball(0, 1.0, 10.0), 7, stock());
@@ -1431,8 +1601,8 @@ mod tests {
         let nrm = vec![DVec3::Z; pts.len()];
         // 空网格 → `min_dist` 恒为 ∞ → 扫掠闸门全放行（这里只测拓扑）
         let ix = crate::MeshIndex::build(&[], stock());
-        let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
-        let runs = chain(&pts, &nrm, 1.5, &ix, g, None);
+        let g = Geo::of(&ToolSpec::ball(0, 1.0, 10.0), 0.03, 0.3);
+        let runs = chain(&pts, &nrm, 1.5, &ix, &g, None);
         assert_eq!(runs.len(), 1, "3×3 点阵在 link=1.5 下应连成一条：{runs:?}");
         assert_eq!(runs[0].len(), 9);
         let mut seen = runs[0].clone();
@@ -1465,8 +1635,8 @@ mod tests {
         ];
         let nrm = vec![DVec3::new(-1.0, 0.0, 0.0), DVec3::new(1.0, 0.0, 0.0)];
         let ix = crate::MeshIndex::build(&wall, stock());
-        let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
-        let runs = chain(&pts, &nrm, 1.5, &ix, g, None);
+        let g = Geo::of(&ToolSpec::ball(0, 1.0, 10.0), 0.03, 0.3);
+        let runs = chain(&pts, &nrm, 1.5, &ix, &g, None);
         assert_eq!(runs.len(), 2, "隔墙的两点必须分成两条链：{runs:?}");
     }
 
@@ -1551,8 +1721,8 @@ mod tests {
         let runs = vec![vec![0, 1, 2], vec![3, 4], vec![5, 6]];
         let axs = vec![DVec3::Z; tips.len()];
         let ix = crate::MeshIndex::build(&[], stock());
-        let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
-        let out = order_runs(runs, &tips, &axs, &ix, g, 12.0);
+        let g = Geo::of(&ToolSpec::ball(0, 1.0, 10.0), 0.03, 0.3);
+        let out = order_runs(runs, &tips, &axs, &ix, &g, 12.0);
         assert_eq!(out.len(), 3);
         // 从 z 最高的一条开始 → 链 A（z=0/1/2 里最高 2）……
         // 但更关键的是：A 之后必须接离它最近的 C（x=10，可反向），最后 B
@@ -1577,18 +1747,98 @@ mod tests {
             ],
         ];
         let ix = crate::MeshIndex::build(&wall, stock());
-        let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
+        let g = Geo::of(&ToolSpec::ball(0, 1.0, 10.0), 0.03, 0.3);
         let a = DVec3::new(0.0, 0.0, 0.0);
         let same = DVec3::new(0.0, 0.0, 2.0);
         let across = DVec3::new(1.0, 0.0, 0.0);
-        assert!(link_ok(&ix, a, DVec3::Z, same, DVec3::Z, g), "同侧该放行");
+        assert!(link_ok(&ix, a, DVec3::Z, same, DVec3::Z, &g), "同侧该放行");
         assert!(
-            !link_ok(&ix, a, DVec3::Z, across, DVec3::Z, g),
+            !link_ok(&ix, a, DVec3::Z, across, DVec3::Z, &g),
             "跨墙该判擦料"
         );
     }
 
     /// `min_link_lift`：平地上一小段转移只需要**最小退刀量**，不是固定 18 mm。
+    /// §55 余党的几何复刻：刃部圆柱**埋进材质 0.5 mm**——无符号距离 0.5 ≥
+    /// R − 0.03 = 0.37 判"安全"（实测叶轮 T53 的 407 点就是这么漏的），
+    /// signed 读 −0.5 必须拦下。
+    #[test]
+    fn sweep_gate_catches_a_cylinder_buried_in_a_wall() {
+        // 地板 z=2（法向 +Z）+ 一堵 x∈[3,4]、z∈[4,10] 的墙（侧面外向缠绕）
+        let mut mesh: Vec<[DVec3; 3]> = Vec::new();
+        mesh.push([
+            DVec3::new(0.0, 0.0, 2.0),
+            DVec3::new(20.0, 0.0, 2.0),
+            DVec3::new(20.0, 20.0, 2.0),
+        ]);
+        mesh.push([
+            DVec3::new(0.0, 0.0, 2.0),
+            DVec3::new(20.0, 20.0, 2.0),
+            DVec3::new(0.0, 20.0, 2.0),
+        ]);
+        // 墙 x=3 面（法向 −X）
+        mesh.push([
+            DVec3::new(3.0, 0.0, 4.0),
+            DVec3::new(3.0, 0.0, 10.0),
+            DVec3::new(3.0, 20.0, 10.0),
+        ]);
+        mesh.push([
+            DVec3::new(3.0, 0.0, 4.0),
+            DVec3::new(3.0, 20.0, 10.0),
+            DVec3::new(3.0, 20.0, 4.0),
+        ]);
+        // 墙 x=4 面（法向 +X）
+        mesh.push([
+            DVec3::new(4.0, 0.0, 4.0),
+            DVec3::new(4.0, 20.0, 10.0),
+            DVec3::new(4.0, 0.0, 10.0),
+        ]);
+        mesh.push([
+            DVec3::new(4.0, 0.0, 4.0),
+            DVec3::new(4.0, 20.0, 4.0),
+            DVec3::new(4.0, 20.0, 10.0),
+        ]);
+        // 墙顶 z=10（法向 +Z）
+        mesh.push([
+            DVec3::new(3.0, 0.0, 10.0),
+            DVec3::new(4.0, 0.0, 10.0),
+            DVec3::new(4.0, 20.0, 10.0),
+        ]);
+        mesh.push([
+            DVec3::new(3.0, 0.0, 10.0),
+            DVec3::new(4.0, 20.0, 10.0),
+            DVec3::new(3.0, 20.0, 10.0),
+        ]);
+        let st = Stock {
+            min: DVec3::new(-1.0, -1.0, 0.0),
+            max: DVec3::new(21.0, 21.0, 12.0),
+        };
+        let ix = crate::MeshIndex::build(&mesh, st);
+
+        // 刀尖 (3.5,10,3)、轴 +Z：球心 z=3.4 在地板上方（干净），
+        // 刃部圆柱在 z=6 处位于墙内（材质内 0.5 mm）。
+        let a = DVec3::new(3.5, 10.0, 3.0);
+        let b = DVec3::new(3.5, 10.2, 3.0);
+        let z = DVec3::Z;
+        let g = Geo::of(&ToolSpec::ball(0, 0.8, 25.0), 0.03, 0.3);
+        // 无符号口径会放行（0.5 ≥ 0.37），signed 必须拒
+        assert!(
+            ix.min_dist_signed(DVec3::new(3.5, 10.0, 6.0), 0.37) + 0.5 < 1e-9,
+            "墙内点必须读负值"
+        );
+        assert!(
+            !sweep_ok(&ix, a, z, b, z, &g),
+            "埋进墙里的刃部圆柱必须被拦下"
+        );
+        // 同样的位姿放到开放空气里（x=10，离墙 6 mm）不该误报
+        let a2 = DVec3::new(10.0, 10.0, 3.0);
+        let b2 = DVec3::new(10.0, 10.2, 3.0);
+        assert!(
+            sweep_ok(&ix, a2, z, b2, z, &g),
+            "开放空气不该误报"
+        );
+    }
+
     #[test]
     fn min_link_lift_is_small_over_flat_ground() {
         let mesh = vec![
@@ -1608,18 +1858,14 @@ mod tests {
             max: DVec3::new(50.0, 50.0, 1.0),
         };
         let ix = crate::MeshIndex::build(&mesh, st);
-        let g = Geo {
-            r: 0.4,
-            tol: 0.03,
-            flute: 16.0,
-        };
+        let g = Geo::of(&ToolSpec::ball(0, 0.8, 16.0), 0.03, 0.3);
         let a = DVec3::new(-10.0, 0.0, 0.0);
         let b = DVec3::new(10.0, 0.0, 0.0);
-        let d = min_link_lift(&ix, a, DVec3::Z, b, DVec3::Z, g, 18.0);
+        let d = min_link_lift(&ix, a, DVec3::Z, b, DVec3::Z, &g, 18.0);
         assert!(d < 6.0, "平地上只需小退刀量，实得 {d} mm");
         assert!(d >= 2.9, "不该退到 0（球会贴地），实得 {d}");
         let empty = crate::MeshIndex::build(&[], st);
-        let d0 = min_link_lift(&empty, a, DVec3::Z, b, DVec3::Z, g, 18.0);
+        let d0 = min_link_lift(&empty, a, DVec3::Z, b, DVec3::Z, &g, 18.0);
         assert!((d0 - 3.0).abs() < 1e-9, "无料时取下限 3 mm，实得 {d0}");
     }
 
@@ -1656,13 +1902,9 @@ mod tests {
             .collect();
         let nrm = vec![DVec3::Z; pts.len()];
         let ix = crate::MeshIndex::build(&[], stock());
-        let g = Geo {
-            r: 0.5,
-            tol: 0.03,
-            flute: 10.0,
-        };
+        let g = Geo::of(&ToolSpec::ball(0, 1.0, 10.0), 0.03, 0.3);
         let f = flow_field(&pts, &nrm, 2.0);
-        let runs = chain(&pts, &nrm, 1.5, &ix, g, Some(&f));
+        let runs = chain(&pts, &nrm, 1.5, &ix, &g, Some(&f));
         let mut seen: Vec<usize> = runs.iter().flatten().copied().collect();
         let total = seen.len();
         seen.sort_unstable();
@@ -1678,8 +1920,8 @@ mod tests {
         let nrm = vec![DVec3::Z; pts.len()];
         let ix = crate::MeshIndex::build(&[], stock());
         let run: Vec<usize> = (0..11).collect();
-        let g = Geo { r: 0.5, tol: 0.03, flute: 10.0 };
-        let k = decimate(&run, &pts, &nrm, 3.0, &ix, g);
+        let g = Geo::of(&ToolSpec::ball(0, 1.0, 10.0), 0.03, 0.3);
+        let k = decimate(&run, &pts, &nrm, 3.0, &ix, &g);
         assert_eq!(k.first(), Some(&0));
         assert_eq!(k.last(), Some(&10), "末点必须留：{k:?}");
         assert!(k.len() <= 6, "抽稀没生效：{k:?}");

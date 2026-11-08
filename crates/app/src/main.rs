@@ -1841,7 +1841,7 @@ fn run_cam_multi(
                 .unwrap_or(plan.program.gcode.len()),
         };
         plan.program.gcode.insert_str(at, &surf_frag);
-        if let Some(t) = surf_tool {
+        if let Some(t) = &surf_tool {
             plan.tools.push(t.to_tool_def());
         }
     }
@@ -2220,6 +2220,30 @@ M30
                         seg.to.tip.x, seg.to.tip.y, seg.to.tip.z,
                         seg.to.axis.x, seg.to.axis.y, seg.to.axis.z,
                     );
+                    // 【对照】CAM 闸门口径 vs 仿真刀形口径。同一位姿下：
+                    // * `sd_tool`（voxel）：设计面点在**仿真刀形**内的深度（负 = 侵入）；
+                    // * `axis_clearance_report`：CAM 整根刀各层的净距**裕量**（< 0 会拒）。
+                    // 若仿真侵入而 CAM 裕量全正，分歧就在刀形（profile vs radius_at）
+                    // 或网格（MeshIndex 桶/reach）——这是 T53 一直漏网的原因。
+                    if let Some(spec) = &surf_tool {
+                        let prof = &table.by_number(h.tool).unwrap().cutter;
+                        for (label, t) in [("from", 0.0), ("mid", 0.5), ("to", 1.0)] {
+                            let pose = seg.from.lerp_slerp(&seg.to, t);
+                            let sd_t = cncsim_voxel::sd_tool(pts[i], &pose, prof);
+                            let rep = cncsim_cam::surface::axis_clearance_report(
+                                tris, stock, pose.tip, pose.axis, spec, 0.03, 0.3,
+                            );
+                            let worst = rep
+                                .iter()
+                                .min_by(|a, b| a.2.total_cmp(&b.2))
+                                .copied()
+                                .unwrap_or((0.0, 0.0, f64::INFINITY));
+                            println!(
+                                "  【对照】{label}: sd_tool={sd_t:+.3} / CAM 最差裕量 {:+.3} (z={:.1}, r={:.2})",
+                                worst.2, worst.0, worst.1
+                            );
+                        }
+                    }
                 }
             }
             println!(

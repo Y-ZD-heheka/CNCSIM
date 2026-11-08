@@ -2307,6 +2307,7 @@ dependencies = [
  "cncsim-sim",
  "cncsim-tool",
  "cncsim-voxel",
+ "rayon",
 ]
 
 [[package]]

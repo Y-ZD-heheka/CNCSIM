@@ -753,6 +753,9 @@ pub(crate) struct MeshIndex {
     ny: usize,
     buckets: Vec<Vec<u32>>,
     tris: Vec<Tri>,
+    /// 网格是否封闭（每条边恰被两个三角形共享）。封闭网格的 signed 距离用
+    /// 射线奇偶定符号（鲁棒）；开网格退回"最近三角形法向"（面片角落有误判风险）。
+    watertight: bool,
 }
 
 impl MeshIndex {
@@ -780,6 +783,33 @@ impl MeshIndex {
                 }
             }
         }
+        // 封闭性：顶点量化到 1e-3 mm 后数边，封闭网格每条边恰好出现两次。
+        // 排序配对（而非 HashMap）——叶轮 ~50 万三角形，省内存也省分配。
+        let mut watertight = !mesh.is_empty();
+        let vk = |v: DVec3| -> u64 {
+            let q = |a: f64| {
+                (((a * 1e3).round() as i64) + (1i64 << 20)).clamp(0, (1i64 << 21) - 1) as u64
+            };
+            (q(v.x) << 42) | (q(v.y) << 21) | q(v.z)
+        };
+        let mut edges: Vec<(u64, u64)> = Vec::with_capacity(mesh.len() * 3);
+        for t in mesh {
+            let k = [vk(t[0]), vk(t[1]), vk(t[2])];
+            for e in 0..3 {
+                let (a, b) = (k[e], k[(e + 1) % 3]);
+                if a == b {
+                    watertight = false; // 退化边
+                } else if a < b {
+                    edges.push((a, b));
+                } else {
+                    edges.push((b, a));
+                }
+            }
+        }
+        edges.sort_unstable();
+        if edges.len() % 2 != 0 || edges.chunks_exact(2).any(|c| c[0] != c[1]) {
+            watertight = false;
+        }
         Self {
             cell,
             lo: stock.min,
@@ -787,6 +817,7 @@ impl MeshIndex {
             ny,
             buckets,
             tris: mesh.to_vec(),
+            watertight,
         }
     }
 
@@ -813,10 +844,105 @@ impl MeshIndex {
         }
         best.sqrt()
     }
+
+    /// 到 `reach` 范围内最近三角形的**带符号**距离：正 = 材质外（空气侧），
+    /// 负 = 材质内；附近没有三角形 → `∞`。
+    ///
+    /// 无符号距离有个致命盲区（§55"悬崖"的余党）：刀面**埋进材质 0.39 mm** 时，
+    /// 无符号读数就是 0.39——比刃部闸门的 `R − 0.03 = 0.37` 还大，判"安全"；
+    /// signed 读到 −0.39，一击命中。材质内"离表面越远读数越大"，与安全性
+    /// 的关系是反的，只有 signed 能表达。所有碰撞/过切闸门都应使用本函数。
+    ///
+    /// 符号的确定：
+    /// * **封闭网格**（CAD 实体，绝大多数输入）：射线奇偶——从查询点竖直向下
+    ///   打一根射线，穿越次数为奇 = 在实体内。对整格鲁棒，不受面片边界角落影响。
+    /// * **开网格**（实测叶轮 STL 不封闭：154870 三角形 / 76 条非流形边）：
+    ///   最近三角形的外法向与 `(p − 最近点)` 的点积，**但只在最近点落在三角形
+    ///   内部时才判负**（interior-guard）。最近点在边/角上时 `p − q` 会翻过
+    ///   面片边界、点积翻转符号——叶轮第一版实测残料 1.8% → 6.6%（合格
+    ///   98.1% → 93.4%），全是叶根缝隙角落的假阳性；guard 后放行。
+    pub(crate) fn min_dist_signed(&self, p: DVec3, reach: f64) -> f64 {
+        let i0 = (((p.x - reach - self.lo.x) / self.cell).floor() as i64)
+            .clamp(0, self.nx as i64 - 1) as usize;
+        let i1 = (((p.x + reach - self.lo.x) / self.cell).floor() as i64)
+            .clamp(0, self.nx as i64 - 1) as usize;
+        let j0 = (((p.y - reach - self.lo.y) / self.cell).floor() as i64)
+            .clamp(0, self.ny as i64 - 1) as usize;
+        let j1 = (((p.y + reach - self.lo.y) / self.cell).floor() as i64)
+            .clamp(0, self.ny as i64 - 1) as usize;
+        let (mut best, mut best_ti) = (f64::INFINITY, usize::MAX);
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                for &ti in &self.buckets[j * self.nx + i] {
+                    let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
+                    if d2 < best {
+                        best = d2;
+                        best_ti = ti as usize;
+                    }
+                }
+            }
+        }
+        if !best.is_finite() {
+            return best;
+        }
+        // 符号判定（性能关键路径：每次闸门查询都走这里）——分两级：
+        //
+        // * **快路径**：最近点落在三角形**内部**、且外法向**朝向**查询点
+        //   （`(p − q)·n > 0`）→ 刀在空气里，直接放行。闸门查询绝大多数
+        //   落在这里，射线奇偶（桶内全部三角形相交测试）一次都不用跑。
+        // * **其余情形交给裁决**：
+        //   - 封闭网格：射线奇偶是实体内外的**权威**——最近点在边/角上时
+        //     法向不可信（立方体测试里"正对剖分对角线的材质内点"就是
+        //     interior=false，法向口径会误放行），负候选更要复核（薄壁/缝隙
+        //     处法向可能翻转）。只有它们付 parity 的钱。
+        //   - 开网格（无 parity 可用）：interior-guard——最近点在三角形
+        //     内部且 `(p − q)·n < 0` 才判负；边/角乐观放行。
+        let t = &self.tris[best_ti];
+        let (q, _, interior) = pt_tri_closest(p, t);
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        let valid = n.length_squared() > 1e-12;
+        let dot = if valid { (p - q).dot(n) } else { 0.0 };
+        let sign = if self.watertight {
+            if interior && dot > 0.0 {
+                1.0
+            } else if self.ray_inside(p) {
+                -1.0
+            } else {
+                1.0
+            }
+        } else if interior && valid && dot < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        sign * best.sqrt()
+    }
+
+    /// 射线奇偶判定 `p` 是否在封闭实体内。查询点微偏移，避免恰好打在边/顶点上。
+    fn ray_inside(&self, p: DVec3) -> bool {
+        let pp = DVec3::new(p.x + 2e-4, p.y - 3e-4, p.z);
+        let i = (((pp.x - self.lo.x) / self.cell).floor() as i64).clamp(0, self.nx as i64 - 1)
+            as usize;
+        let j = (((pp.y - self.lo.y) / self.cell).floor() as i64).clamp(0, self.ny as i64 - 1)
+            as usize;
+        let mut crossings = 0u32;
+        for &ti in &self.buckets[j * self.nx + i] {
+            if ray_down_hits(pp, &self.tris[ti as usize]) {
+                crossings += 1;
+            }
+        }
+        crossings % 2 == 1
+    }
 }
 
 /// 点到三角形的最近距离平方（Ericson《Real-Time Collision Detection》5.1.5）。
-fn pt_tri_dist2(p: DVec3, t: &Tri) -> f64 {
+/// 点到三角形的**最近点**与距离平方（Ericson《Real-Time Collision Detection》5.1.5）。
+///
+/// 第三个返回值 = 最近点是否落在三角形**内部**（相对边/顶点）。
+/// `min_dist_signed` 用它做 interior-guard：最近点在边上/角上时，`p − q` 与
+/// 法向的点积在缝隙/叶根角落会**翻转符号**（实测叶轮 STL 有 76 条非流形边，
+/// 回退符号在那里大量假阳性）——这种情形退回无符号语义（乐观放行）。
+fn pt_tri_closest(p: DVec3, t: &Tri) -> (DVec3, f64, bool) {
     let (a, b, c) = (t[0], t[1], t[2]);
     let ab = b - a;
     let ac = c - a;
@@ -824,39 +950,73 @@ fn pt_tri_dist2(p: DVec3, t: &Tri) -> f64 {
     let d1 = ab.dot(ap);
     let d2 = ac.dot(ap);
     if d1 <= 0.0 && d2 <= 0.0 {
-        return (p - a).length_squared();
+        return (a, (p - a).length_squared(), false);
     }
     let bp = p - b;
     let d3 = ab.dot(bp);
     let d4 = ac.dot(bp);
     if d3 >= 0.0 && d4 <= d3 {
-        return (p - b).length_squared();
+        return (b, (p - b).length_squared(), false);
     }
     let vc = d1 * d4 - d3 * d2;
     if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        let v = d1 / (d1 - d3);
-        return (p - (a + ab * v)).length_squared();
+        let q = a + ab * (d1 / (d1 - d3));
+        return (q, (p - q).length_squared(), false);
     }
     let cp = p - c;
     let d5 = ab.dot(cp);
     let d6 = ac.dot(cp);
     if d6 >= 0.0 && d5 <= d6 {
-        return (p - c).length_squared();
+        return (c, (p - c).length_squared(), false);
     }
     let vb = d5 * d2 - d1 * d6;
     if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        let w = d2 / (d2 - d6);
-        return (p - (a + ac * w)).length_squared();
+        let q = a + ac * (d2 / (d2 - d6));
+        return (q, (p - q).length_squared(), false);
     }
     let va = d3 * d6 - d5 * d4;
     if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
         let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return (p - (b + (c - b) * w)).length_squared();
+        let q = b + (c - b) * w;
+        return (q, (p - q).length_squared(), false);
     }
+    // 走到这里的一定是内部点（所有边界情形都被上面的分支捕获）
     let den = 1.0 / (va + vb + vc);
-    let v = vb * den;
-    let w = vc * den;
-    (p - (a + ab * v + ac * w)).length_squared()
+    let q = a + ab * (vb * den) + ac * (vc * den);
+    (q, (p - q).length_squared(), true)
+}
+
+/// 点到三角形的最近距离平方（`pt_tri_closest` 的距离侧包装）。
+fn pt_tri_dist2(p: DVec3, t: &Tri) -> f64 {
+    pt_tri_closest(p, t).1
+}
+
+/// 竖直向下（−Z）的射线与三角形相交（Möller–Trumbore）。
+///
+/// 封闭网格的"内外"判定用**射线奇偶**：奇数次穿越 = 在实体内。比"最近三角形
+/// 法向定符号"鲁棒——后者在面片边界角落会把**空气里的点**误判成材质内
+/// （最近点是面片边缘，`p − q` 与法向的点积翻转），叶轮叶根圆角正是这种角落。
+fn ray_down_hits(p: DVec3, t: &Tri) -> bool {
+    let d = DVec3::new(0.0, 0.0, -1.0);
+    let e1 = t[1] - t[0];
+    let e2 = t[2] - t[0];
+    let pv = d.cross(e2);
+    let det = e1.dot(pv);
+    if det.abs() < 1e-12 {
+        return false;
+    }
+    let inv = 1.0 / det;
+    let tv = p - t[0];
+    let u = tv.dot(pv) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let qv = tv.cross(e1);
+    let v = d.dot(qv) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    e2.dot(qv) * inv > 1e-9
 }
 
 /// 刀杆（刃长以上、刀尖以上整段）会不会碰到工件。
@@ -880,7 +1040,7 @@ pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance:
     while z < tool.neck_top() + taper {
         let rr = tool.radius_at(z);
         let need = rr + clearance;
-        if ix.min_dist(tip + DVec3::new(0.0, 0.0, z), need) < need {
+        if ix.min_dist_signed(tip + DVec3::new(0.0, 0.0, z), need) < need {
             return true;
         }
         z += 0.3;
@@ -889,7 +1049,7 @@ pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance:
     let mut z = (tool.neck_top() + taper).max(flute);
     while z <= len {
         let need = shank_r + clearance;
-        if ix.min_dist(tip + DVec3::new(0.0, 0.0, z), need) < need {
+        if ix.min_dist_signed(tip + DVec3::new(0.0, 0.0, z), need) < need {
             return true;
         }
         z += step;
@@ -908,7 +1068,9 @@ fn ball_hits(ix: &MeshIndex, tip: DVec3, r: f64, tol: f64) -> bool {
     if need <= 0.0 {
         return false;
     }
-    ix.min_dist(tip + DVec3::new(0.0, 0.0, r), need) < need
+    // **signed**：球心埋进材质时无符号读数 = 深度（可能 ≥ need → 漏判），
+    // signed 读负值必小于 need——§55 余党（叶轮 T4/T6 高度场精加工 78 点）。
+    ix.min_dist_signed(tip + DVec3::new(0.0, 0.0, r), need) < need
 }
 
 // ─────────────────────────── 高度场 ───────────────────────────
@@ -1776,16 +1938,17 @@ mod tests {
     /// 若实现拿柄径一刀切（z=21 处就 need 3.3 > 2.0），这里会误报。
     #[test]
     fn clearance_segment_uses_local_radius_not_the_shank() {
+        // 绕序外向（法向 −X）：signed 距离按外法向定符号，材质隐含在 +X 侧
         let wall = vec![
             [
                 DVec3::new(2.0, -10.0, 20.0),
-                DVec3::new(2.0, 10.0, 20.0),
+                DVec3::new(2.0, -10.0, 21.0),
                 DVec3::new(2.0, 10.0, 21.0),
             ],
             [
                 DVec3::new(2.0, -10.0, 20.0),
                 DVec3::new(2.0, 10.0, 21.0),
-                DVec3::new(2.0, -10.0, 21.0),
+                DVec3::new(2.0, 10.0, 20.0),
             ],
         ];
         let st = Stock {
@@ -1802,13 +1965,13 @@ mod tests {
         let tall = vec![
             [
                 DVec3::new(2.0, -10.0, 20.0),
-                DVec3::new(2.0, 10.0, 20.0),
+                DVec3::new(2.0, -10.0, 30.0),
                 DVec3::new(2.0, 10.0, 30.0),
             ],
             [
                 DVec3::new(2.0, -10.0, 20.0),
                 DVec3::new(2.0, 10.0, 30.0),
-                DVec3::new(2.0, -10.0, 30.0),
+                DVec3::new(2.0, 10.0, 20.0),
             ],
         ];
         let ix2 = MeshIndex::build(&tall, st);
@@ -2041,6 +2204,134 @@ mod tests {
             }
         }
         assert!(n > 10, "没扫到平底刀精加工点：{n}");
+    }
+
+    /// 开网格（单面片）：signed 距离回退到"最近三角形法向定符号"。
+    /// 无符号距离对上/下两侧读数相同——这正是 §55 盲区的根源。
+    #[test]
+    fn min_dist_signed_open_patch_tells_inside_from_outside() {
+        let mesh = vec![
+            [
+                DVec3::new(0.0, 0.0, 2.0),
+                DVec3::new(20.0, 0.0, 2.0),
+                DVec3::new(20.0, 20.0, 2.0),
+            ],
+            [
+                DVec3::new(0.0, 0.0, 2.0),
+                DVec3::new(20.0, 20.0, 2.0),
+                DVec3::new(0.0, 20.0, 2.0),
+            ],
+        ];
+        let st = Stock {
+            min: DVec3::new(-1.0, -1.0, 0.0),
+            max: DVec3::new(21.0, 21.0, 12.0),
+        };
+        let ix = MeshIndex::build(&mesh, st);
+        assert!(!ix.watertight, "单面片必须识别为开网格");
+        // (10, 5) 取在第一个三角形**内部**——(10,10) 恰好落在两三角形的共享
+        // 对角线上，interior-guard 会正确地拒绝给它负号（边上的最近点不可信）
+        let above = DVec3::new(10.0, 5.0, 2.5);
+        let below = DVec3::new(10.0, 5.0, 1.5);
+        assert!((ix.min_dist(above, 2.0) - 0.5).abs() < 1e-9);
+        assert!(
+            (ix.min_dist(below, 2.0) - 0.5).abs() < 1e-9,
+            "无符号距离分不出上下（盲区本身）"
+        );
+        assert!((ix.min_dist_signed(above, 2.0) - 0.5).abs() < 1e-9);
+        assert!(
+            (ix.min_dist_signed(below, 2.0) + 0.5).abs() < 1e-9,
+            "材质内必须读负值：{}",
+            ix.min_dist_signed(below, 2.0)
+        );
+    }
+
+    /// 封闭网格（立方体）：射线奇偶定符号。材质内读负、材质外读正。
+    #[test]
+    fn min_dist_signed_closed_box_uses_ray_parity() {
+        // 0..10 的立方体，外向缠绕
+        let (a, b) = (DVec3::ZERO, DVec3::new(10.0, 10.0, 10.0));
+        let mut mesh = Vec::new();
+        let quad = |p0, p1, p2, p3, mesh: &mut Vec<Tri>| {
+            // 绕序取外向：cross(p1−p0, p2−p0) 指向实体外
+            mesh.push([p0, p2, p1]);
+            mesh.push([p0, p3, p2]);
+        };
+        // z=0（法向 −Z）：绕序使 cross 指向 −Z
+        quad(
+            DVec3::new(a.x, a.y, a.z),
+            DVec3::new(b.x, a.y, a.z),
+            DVec3::new(b.x, b.y, a.z),
+            DVec3::new(a.x, b.y, a.z),
+            &mut mesh,
+        );
+        // z=10（法向 +Z）
+        quad(
+            DVec3::new(a.x, a.y, b.z),
+            DVec3::new(a.x, b.y, b.z),
+            DVec3::new(b.x, b.y, b.z),
+            DVec3::new(b.x, a.y, b.z),
+            &mut mesh,
+        );
+        // x=0（法向 −X）
+        quad(
+            DVec3::new(a.x, a.y, a.z),
+            DVec3::new(a.x, b.y, a.z),
+            DVec3::new(a.x, b.y, b.z),
+            DVec3::new(a.x, a.y, b.z),
+            &mut mesh,
+        );
+        // x=10（法向 +X）
+        quad(
+            DVec3::new(b.x, a.y, a.z),
+            DVec3::new(b.x, a.y, b.z),
+            DVec3::new(b.x, b.y, b.z),
+            DVec3::new(b.x, b.y, a.z),
+            &mut mesh,
+        );
+        // y=0（法向 −Y）
+        quad(
+            DVec3::new(a.x, a.y, a.z),
+            DVec3::new(a.x, a.y, b.z),
+            DVec3::new(b.x, a.y, b.z),
+            DVec3::new(b.x, a.y, a.z),
+            &mut mesh,
+        );
+        // y=10（法向 +Y）
+        quad(
+            DVec3::new(a.x, b.y, a.z),
+            DVec3::new(b.x, b.y, a.z),
+            DVec3::new(b.x, b.y, b.z),
+            DVec3::new(a.x, b.y, b.z),
+            &mut mesh,
+        );
+        // 每个面的绕序都要外向：逐面抽查法向
+        for t in &mesh {
+            let n = (t[1] - t[0]).cross(t[2] - t[0]);
+            let ctr = (t[0] + t[1] + t[2]) / 3.0;
+            let out = ctr - DVec3::new(5.0, 5.0, 5.0);
+            assert!(
+                n.dot(out) > 0.0,
+                "立方体面法向必须外向：n={n:?} ctr={ctr:?}"
+            );
+        }
+        let st = Stock {
+            min: DVec3::new(-1.0, -1.0, -1.0),
+            max: DVec3::new(11.0, 11.0, 11.0),
+        };
+        let ix = MeshIndex::build(&mesh, st);
+        assert!(ix.watertight, "立方体必须识别为封闭网格");
+        let inside = DVec3::new(5.0, 5.0, 5.0);
+        let outside = DVec3::new(5.0, 5.0, 10.5);
+        assert!(
+            (ix.min_dist_signed(inside, 6.0) + 5.0).abs() < 1e-6,
+            "实体内读负值：{}",
+            ix.min_dist_signed(inside, 6.0)
+        );
+        assert!(
+            (ix.min_dist_signed(outside, 6.0) - 0.5).abs() < 1e-6,
+            "材质外读正值：{}",
+            ix.min_dist_signed(outside, 6.0)
+        );
     }
 
     #[test]

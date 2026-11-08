@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 cncsim-math.workspace = true
 cncsim-tool.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 # 端到端验收：生成 → 解释器 → 仿真 → 设计比对。
