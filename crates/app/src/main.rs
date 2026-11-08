@@ -2254,7 +2254,7 @@ M30
             {
                 // 真正啃这个点的段：在该刀的所有段里取 sd_sweep 最小者
                 let prof_full = &table.by_number(h.tool).unwrap().cutter;
-                let mut spec_ball_only = cncsim_cam::ToolSpec::ball(h.tool, 1.5, 0.75);
+                let spec_ball_only = cncsim_cam::ToolSpec::ball(h.tool, 1.5, 0.75);
                 let ball_only = spec_ball_only.to_tool_def().cutter;
                 let best = out.cut_segs
                     .iter()

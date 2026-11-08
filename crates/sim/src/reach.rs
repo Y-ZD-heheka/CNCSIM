@@ -234,10 +234,17 @@ pub fn visibility(
     out.normals.reserve(samples.len());
     out.facing.reserve(samples.len());
 
-    for (p, n, area) in samples {
-        let n = unit(*n);
+    // ── 逐点求可见性：**并行** ──
+    //
+    // 每个样本只读 `design`/`dirs`，自己算自己的掩码；输出按样本序号归位
+    // （`map_indexed` 保证顺序），面积也在同一顺序上累加——所以与串行**逐位
+    // 一致**。这是 `工序编排` 那一段（叶轮 4.9 s）的全部成本：158264 点 ×
+    // 25 个候选方向的球体追踪，原来一行 `par_iter` 都没有。
+    let one = |i: usize| -> Option<(DVec3, DVec3, f64, u64, u64)> {
+        let (p, n, area) = samples[i];
+        let n = unit(n);
         if n.length() < 0.5 {
-            continue; // 退化三角形
+            return None; // 退化三角形
         }
         let mut mask = 0u64;
         let mut facing = 0u64;
@@ -246,16 +253,33 @@ pub fn visibility(
                 continue;
             }
             facing |= 1u64 << k;
-            if clear_along(design, *p, *d, cfg, reach) {
+            if clear_along(design, p, *d, cfg, reach) {
                 mask |= 1u64 << k;
             }
         }
-        out.points.push(*p);
-        out.normals.push(n);
-        out.areas.push(*area);
-        out.masks.push(mask);
-        out.facing.push(facing);
-        out.total_area_mm2 += area;
+        Some((p, n, area, mask, facing))
+    };
+    let nthread = cncsim_voxel::par::worker_count();
+    let chunks = (samples.len() / 2000).clamp(1, nthread * 2).max(1);
+    let parts: Vec<Vec<Option<(DVec3, DVec3, f64, u64, u64)>>> = if chunks == 1 {
+        vec![(0..samples.len()).map(one).collect()]
+    } else {
+        let per = samples.len().div_ceil(chunks);
+        cncsim_voxel::par::map_indexed(chunks, |c| {
+            let a = (c * per).min(samples.len());
+            let b = ((c + 1) * per).min(samples.len());
+            (a..b).map(one).collect()
+        })
+    };
+    for part in parts {
+        for rec in part.into_iter().flatten() {
+            out.points.push(rec.0);
+            out.normals.push(rec.1);
+            out.areas.push(rec.2);
+            out.masks.push(rec.3);
+            out.facing.push(rec.4);
+            out.total_area_mm2 += rec.2;
+        }
     }
     out
 }
