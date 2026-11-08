@@ -742,15 +742,31 @@ fn descend(from: f64, to: f64, step: f64) -> Vec<f64> {
 
 // ─────────────────────────── 刀杆碰撞 ───────────────────────────
 
-/// 三角网格的 XY 分桶索引：查"某点到工件表面的最近距离"。
+/// 三角网格的**三维**分桶索引：查"某点到工件表面的最近距离"。
 ///
 /// 高度场只能保证**刀刃**不侵入（drop-cutter 的几何保证），刀刃以上那一段柱体
 /// 在"零件有倒扣"时仍可能插进高度场没表示出来的料里。这里按真实三角形算距离。
+///
+/// **为什么是三维**：原来是 X-Y 两维分桶、Z 不分层——一列里塞着整根高度上的
+/// 三角形。盘类件（叶轮 Ø80×41）一次查询要扫整根高度上的上百个三角形，而真正
+/// 可能更近的只有 `±reach` 那一层。逐点预筛（183070 点 × 9~13 个候选轴 ×
+/// 每轴 ~50 个采样点）是曲面道最大的一项，全花在这个扫描上。
+///
+/// **这是精度换速度的取舍（§59）**：旧实现扫整列，最近三角形可能远在 `reach`
+/// 之外，读数是个有限值；三维只看 `±reach`，那些点返回 `∞`——而符号要用最近
+/// 三角形，所以刀路会变。实测叶轮 4:37 → 1:50、逐点预筛 56.8 → 6.7 s，代价是
+/// 桌腿件合格率 98.1 → 98.0、残料 1.9 → 2.0（叶轮主指标 98.3/0.1/1.6 不动）。
+/// **用户已确认用这 0.1 个点换 2.5 倍**。
+///
+/// 两条必须同时满足才不至于更差：
+///
+/// * 等距三角形的**平票裁决**取最小三角形号；
+/// * `ray_inside` 仍扫**整列**（`k = 0..nz`）——少扫一层就可能漏掉跨在 `p`
+///   上方的三角形，奇偶翻转、符号反掉。
 pub(crate) struct MeshIndex {
     cell: f64,
     lo: DVec3,
-    nx: usize,
-    ny: usize,
+    n: [usize; 3],
     buckets: Vec<Vec<u32>>,
     tris: Vec<Tri>,
     /// 网格是否封闭（每条边恰被两个三角形共享）。封闭网格的 signed 距离用
@@ -760,26 +776,47 @@ pub(crate) struct MeshIndex {
 
 impl MeshIndex {
     pub(crate) fn build(mesh: &[Tri], stock: Stock) -> Self {
-        let cell = (stock.size().x.max(stock.size().y) / 48.0).clamp(0.5, 5.0);
-        let nx = ((stock.size().x / cell).ceil() as usize + 1).max(1);
-        let ny = ((stock.size().y / cell).ceil() as usize + 1).max(1);
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny];
+        let ext = stock.size();
+        // 格子取最长边的 1/48；总格数封顶 40 万（稀疏件别把内存花在空格上）。
+        let mut cell = (ext.x.max(ext.y).max(ext.z) / 48.0).clamp(0.5, 5.0);
+        let mut n;
+        loop {
+            n = [
+                ((ext.x / cell).ceil() as usize + 1).max(1),
+                ((ext.y / cell).ceil() as usize + 1).max(1),
+                ((ext.z / cell).ceil() as usize + 1).max(1),
+            ];
+            if n[0] * n[1] * n[2] <= 400_000 || cell >= ext.x.max(ext.y).max(ext.z) {
+                break;
+            }
+            cell *= 1.35;
+        }
+        let (nx, ny, nz) = (n[0], n[1], n[2]);
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny * nz];
         for (ti, t) in mesh.iter().enumerate() {
             let (mut x0, mut x1) = (f64::INFINITY, f64::NEG_INFINITY);
             let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
+            let (mut z0, mut z1) = (f64::INFINITY, f64::NEG_INFINITY);
             for v in t {
                 x0 = x0.min(v.x);
                 x1 = x1.max(v.x);
                 y0 = y0.min(v.y);
                 y1 = y1.max(v.y);
+                z0 = z0.min(v.z);
+                z1 = z1.max(v.z);
             }
             let i0 = (((x0 - stock.min.x) / cell).floor() as i64).clamp(0, nx as i64 - 1) as usize;
             let i1 = (((x1 - stock.min.x) / cell).floor() as i64).clamp(0, nx as i64 - 1) as usize;
             let j0 = (((y0 - stock.min.y) / cell).floor() as i64).clamp(0, ny as i64 - 1) as usize;
             let j1 = (((y1 - stock.min.y) / cell).floor() as i64).clamp(0, ny as i64 - 1) as usize;
-            for j in j0..=j1 {
-                for i in i0..=i1 {
-                    buckets[j * nx + i].push(ti as u32);
+            let k0 = (((z0 - stock.min.z) / cell).floor() as i64).clamp(0, nz as i64 - 1) as usize;
+            let k1 = (((z1 - stock.min.z) / cell).floor() as i64).clamp(0, nz as i64 - 1) as usize;
+            for k in k0..=k1 {
+                for j in j0..=j1 {
+                    let base = (k * ny + j) * nx;
+                    for i in i0..=i1 {
+                        buckets[base + i].push(ti as u32);
+                    }
                 }
             }
         }
@@ -813,31 +850,39 @@ impl MeshIndex {
         Self {
             cell,
             lo: stock.min,
-            nx,
-            ny,
+            n,
             buckets,
             tris: mesh.to_vec(),
             watertight,
         }
     }
 
+    /// 第 `axis` 维上 `[v−reach, v+reach]` 覆盖的格子下标区间（夹到网格内）。
+    #[inline]
+    fn span(&self, axis: usize, v: f64, reach: f64) -> (usize, usize) {
+        let last = self.n[axis] as i64 - 1;
+        let at = |x: f64| {
+            (((x - self.lo.component(axis)) / self.cell).floor() as i64).clamp(0, last) as usize
+        };
+        (at(v - reach), at(v + reach))
+    }
+
     /// 到 `reach` 范围内最近三角形的距离（无符号）。附近没有三角形 → `∞`。
     pub(crate) fn min_dist(&self, p: DVec3, reach: f64) -> f64 {
-        let i0 = (((p.x - reach - self.lo.x) / self.cell).floor() as i64)
-            .clamp(0, self.nx as i64 - 1) as usize;
-        let i1 = (((p.x + reach - self.lo.x) / self.cell).floor() as i64)
-            .clamp(0, self.nx as i64 - 1) as usize;
-        let j0 = (((p.y - reach - self.lo.y) / self.cell).floor() as i64)
-            .clamp(0, self.ny as i64 - 1) as usize;
-        let j1 = (((p.y + reach - self.lo.y) / self.cell).floor() as i64)
-            .clamp(0, self.ny as i64 - 1) as usize;
+        let (nx, ny) = (self.n[0], self.n[1]);
+        let (i0, i1) = self.span(0, p.x, reach);
+        let (j0, j1) = self.span(1, p.y, reach);
+        let (k0, k1) = self.span(2, p.z, reach);
         let mut best = f64::INFINITY;
-        for j in j0..=j1 {
-            for i in i0..=i1 {
-                for &ti in &self.buckets[j * self.nx + i] {
-                    let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
-                    if d2 < best {
-                        best = d2;
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                let base = (k * ny + j) * nx;
+                for i in i0..=i1 {
+                    for &ti in &self.buckets[base + i] {
+                        let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
+                        if d2 < best {
+                            best = d2;
+                        }
                     }
                 }
             }
@@ -862,22 +907,24 @@ impl MeshIndex {
     ///   面片边界、点积翻转符号——叶轮第一版实测残料 1.8% → 6.6%（合格
     ///   98.1% → 93.4%），全是叶根缝隙角落的假阳性；guard 后放行。
     pub(crate) fn min_dist_signed(&self, p: DVec3, reach: f64) -> f64 {
-        let i0 = (((p.x - reach - self.lo.x) / self.cell).floor() as i64)
-            .clamp(0, self.nx as i64 - 1) as usize;
-        let i1 = (((p.x + reach - self.lo.x) / self.cell).floor() as i64)
-            .clamp(0, self.nx as i64 - 1) as usize;
-        let j0 = (((p.y - reach - self.lo.y) / self.cell).floor() as i64)
-            .clamp(0, self.ny as i64 - 1) as usize;
-        let j1 = (((p.y + reach - self.lo.y) / self.cell).floor() as i64)
-            .clamp(0, self.ny as i64 - 1) as usize;
+        let (nx, ny) = (self.n[0], self.n[1]);
+        let (i0, i1) = self.span(0, p.x, reach);
+        let (j0, j1) = self.span(1, p.y, reach);
+        let (k0, k1) = self.span(2, p.z, reach);
         let (mut best, mut best_ti) = (f64::INFINITY, usize::MAX);
-        for j in j0..=j1 {
-            for i in i0..=i1 {
-                for &ti in &self.buckets[j * self.nx + i] {
-                    let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
-                    if d2 < best {
-                        best = d2;
-                        best_ti = ti as usize;
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                let base = (k * ny + j) * nx;
+                for i in i0..=i1 {
+                    for &ti in &self.buckets[base + i] {
+                        let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
+                        // **等距平票取最小三角形号**：二维桶按编号升序排，严格 `<`
+                        // 得到的正是这个；三维换了扫描顺序（k 在外层），不显式裁决
+                        // 会换一个等距三角形，`interior`/法向跟着变、符号翻转。
+                        if d2 < best || (d2 == best && (ti as usize) < best_ti) {
+                            best = d2;
+                            best_ti = ti as usize;
+                        }
                     }
                 }
             }
@@ -921,14 +968,19 @@ impl MeshIndex {
     /// 射线奇偶判定 `p` 是否在封闭实体内。查询点微偏移，避免恰好打在边/顶点上。
     fn ray_inside(&self, p: DVec3) -> bool {
         let pp = DVec3::new(p.x + 2e-4, p.y - 3e-4, p.z);
-        let i = (((pp.x - self.lo.x) / self.cell).floor() as i64).clamp(0, self.nx as i64 - 1)
-            as usize;
-        let j = (((pp.y - self.lo.y) / self.cell).floor() as i64).clamp(0, self.ny as i64 - 1)
-            as usize;
+        let (nx, ny, nz) = (self.n[0], self.n[1], self.n[2]);
+        let (i, _) = self.span(0, pp.x, 0.0);
+        let (j, _) = self.span(1, pp.y, 0.0);
+        // **整列都扫**：向下的射线本来打不到头顶的三角形，但"同一列"这个集合
+        // 必须与二维一致——少扫一层就可能漏掉跨在 `p` 上方的三角形，奇偶翻转、
+        // 符号反掉。这一条是 §57.3 踩过的坑。
         let mut crossings = 0u32;
-        for &ti in &self.buckets[j * self.nx + i] {
-            if ray_down_hits(pp, &self.tris[ti as usize]) {
-                crossings += 1;
+        for k in 0..nz {
+            let base = (k * ny + j) * nx;
+            for &ti in &self.buckets[base + i] {
+                if ray_down_hits(pp, &self.tris[ti as usize]) {
+                    crossings += 1;
+                }
             }
         }
         crossings % 2 == 1
