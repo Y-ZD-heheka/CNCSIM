@@ -412,7 +412,7 @@ pub fn generate_surface(
             let c = conc[ia].max(conc[ib]);
             let mut l = crate::feed::load_of(c, 0.0, &opts.feed);
             if opts.feed.k_turn > 0.0 {
-                l += opts.feed.k_turn * turn_at(&tips, &kept, k);
+                l += opts.feed.k_turn * turn_at(&tips, kept, k);
             }
             load.push(l);
         }
@@ -518,6 +518,8 @@ fn feasible_axis(n: DVec3, max_a_deg: f64) -> DVec3 {
 ///
 /// 排在最前的是"不歪"的解，所以绝大多数点第一次就命中；只有被刀杆拦住的点
 /// 才会往下试。每个候选都过 [`feasible_axis`]，所以永远在 A 行程内。
+/// （生产路径走 [`axis_candidates_indexed`]；这个包装只剩测试用。）
+#[cfg(test)]
 fn axis_candidates(n: DVec3, max_a_deg: f64, tilt_deg: f64, prefer: Option<DVec3>) -> Vec<DVec3> {
     axis_candidates_indexed(n, max_a_deg, tilt_deg, prefer)
         .into_iter()
@@ -763,10 +765,8 @@ fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: 
         if ball_flute_hits(ix, tip, ax, g) {
             return false;
         }
-        if full_neck || k * 2 + 1 == n_t {
-            if neck_shank_hits(ix, tip, ax, g) {
-                return false;
-            }
+        if (full_neck || k * 2 + 1 == n_t) && neck_shank_hits(ix, tip, ax, g) {
+            return false;
         }
     }
     true
