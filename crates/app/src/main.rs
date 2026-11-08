@@ -1571,6 +1571,11 @@ fn run_cam_multi(
             design: Some(design.clone()),
             dry_run: true,
             drop_chips: false,
+            // 碰撞必须显式关：`RunConfig::default` 是 `collide: true`（面向
+            // 全量仿真），而探针的毛坯**从不切削**（dry）——刀杆对着一整块
+            // 毛坯每段查 3500 点表面（~2.4 ms/段、13 万段 = 220 s），记录还
+            // 没人消费。探针只取 cut_segs 做归因。
+            collide: false,
             ..Default::default()
         };
         let out0 = cncsim_sim::run::run_tools(&prog0, &table0, &cfg0);
