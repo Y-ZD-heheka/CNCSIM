@@ -1715,13 +1715,37 @@ fn run_cam_multi(
     // `docs/项目记忆.md` §40 里叶轮 2 可达 86.3%、可达面却只有 15.4% 合格。
     // 这条道**不经过高度场**：球心放在 `p + R·n`，刀轴沿 `n`，球在 `p` 相切。
     //
-    // 目标点用**密采**（`surface_samples`，步距 = 0.4×精刀径）：`reach` 的
-    // 1.5 mm 采样只够判"看不看得见"，不够定刀路——1.5 mm 步距在 R0.5 的球上
-    // 会留下 0.56 mm 的刀花。
+    // 目标点用**密采**（`surface_samples`）：`reach` 的 1.5 mm 采样只够判
+    // "看不看得见"，不够定刀路。
     let mut surf_frag = String::new();
     let mut surf_tool: Option<cncsim_cam::ToolSpec> = None;
     if want_surface && let Some((out0, table0)) = &probe {
-        let step = (d_finish * 0.4).clamp(0.25, 0.8);
+        // ── 曲面道刀径：默认 `min(精刀, Ø0.5)` ──
+        //
+        // 这不是"刀越小越好"的口味问题，是**球面闸门的硬门槛**：球心在
+        // `p + R·n`，塞不下的点这条道永远切不到——那是刀具几何，调刀路救不了。
+        // 实测球面塞不下比例：叶轮 Ø0.8 → 1.4%、Ø0.5 → 1.3%；桌腿
+        // Ø0.8 → **37.5%**、Ø0.5 → 24.8%、Ø0.3 → 15.9%。桌腿缩到 Ø0.3
+        // 时解析残料 2.0% → **0.1%**、合格 98.0% → **99.9%**；
+        // 叶轮 Ø0.5 时过切 0.1 → **0.0%**、残料 1.6 → **1.3%**。
+        // 再小（Ø0.3）叶轮反而变差（刀杆撞 9.5% → 18.2%：球进去了、Ø6 柄
+        // 进不去），所以 **0.5 是两件的共同最优**；薄壁件可用 `--surface-d`
+        // 单独压到 0.3（桌腿 → 99.9%）。
+        let ds = surface_d_from_args().unwrap_or(d_finish.min(0.5));
+        let rs = 0.5 * ds;
+        // ── 采样步长 = **事实上的行距**，按允许扇贝高度反算 ──
+        //
+        //   s = 2·√(2·R·h − h²)，h = `--surface-scallop`（默认 0.04）
+        //
+        // 旧口径是 `0.4×精刀径`，**与实际的曲面刀无关**：对 Ø2.4 精刀给出
+        // 0.8，而刀是 Ø0.8——行距 = 刀径，球头必然留下 0.4 mm 扇贝
+        // （h = R − √(R²−(s/2)²)）。实测桌腿残料 0.15–0.5、均值 0.29，与
+        // 公式逐点吻合；把行距收到 0.3 后残料 2.0% → 0.5%，配上 Ø0.5 刀到 0.3%。
+        // 采样步长还顺带定了串链半径（`link = 2×step`），两者必须一起变。
+        let scallop = surface_scallop_from_args().unwrap_or(0.04);
+        let step = surface_sample_from_args().unwrap_or_else(|| {
+            cncsim_cam::surface::stepover_for_scallop(rs, scallop).clamp(0.15, 0.8)
+        });
         let smp = cncsim_voxel::meshvol::surface_samples(tris, step);
         lap.lap("曲面目标采样");
         let pts: Vec<cncsim_math::DVec3> = smp.iter().map(|(p, _, _)| *p).collect();
@@ -1746,14 +1770,7 @@ fn run_cam_multi(
             targets.len() as f64 / smp.len().max(1) as f64 * 100.0
         );
         if !targets.is_empty() {
-            // 曲面道刀径：**默认 Ø0.8**（≤ 精刀）。§44 时 Ø1.0 最优，但那是
-            // 等径柄口径；Ø6 柄 + 分段碰撞之后重测（§51）：
-            //
-            //   Ø1.0 颈0 → 96.5% / Ø0.8 颈0 → 96.6% / **Ø0.8 颈9 → 98.0%**
-            //
-            // 小球能把球面闸门的拒绝从 3309 降到 214（进得去窄槽），
-            // 配合长颈把 Ø6 柄挡在通道外。
-            let ds = surface_d_from_args().unwrap_or(d_finish.min(0.8));
+            // 刀径已在上文定好（见"曲面道刀径"那段）。
             // 刃长 = 刀能"伸进去"的深度。给长一点能进深腔，但**刃部圆柱也要
             // 真的进得去**（见 `shank_hits_axis`）——深窄槽里长刃反而全被拒。
             let flute = surface_flute_from_args()
@@ -1808,6 +1825,21 @@ fn run_cam_multi(
                         st.link_unsafe,
                         st.avg_link_lift
                     );
+                    // 球面塞不下 = **刀具几何的硬门槛**，这些点这条道永远切不到，
+                    // 调刀路救不了（只有换小刀）。比例高就明说，别让人在刀路里绕。
+                    let tried = st.accepted + st.gouge_rejected;
+                    if tried > 0 {
+                        let blocked = st.gouge_rejected as f64 / tried as f64;
+                        if blocked > 0.10 {
+                            println!(
+                                "    · 球面塞不下 {:.0}%（{} 点）：球心 `p+R·n` 处放不下 Ø{ds:.1} 球，\
+                                 这些点这条道切不到；试 `--surface-d {:.1}`（叶轮无益：柄会撞）",
+                                blocked * 100.0,
+                                st.gouge_rejected,
+                                (ds * 0.6).max(0.3)
+                            );
+                        }
+                    }
                     // 进给调度：**几何指标不受影响**（F 不参与切除），这里只报
                     // "降了多少、慢了多久"。`<0.8` 的比例是"真的被减速"的口径。
                     let f = st.feed;
@@ -3306,6 +3338,26 @@ fn surface_step_from_args() -> Option<f64> {
         .skip(1)
         .zip(std::env::args().skip(2))
         .find(|(a, _)| a == "--surface-step")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+}
+
+/// 设计面密采步长（= 曲面道的事实行距）。默认按扇贝高度反算。
+fn surface_sample_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--surface-sample")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0)
+}
+
+/// 曲面道允许的扇贝高度（mm）。行距由它反算：`s = 2·√(2Rh − h²)`。
+fn surface_scallop_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--surface-scallop")
         .and_then(|(_, v)| v.parse::<f64>().ok())
         .filter(|v| *v > 0.0)
 }

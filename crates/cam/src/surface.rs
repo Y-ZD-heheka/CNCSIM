@@ -172,6 +172,28 @@ impl Timing {
     }
 }
 
+/// 行距：给定球头半径 `R` 与允许的残留高度 `h`，反算两条平行刀路之间的间距。
+///
+/// 球头走两条平行线，中间留下的料脊（扇贝）高度有闭式解
+/// `h = R − √(R² − (s/2)²)`；反解就是
+///
+/// ```text
+/// s = 2·√(2·R·h − h²)
+/// ```
+///
+/// 极端情形对得上：`h → 0` 时 `s → 0`（无限密），`h = R` 时 `s = 2R`
+/// （两刀之间正好剩一个整刀宽的料脊）。
+///
+/// **为什么它是一个函数而不是一个常数**：曲面道的"行距"就是设计面密采步长，
+/// 而旧口径按**精刀**直径算（`0.4 × 精刀径`）——与实际用刀无关。叶轮精刀 Ø2.4
+/// 给出 0.8，而曲面刀是 Ø0.8，于是行距 = 刀径、必然留 `h = R = 0.4 mm` 的扇贝。
+/// 实测桌腿残料均值 0.29 与公式吻合（峰顶在两条刀路中点，不在采样点上，
+/// 所以采样读数约为 `h` 的一半）。
+pub fn stepover_for_scallop(r: f64, h: f64) -> f64 {
+    let h = h.clamp(1e-9, r.max(1e-9));
+    2.0 * (2.0 * r * h - h * h).max(0.0).sqrt()
+}
+
 pub fn generate_surface(
     mesh: &[Tri],
     stock: Stock,
@@ -927,11 +949,12 @@ fn min_sweep_dist(ix: &crate::MeshIndex, rig: &SegRig, z: f64, need: f64) -> f64
 }
 
 /// 层表压栈（超过 48 层就丢——刀不会长到那去，正常刃+颈+柄 ~30 层）。
-fn lay_push(lay: &mut [(f64, f64); 48], n: &mut usize, z: f64, need: f64) {
-    if *n < lay.len() {
-        lay[*n] = (z, need);
-        *n += 1;
-    }
+fn lay_push(lay: &mut [(f64, f64)], n: &mut usize, z: f64, need: f64) {
+    // **溢出必须炸**：静默丢弃等于把刀杆远端从闸门里抹掉（漏检 = 过切）。
+    // 上限 96 对 `flute ≤ 16` / 层距 ≥ 1.0 的现有配置留了 2 倍余量。
+    assert!(*n < lay.len(), "sweep_ok 层表溢出（{} 层）", lay.len());
+    lay[*n] = (z, need);
+    *n += 1;
 }
 
 /// 球刀从 `a`（姿态 `na`）扫到 `b`（姿态 `nb`）时，**会不会啃到设计面**。
@@ -967,20 +990,23 @@ fn sweep_ok(
     use std::sync::atomic::Ordering::Relaxed;
     SWEEP_CALLS.fetch_add(1, Relaxed);
     let r = g.r;
-    // z 层网格：刀形沿 z 平缓（圆柱恒半径、锥线性），粗采样不漏层间极值。
-    // 层距按半径变化率定：刃部 4×旧步长、锥 1.0、柄 2.0。
-    // 一次分配够（≤ 32 层）：`chain` 里这个函数被调几十万次，
+    // z 层网格：刀形沿 z 平缓（圆柱恒半径、锥线性），但**层间的材料不缓**——
+    // 细长凸起（叶片棱）只有 1 mm 高，层距 2.0 会从缝里漏过去。实测叶轮 T53
+    // 段在 z=10.9 处刃部净距 −0.167，而层距 2.0 的采样点（10.4 / 12.4）都
+    // > 0，`sweep_ok` 放行 → 全刀形啃 0.39 mm。层距减半即命中。
+    // 层距按半径变化率定：刃部 2×基础步长、锥 1.0、柄 2.0。
+    // 一次分配够（≤ 96 层）：`chain` 里这个函数被调几十万次，
     // `Vec::new()` 的多次 realloc 是实打实的开销。
     // **层表放栈上**：这个函数在 `chain` 里被调 ~20 万次，`Vec` 每次都要
     // malloc/free（哪怕带 capacity）——实测这笔开销占 `chain` 的 2~3%。
-    let mut lay = [(0.0f64, 0.0f64); 48];
+    let mut lay = [(0.0f64, 0.0f64); 96];
     let mut n = 0usize;
     let step = (r * 0.8).clamp(0.5, 2.0);
     let need_f = (r - g.tol).max(1e-6);
     let mut z = r;
     while z < g.flute {
         lay_push(&mut lay, &mut n, z, need_f);
-        z += step * 4.0;
+        z += step * 2.0;
     }
     lay_push(&mut lay, &mut n, g.flute - 1e-6, need_f); // 刃顶必查
     let taper = g.tool.taper_len();
@@ -1813,6 +1839,23 @@ mod tests {
         let os = generate_surface(&mesh, stock(), &[pt], &small).expect("生成不报错");
         assert_eq!(ob.stats.gouge_rejected, 1, "Ø4 球贴住一侧就会啃到另一侧");
         assert_eq!(os.stats.accepted, 1, "Ø0.2 球塞得进 30° 槽");
+    }
+
+    /// 扇贝公式：`s = 2√(2Rh − h²)` 与残留高度的闭式解互为反函数。
+    #[test]
+    fn scallop_stepover_matches_closed_form() {
+        // h = R → 行距 2R：两刀之间正好剩一个整刀宽的料脊
+        assert!((stepover_for_scallop(0.4, 0.4) - 0.8).abs() < 1e-12);
+        // 反代：s/2 处的残留高度必须回到 h
+        for &(r, h) in &[(0.25, 0.04), (0.4, 0.1), (0.15, 0.02), (1.0, 0.3)] {
+            let s = stepover_for_scallop(r, h);
+            let back = r - (r * r - (s / 2.0) * (s / 2.0)).max(0.0).sqrt();
+            assert!((back - h).abs() < 1e-12, "r={r} h={h} back={back}");
+        }
+        // 旧口径的病就在这里：Ø0.8 刀配 0.8 行距 ⇒ 残留 0.4 = 整个半径
+        assert!((stepover_for_scallop(0.4, 0.4) - 0.8).abs() < 1e-9);
+        // 现在的默认档：Ø0.5 刀 + h 0.04 ⇒ 0.2713 mm
+        assert!((stepover_for_scallop(0.25, 0.04) - 0.27129).abs() < 1e-4);
     }
 
     /// 串链：3×3 点阵必须连成**一条**折线（不是 9 条单点），且每点只出现一次。
