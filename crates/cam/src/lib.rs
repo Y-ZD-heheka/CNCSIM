@@ -767,7 +767,15 @@ pub(crate) struct MeshIndex {
     cell: f64,
     lo: DVec3,
     n: [usize; 3],
-    buckets: Vec<Vec<u32>>,
+    /// **CSR 布局**：格子 `c = (k·ny + j)·nx + i` 的三角形下标是
+    /// `idx[off[c]..off[c+1]]`。
+    ///
+    /// 为什么不是 `Vec<Vec<u32>>`：每格一个 `Vec` 光头部就 24 字节，几百万格
+    /// 光空壳就上百 MB；而且真正的热路径（`chain` 里 20 万次 `sweep_ok` ×
+    /// 上百次查询）每访问一格都要追一次指针，缓存全废。CSR 是一次连续分配，
+    /// 遍历就是扫内存。
+    off: Vec<u32>,
+    idx: Vec<u32>,
     tris: Vec<Tri>,
     /// 网格是否封闭（每条边恰被两个三角形共享）。封闭网格的 signed 距离用
     /// 射线奇偶定符号（鲁棒）；开网格退回"最近三角形法向"（面片角落有误判风险）。
@@ -777,8 +785,32 @@ pub(crate) struct MeshIndex {
 impl MeshIndex {
     pub(crate) fn build(mesh: &[Tri], stock: Stock) -> Self {
         let ext = stock.size();
+        // ── 格子尺寸 ──
+        //
+        // 判据是**查询窗口里的期望三角形数**：查询半径 `reach` 固定，格子边长
+        // `c` 时窗口覆盖 `(2·reach + c)³` 的体积，格内三角形密度是 `1/c³`，
+        // 所以一次查询平均要试 `∝ ((2·reach + c)/c)³` 个三角形——**c 越大越亏**。
+        //
+        // 实测（叶轮，reach 0.87 mm）：c = 1.94 时一次查询 2.9 mm 立方里的
+        // 三角形全要过一遍，`chain` 里 20 万次 `sweep_ok` × 上百次查询 ≈ 37 亿
+        // 次点-三角形距离，占一轮 60 s。取 `c ≈ reach` 就够（再小收益递减，
+        // 而三角形跨格数线性涨）。
+        //
+        // 总格数封顶 450 万（CSR 一次分配 ~18 MB），超了按 1.2 逐轮放大 ——
+        // 大件/长条件不会把内存吃爆。
         // 格子取最长边的 1/48；总格数封顶 40 万（稀疏件别把内存花在空格上）。
+        //
+        // **这个尺寸不是性能旋钮**：`min_sweep_dist` 的快路径用的是"窗口内最小
+        // 读数"，它随格子边长变，于是**刀路会变**。实测缩到 0.62 mm：叶轮串链
+        // 60.5 → 70.5 s（每格的循环开销盖过了三角形数的下降）、残料 1.6 → 1.7%；
+        // 桌腿件 98.0 → 97.9%。留 `CNCSIM_MESH_CELL` 只为做这类实验。
         let mut cell = (ext.x.max(ext.y).max(ext.z) / 48.0).clamp(0.5, 5.0);
+        if let Ok(v) = std::env::var("CNCSIM_MESH_CELL")
+            && let Ok(v) = v.parse::<f64>()
+            && v > 0.0
+        {
+            cell = v; // 对拍用：固定格子边长
+        }
         let mut n;
         loop {
             n = [
@@ -792,8 +824,9 @@ impl MeshIndex {
             cell *= 1.35;
         }
         let (nx, ny, nz) = (n[0], n[1], n[2]);
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); nx * ny * nz];
-        for (ti, t) in mesh.iter().enumerate() {
+        let ncells = nx * ny * nz;
+        // 两遍计数排序：① 数每格的三角形数 → ② 前缀和 → ③ 填下标。
+        let cell_range = |t: &Tri| -> (usize, usize, usize, usize, usize, usize) {
             let (mut x0, mut x1) = (f64::INFINITY, f64::NEG_INFINITY);
             let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
             let (mut z0, mut z1) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -805,17 +838,45 @@ impl MeshIndex {
                 z0 = z0.min(v.z);
                 z1 = z1.max(v.z);
             }
-            let i0 = (((x0 - stock.min.x) / cell).floor() as i64).clamp(0, nx as i64 - 1) as usize;
-            let i1 = (((x1 - stock.min.x) / cell).floor() as i64).clamp(0, nx as i64 - 1) as usize;
-            let j0 = (((y0 - stock.min.y) / cell).floor() as i64).clamp(0, ny as i64 - 1) as usize;
-            let j1 = (((y1 - stock.min.y) / cell).floor() as i64).clamp(0, ny as i64 - 1) as usize;
-            let k0 = (((z0 - stock.min.z) / cell).floor() as i64).clamp(0, nz as i64 - 1) as usize;
-            let k1 = (((z1 - stock.min.z) / cell).floor() as i64).clamp(0, nz as i64 - 1) as usize;
+            let f = |v: f64, lo: f64, n: usize| {
+                (((v - lo) / cell).floor() as i64).clamp(0, n as i64 - 1) as usize
+            };
+            (
+                f(x0, stock.min.x, nx),
+                f(x1, stock.min.x, nx),
+                f(y0, stock.min.y, ny),
+                f(y1, stock.min.y, ny),
+                f(z0, stock.min.z, nz),
+                f(z1, stock.min.z, nz),
+            )
+        };
+        let mut off = vec![0u32; ncells + 1];
+        for t in mesh {
+            let (i0, i1, j0, j1, k0, k1) = cell_range(t);
             for k in k0..=k1 {
                 for j in j0..=j1 {
                     let base = (k * ny + j) * nx;
                     for i in i0..=i1 {
-                        buckets[base + i].push(ti as u32);
+                        off[base + i + 1] += 1;
+                    }
+                }
+            }
+        }
+        for c in 0..ncells {
+            off[c + 1] += off[c];
+        }
+        let total = off[ncells] as usize;
+        let mut idx = vec![0u32; total];
+        let mut cursor: Vec<u32> = off[..ncells].to_vec();
+        for (ti, t) in mesh.iter().enumerate() {
+            let (i0, i1, j0, j1, k0, k1) = cell_range(t);
+            for k in k0..=k1 {
+                for j in j0..=j1 {
+                    let base = (k * ny + j) * nx;
+                    for i in i0..=i1 {
+                        let c = base + i;
+                        idx[cursor[c] as usize] = ti as u32;
+                        cursor[c] += 1;
                     }
                 }
             }
@@ -847,11 +908,13 @@ impl MeshIndex {
         if edges.len() % 2 != 0 || edges.chunks_exact(2).any(|c| c[0] != c[1]) {
             watertight = false;
         }
+        debug_assert_eq!(off[ncells] as usize, idx.len());
         Self {
             cell,
             lo: stock.min,
             n,
-            buckets,
+            off,
+            idx,
             tris: mesh.to_vec(),
             watertight,
         }
@@ -868,17 +931,43 @@ impl MeshIndex {
     }
 
     /// 到 `reach` 范围内最近三角形的距离（无符号）。附近没有三角形 → `∞`。
+    /// 格子 `c` 里的三角形下标（CSR 切片）。
+    #[inline]
+    fn cell_tris(&self, c: usize) -> &[u32] {
+        let a = self.off[c] as usize;
+        let b = self.off[c + 1] as usize;
+        &self.idx[a..b]
+    }
+
     pub(crate) fn min_dist(&self, p: DVec3, reach: f64) -> f64 {
         let (nx, ny) = (self.n[0], self.n[1]);
         let (i0, i1) = self.span(0, p.x, reach);
         let (j0, j1) = self.span(1, p.y, reach);
         let (k0, k1) = self.span(2, p.z, reach);
         let mut best = f64::INFINITY;
+        // ① 先扫**点所在格**：它到 p 的距离是 0，里面一定有最近的候选之一，
+        //    拿到一个真实的 `best` 之后，②里的格子才有剪枝依据。
+        let (ci, cj, ck) = self.cell_of(p);
+        for &ti in self.cell_tris((ck * ny + cj) * nx + ci) {
+            let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
+            if d2 < best {
+                best = d2;
+            }
+        }
+        // ② 其余格：**格子 AABB 到 p 的下界都大于 `best` 就整格跳过**。
+        //    这是**精确**剪枝——被跳过的格子里每个三角形都远于当前最优，
+        //    不可能改变最小值。窗口内 8~200 个格子里通常只有 1~2 个需要扫。
         for k in k0..=k1 {
             for j in j0..=j1 {
                 let base = (k * ny + j) * nx;
                 for i in i0..=i1 {
-                    for &ti in &self.buckets[base + i] {
+                    if i == ci && j == cj && k == ck {
+                        continue;
+                    }
+                    if self.cell_dist2(p, i, j, k) > best {
+                        continue;
+                    }
+                    for &ti in self.cell_tris(base + i) {
                         let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
                         if d2 < best {
                             best = d2;
@@ -888,6 +977,32 @@ impl MeshIndex {
             }
         }
         best.sqrt()
+    }
+
+    /// 查询点所在的格子（夹在范围内）。
+    #[inline]
+    fn cell_of(&self, p: DVec3) -> (usize, usize, usize) {
+        let f = |v: f64, lo: f64, n: usize| {
+            (((v - lo) / self.cell).floor() as i64).clamp(0, n as i64 - 1) as usize
+        };
+        (
+            f(p.x, self.lo.x, self.n[0]),
+            f(p.y, self.lo.y, self.n[1]),
+            f(p.z, self.lo.z, self.n[2]),
+        )
+    }
+
+    /// 格子 `(i,j,k)` 的 AABB 到 `p` 的距离平方（点在格内时为 0）。
+    #[inline]
+    fn cell_dist2(&self, p: DVec3, i: usize, j: usize, k: usize) -> f64 {
+        let (c, lo) = (self.cell, self.lo);
+        let (x0, x1) = (lo.x + i as f64 * c, lo.x + (i + 1) as f64 * c);
+        let (y0, y1) = (lo.y + j as f64 * c, lo.y + (j + 1) as f64 * c);
+        let (z0, z1) = (lo.z + k as f64 * c, lo.z + (k + 1) as f64 * c);
+        let dx = (x0 - p.x).max(0.0).max(p.x - x1);
+        let dy = (y0 - p.y).max(0.0).max(p.y - y1);
+        let dz = (z0 - p.z).max(0.0).max(p.z - z1);
+        dx * dx + dy * dy + dz * dz
     }
 
     /// 到 `reach` 范围内最近三角形的**带符号**距离：正 = 材质外（空气侧），
@@ -912,11 +1027,27 @@ impl MeshIndex {
         let (j0, j1) = self.span(1, p.y, reach);
         let (k0, k1) = self.span(2, p.z, reach);
         let (mut best, mut best_ti) = (f64::INFINITY, usize::MAX);
+        let (ci, cj, ck) = self.cell_of(p);
+        // ① 点所在格先扫（见 `min_dist` 的注释）
+        for &ti in self.cell_tris((ck * ny + cj) * nx + ci) {
+            let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
+            if d2 < best || (d2 == best && (ti as usize) < best_ti) {
+                best = d2;
+                best_ti = ti as usize;
+            }
+        }
+        // ② 其余格按 `best` 精确剪枝
         for k in k0..=k1 {
             for j in j0..=j1 {
                 let base = (k * ny + j) * nx;
                 for i in i0..=i1 {
-                    for &ti in &self.buckets[base + i] {
+                    if i == ci && j == cj && k == ck {
+                        continue;
+                    }
+                    if self.cell_dist2(p, i, j, k) > best {
+                        continue;
+                    }
+                    for &ti in self.cell_tris(base + i) {
                         let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
                         // **等距平票取最小三角形号**：二维桶按编号升序排，严格 `<`
                         // 得到的正是这个；三维换了扫描顺序（k 在外层），不显式裁决
@@ -977,7 +1108,7 @@ impl MeshIndex {
         let mut crossings = 0u32;
         for k in 0..nz {
             let base = (k * ny + j) * nx;
-            for &ti in &self.buckets[base + i] {
+            for &ti in self.cell_tris(base + i) {
                 if ray_down_hits(pp, &self.tris[ti as usize]) {
                     crossings += 1;
                 }
@@ -2392,5 +2523,69 @@ mod tests {
         assert_eq!(l, vec![3.0, 2.2]);
         let l = descend(3.0, 2.2, 1.0);
         assert_eq!(l, vec![2.2]);
+    }
+}
+
+#[cfg(test)]
+mod csr_check {
+    use super::*;
+
+    /// **索引自检**：随机点上的 `min_dist` 必须等于"全网格暴搜"的值。
+    ///
+    /// CSR 重排只是换存储布局，任何"扫得更少"的行为都是 bug（而且会悄悄改刀路——
+    /// 这类 bug 不会报错，只会让闸门放行）。
+    #[test]
+    fn csr_index_matches_brute_force() {
+        // UV 球（半径 6，圆心 z=6）：既有曲面又有封闭性，接近真实件
+        let (r, cz) = (6.0f64, 6.0f64);
+        let (nu, nv) = (24usize, 12usize);
+        let p = |iu: usize, iv: usize| {
+            let u = iu as f64 / nu as f64 * std::f64::consts::TAU;
+            let v = iv as f64 / nv as f64 * std::f64::consts::PI;
+            DVec3::new(r * v.sin() * u.cos(), r * v.sin() * u.sin(), cz + r * v.cos())
+        };
+        let mut mesh: Vec<Tri> = Vec::new();
+        for iu in 0..nu {
+            for iv in 0..nv {
+                mesh.push([p(iu, iv), p(iu + 1, iv), p(iu + 1, iv + 1)]);
+                mesh.push([p(iu, iv), p(iu + 1, iv + 1), p(iu, iv + 1)]);
+            }
+        }
+        let st = Stock {
+            min: DVec3::new(-8.0, -8.0, -8.0),
+            max: DVec3::new(8.0, 8.0, 14.0),
+        };
+        let ix = MeshIndex::build(&mesh, st);
+        let mut rng = 12345u64;
+        let mut next = || {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for reach in [0.37f64, 0.9, 3.3] {
+            for _ in 0..200 {
+                let q = DVec3::new(
+                    -9.0 + 18.0 * next(),
+                    -9.0 + 18.0 * next(),
+                    -9.0 + 24.0 * next(),
+                );
+                let brute = mesh
+                    .iter()
+                    .map(|t| pt_tri_dist2(q, t))
+                    .fold(f64::INFINITY, f64::min)
+                    .sqrt();
+                let got = ix.min_dist(q, reach);
+                // 索引只会"看不到远处"（返回 ∞ 或更大的值），**绝不能比真值小**
+                assert!(
+                    got >= brute - 1e-9,
+                    "min_dist 比真值还小（扫到了幻觉三角形）：{got} vs {brute}"
+                );
+                if brute < reach {
+                    assert!(
+                        (got - brute).abs() < 1e-9,
+                        "reach {reach} 内必须精确：{got} vs {brute} @ {q:?}"
+                    );
+                }
+            }
+        }
     }
 }

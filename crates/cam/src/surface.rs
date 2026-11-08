@@ -695,12 +695,13 @@ pub fn sweep_ok_report(
 ) -> (bool, f64) {
     let ix = crate::MeshIndex::build(mesh, stock);
     let g = Geo::of(tool, tol, clear);
+    let rig = SegRig::new(a, na, b, nb);
     let r = g.r;
     let need_f = (r - g.tol).max(1e-6);
     let mut worst = f64::INFINITY;
     let mut z = r;
     while z < g.flute {
-        worst = worst.min(min_sweep_dist(&ix, a, na, b, nb, z, need_f));
+        worst = worst.min(min_sweep_dist(&ix, &rig, z, need_f));
         z += 1.0;
     }
     let ok = sweep_ok(&ix, a, na, b, nb, &g);
@@ -796,65 +797,114 @@ impl Geo {
 ///   躺在曲面旁边的：球在 `p` 相切，圆柱却顺着法向伸出去。两个相邻点的法向差
 ///   几十度时，这根圆柱在块与块之间扫出一个扇面，能把旁边的面啃掉 `R` 量级
 ///   （实测 0.67 mm < R 0.75）。3 轴 drop-cutter 里不存在这个问题，因为刀轴恒定。
-/// 沿段参数 t∈[0,1]，z 层处轴线点到设计面的**最小带符号距离**。
+/// 一段刀路的几何：两端姿态 + 粗采样位姿的刀轴缓存。
 ///
-/// 粗采样 5 点定位谷所在区间，黄金分割细化到 1e-3 段长——窄谷（侵入只存在
-/// 于位姿间极值瞬间，§56.4 实测 sd_tool 在 from/mid/to 全正而 sd_sweep=−0.39）
-/// 只要谷宽 > 0.1% 段长就能命中。整层远离（粗采样全部 > need + 0.4）时
-/// 跳过细化直接返回——大部分层走这条快路径。
-fn min_sweep_dist(
-    ix: &crate::MeshIndex,
+/// 为什么要这个结构：`sweep_ok` 里 ~22 个 z 层、每层 3~5 个粗采样，刀轴
+/// `slerp_axis` 是 `acos + 3×sin + normalize`（~80 ns）。22 层用的是**同一组**
+/// 粗采样 `t`，不缓存就等于每层白算一遍。
+struct SegRig {
     a: DVec3,
-    na: DVec3,
     b: DVec3,
+    na: DVec3,
     nb: DVec3,
-    z: f64,
-    need: f64,
-) -> f64 {
-    let c = |t: f64| {
-        let ax = slerp_axis(na, nb, t);
-        a + (b - a) * t + ax * z
-    };
-    let f = |t: f64| ix.min_dist_signed(c(t), need + 0.5);
-    // 粗采样 5 点
-    let mut best_v = f64::INFINITY;
-    let mut bi = 2usize;
-    let mut v = [0.0f64; 5];
-    for (k, t) in [0.0, 0.25, 0.5, 0.75, 1.0].iter().enumerate() {
-        v[k] = f(*t);
-        if v[k] < best_v {
-            best_v = v[k];
-            bi = k;
+    /// `t = 0、1/4、1/2、3/4、1` 处的刀轴（所有层共用）。
+    ///
+    /// 两端也走 `slerp_axis` 而不是直接用 `na`/`nb`：`slerp` 末尾有一步
+    /// `normalize`，和原值可能差 1 ulp，直接用会让边缘判定的结果漂移。
+    ac: [DVec3; 5],
+}
+
+impl SegRig {
+    fn new(a: DVec3, na: DVec3, b: DVec3, nb: DVec3) -> Self {
+        Self {
+            a,
+            b,
+            na,
+            nb,
+            ac: [
+                slerp_axis(na, nb, 0.0),
+                slerp_axis(na, nb, 0.25),
+                slerp_axis(na, nb, 0.5),
+                slerp_axis(na, nb, 0.75),
+                slerp_axis(na, nb, 1.0),
+            ],
         }
     }
-    // 快路径：整层远离（谷再深也深不过粗采样间距的数量级）——跳过细化
+
+    #[inline]
+    fn center(&self, t: f64, ax: DVec3, z: f64) -> DVec3 {
+        self.a + (self.b - self.a) * t + ax * z
+    }
+
+    #[inline]
+    fn center_at(&self, t: f64, z: f64) -> DVec3 {
+        self.center(t, slerp_axis(self.na, self.nb, t), z)
+    }
+}
+
+/// 沿段参数 `t∈[0,1]`、`z` 层处轴线点到设计面的**最小带符号距离**。
+///
+/// 粗采样定位谷所在区间，黄金分割细化到 1e-3 段长——窄谷（侵入只存在于位姿间
+/// 极值瞬间，§56.4 实测 `sd_tool` 在 from/mid/to 全正而 `sd_sweep = −0.39`）
+/// 只要谷宽 > 0.1% 段长就能命中。
+fn min_sweep_dist(ix: &crate::MeshIndex, rig: &SegRig, z: f64, need: f64) -> f64 {
+    let reach = need + 0.5;
+    let mut best_v = f64::INFINITY;
+    let mut best_t = 0.5f64;
+    // 粗采样 5 点：刀轴直接查 `SegRig` 的表——22 个 z 层用的是同一组 `t`，
+    // 每层现算一遍 `slerp_axis`（acos + 3 sin + normalize）纯属白付。
+    for k in 0..=4 {
+        let t = 0.25 * k as f64;
+        let v = ix.min_dist_signed(rig.center(t, rig.ac[k], z), reach);
+        if v < best_v {
+            best_v = v;
+            best_t = t;
+        }
+    }
+    // 快路径：整层远离（谷再深也深不过粗采样间距的数量级）——跳过细化。
+    //
+    // 注意这是个**近似**：`best_v` 是"窗口内的最小读数"，会随 `MeshIndex` 的
+    // 格子边长变（格子越大越容易看见远处三角形、读数越小、越不容易跳过）。
+    // 所以格子尺寸不是自由参数——它和这个阈值是一套的（§61 记录了实测差异）。
     if best_v > need + 0.4 {
         return best_v;
     }
     // 最小点相邻区间内黄金分割
-    let mut lo = ((bi as f64 - 1.0).max(0.0)) / 4.0;
-    let mut hi = ((bi as f64 + 1.0).min(4.0)) / 4.0;
+    let mut lo = (best_t - 0.25).max(0.0);
+    let mut hi = (best_t + 0.25).min(1.0);
     let gr = (5.0f64.sqrt() - 1.0) / 2.0;
     let mut x1 = hi - gr * (hi - lo);
     let mut x2 = lo + gr * (hi - lo);
-    let mut f1 = f(x1);
-    let mut f2 = f(x2);
+    let mut f1 = ix.min_dist_signed(rig.center_at(x1, z), reach);
+    let mut f2 = ix.min_dist_signed(rig.center_at(x2, z), reach);
     while hi - lo > 1e-3 {
         if f1 < f2 {
             hi = x2;
             x2 = x1;
             f2 = f1;
             x1 = hi - gr * (hi - lo);
-            f1 = f(x1);
+            f1 = ix.min_dist_signed(rig.center_at(x1, z), reach);
         } else {
             lo = x1;
             x1 = x2;
             f1 = f2;
             x2 = lo + gr * (hi - lo);
-            f2 = f(x2);
+            f2 = ix.min_dist_signed(rig.center_at(x2, z), reach);
         }
     }
-    best_v.min(f1).min(f2).min(f(lo)).min(f(hi))
+    best_v
+        .min(f1)
+        .min(f2)
+        .min(ix.min_dist_signed(rig.center_at(lo, z), reach))
+        .min(ix.min_dist_signed(rig.center_at(hi, z), reach))
+}
+
+/// 层表压栈（超过 48 层就丢——刀不会长到那去，正常刃+颈+柄 ~30 层）。
+fn lay_push(lay: &mut [(f64, f64); 48], n: &mut usize, z: f64, need: f64) {
+    if *n < lay.len() {
+        lay[*n] = (z, need);
+        *n += 1;
+    }
 }
 
 /// 球刀从 `a`（姿态 `na`）扫到 `b`（姿态 `nb`）时，**会不会啃到设计面**。
@@ -879,7 +929,14 @@ fn min_sweep_dist(
 static SWEEP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static SWEEP_REJECTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: &Geo) -> bool {
+fn sweep_ok(
+    ix: &crate::MeshIndex,
+    a: DVec3,
+    na: DVec3,
+    b: DVec3,
+    nb: DVec3,
+    g: &Geo,
+) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     SWEEP_CALLS.fetch_add(1, Relaxed);
     let r = g.r;
@@ -887,35 +944,39 @@ fn sweep_ok(ix: &crate::MeshIndex, a: DVec3, na: DVec3, b: DVec3, nb: DVec3, g: 
     // 层距按半径变化率定：刃部 4×旧步长、锥 1.0、柄 2.0。
     // 一次分配够（≤ 32 层）：`chain` 里这个函数被调几十万次，
     // `Vec::new()` 的多次 realloc 是实打实的开销。
-    let mut layers: Vec<(f64, f64)> = Vec::with_capacity(32);
+    // **层表放栈上**：这个函数在 `chain` 里被调 ~20 万次，`Vec` 每次都要
+    // malloc/free（哪怕带 capacity）——实测这笔开销占 `chain` 的 2~3%。
+    let mut lay = [(0.0f64, 0.0f64); 48];
+    let mut n = 0usize;
     let step = (r * 0.8).clamp(0.5, 2.0);
     let need_f = (r - g.tol).max(1e-6);
     let mut z = r;
     while z < g.flute {
-        layers.push((z, need_f));
+        lay_push(&mut lay, &mut n, z, need_f);
         z += step * 4.0;
     }
-    layers.push((g.flute - 1e-6, need_f)); // 刃顶必查
+    lay_push(&mut lay, &mut n, g.flute - 1e-6, need_f); // 刃顶必查
     let taper = g.tool.taper_len();
     z = g.flute;
     while z < g.tool.neck_top() + taper {
-        layers.push((z, g.tool.radius_at(z) + g.clear));
+        lay_push(&mut lay, &mut n, z, g.tool.radius_at(z) + g.clear);
         z += 1.0;
     }
     let shank_r = g.tool.shank_radius().max(r);
     let need_s = (shank_r + g.clear).max(1e-3);
     z = (g.tool.neck_top() + taper).max(g.flute);
     while z <= g.tool.neck_top() + 20.0 {
-        layers.push((z, need_s));
+        lay_push(&mut lay, &mut n, z, need_s);
         z += 2.0;
     }
+    let rig = SegRig::new(a, na, b, nb);
     // 层间完全独立 → 并行求值（`any` 短路；bool 结果与求值顺序无关，
     // 与串行逐位一致）。曲面道 ~7 分钟的大头就是这里的串行版本。
-    let hit = layers
+    let hit = lay[..n]
         .par_iter()
-        .any(|&(z, need)| min_sweep_dist(ix, a, na, b, nb, z, need) < need);
+        .any(|&(z, need)| min_sweep_dist(ix, &rig, z, need) < need);
     if hit {
-        SWEEP_REJECTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SWEEP_REJECTS.fetch_add(1, Relaxed);
     }
     !hit
 }
