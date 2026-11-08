@@ -1075,12 +1075,28 @@ impl MeshIndex {
         //     处法向可能翻转）。只有它们付 parity 的钱。
         //   - 开网格（无 parity 可用）：interior-guard——最近点在三角形
         //     内部且 `(p − q)·n < 0` 才判负；边/角乐观放行。
+        self.sign_at(p, best_ti) * best.sqrt()
+    }
+
+    /// 最近三角形 `best_ti` 处，"点相对材质"的符号（+1 空气侧 / −1 材质内）。
+    ///
+    /// 两级判定：
+    /// * **快路径**：最近点落在三角形**内部**、且外法向**朝向**查询点
+    ///   （`(p − q)·n > 0`）→ 刀在空气里，直接放行。闸门查询绝大多数落在这里，
+    ///   射线奇偶（桶内全部三角形相交测试）一次都不用跑。
+    /// * **其余情形交给裁决**：
+    ///   - 封闭网格：射线奇偶是实体内外的**权威**——最近点在边/角上时法向不可信
+    ///     （立方体测试里"正对剖分对角线的材质内点"就是 interior=false，法向
+    ///     口径会误放行），负候选更要复核（薄壁/缝隙处法向可能翻转）。
+    ///   - 开网格（无 parity 可用）：interior-guard——最近点在三角形内部且
+    ///     `(p − q)·n < 0` 才判负；边/角乐观放行。
+    fn sign_at(&self, p: DVec3, best_ti: usize) -> f64 {
         let t = &self.tris[best_ti];
         let (q, _, interior) = pt_tri_closest(p, t);
         let n = (t[1] - t[0]).cross(t[2] - t[0]);
         let valid = n.length_squared() > 1e-12;
         let dot = if valid { (p - q).dot(n) } else { 0.0 };
-        let sign = if self.watertight {
+        if self.watertight {
             if interior && dot > 0.0 {
                 1.0
             } else if self.ray_inside(p) {
@@ -1092,8 +1108,53 @@ impl MeshIndex {
             -1.0
         } else {
             1.0
-        };
-        sign * best.sqrt()
+        }
+    }
+
+    /// `min_dist_signed(p, need) < need` 的**快速判定**（闸门专用）。
+    ///
+    /// 闸门只问"这个点撞没撞"，而 `< need` 对**两种符号都成立**（`+0.3` 和
+    /// `−0.3` 都小于 `0.37`）——所以扫到第一个"无符号距离 < need"的三角形就可以
+    /// 直接返回 `true`，不用算最近点、也不用定符号。`shank_hits_axis` 里 `z`
+    /// 从刃顶一路按 0.3 mm 往上扫，撞的时候第一个采样就返回，省掉整条链。
+    ///
+    /// **必须与 `min_dist_signed` 逐位等价**，所以扫描范围、平票规则、符号判定
+    /// 全部照抄，只多一条提前返回——不做格子剪枝（剪枝会换掉"最近三角形"，
+    /// 万一网格缠绕方向有噪声，符号就跟 `min_dist_signed` 不一致了；实测朝内
+    /// 缠绕的球面就会这样，`signed_below_matches_signed` 钉住这一点）。
+    pub(crate) fn signed_below(&self, p: DVec3, need: f64) -> bool {
+        let lim = need * need;
+        let (nx, ny) = (self.n[0], self.n[1]);
+        let (i0, i1) = self.span(0, p.x, need);
+        let (j0, j1) = self.span(1, p.y, need);
+        let (k0, k1) = self.span(2, p.z, need);
+        let (mut best, mut best_ti) = (f64::INFINITY, usize::MAX);
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                let base = (k * ny + j) * nx;
+                for i in i0..=i1 {
+                    for &ti in self.cell_tris(base + i) {
+                        let d2 = pt_tri_dist2(p, &self.tris[ti as usize]);
+                        // 比较式必须与 `min_dist_signed` 的 `< need` **同形**：
+                        // `d2 < need²` 与 `sqrt(d2) < need` 在临界值上差 1 ulp，
+                        // 实测能让闸门的判定翻转、刀路跟着乱（桌腿 +381 行）。
+                        // `lim` 只当廉价的预筛。
+                        if d2 < lim && d2.sqrt() < need {
+                            return true; // 近处有料：两种符号都算撞
+                        }
+                        if d2 < best || (d2 == best && (ti as usize) < best_ti) {
+                            best = d2;
+                            best_ti = ti as usize;
+                        }
+                    }
+                }
+            }
+        }
+        if best_ti == usize::MAX {
+            return false;
+        }
+        // 没有近处三角形 → 只剩"埋在材质里"这一种撞法
+        self.sign_at(p, best_ti) < 0.0
     }
 
     /// 射线奇偶判定 `p` 是否在封闭实体内。查询点微偏移，避免恰好打在边/顶点上。
@@ -1223,7 +1284,7 @@ pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance:
     while z < tool.neck_top() + taper {
         let rr = tool.radius_at(z);
         let need = rr + clearance;
-        if ix.min_dist_signed(tip + DVec3::new(0.0, 0.0, z), need) < need {
+        if ix.signed_below(tip + DVec3::new(0.0, 0.0, z), need) {
             return true;
         }
         z += 0.3;
@@ -1232,7 +1293,7 @@ pub(crate) fn shank_hits(ix: &MeshIndex, tip: DVec3, tool: &ToolSpec, clearance:
     let mut z = (tool.neck_top() + taper).max(flute);
     while z <= len {
         let need = shank_r + clearance;
-        if ix.min_dist_signed(tip + DVec3::new(0.0, 0.0, z), need) < need {
+        if ix.signed_below(tip + DVec3::new(0.0, 0.0, z), need) {
             return true;
         }
         z += step;
@@ -1253,7 +1314,7 @@ fn ball_hits(ix: &MeshIndex, tip: DVec3, r: f64, tol: f64) -> bool {
     }
     // **signed**：球心埋进材质时无符号读数 = 深度（可能 ≥ need → 漏判），
     // signed 读负值必小于 need——§55 余党（叶轮 T4/T6 高度场精加工 78 点）。
-    ix.min_dist_signed(tip + DVec3::new(0.0, 0.0, r), need) < need
+    ix.signed_below(tip + DVec3::new(0.0, 0.0, r), need)
 }
 
 // ─────────────────────────── 高度场 ───────────────────────────
@@ -1655,6 +1716,9 @@ fn sweep_breaks(index: &MeshIndex, run: &[DVec3], r: f64) -> Vec<usize> {
                 a.y + (b.y - a.y) * t,
                 a.z + (b.z - a.z) * t + r,
             );
+            // 注意这里是**无符号**距离：只问"球盘附近有没有料"，不问内外
+            // （材质内部那一侧由别的闸门管）。换成 `signed_below` 会多拦一片
+            // 埋在料里的列——实测桌腿件刀路 +381 行。
             if index.min_dist(c, need) < need {
                 out.push(i);
                 break;
@@ -2529,6 +2593,59 @@ mod tests {
 #[cfg(test)]
 mod csr_check {
     use super::*;
+
+    /// **等价性自检**：闸门的快速判定 `signed_below(p, need)` 必须与
+    /// `min_dist_signed(p, need) < need` **逐位一致**。
+    ///
+    /// 这条是"提前退出"的安全带：只要有一个判不一致，闸门就会漏放或误拒，
+    /// 而两者都不会报错——只会让刀路悄悄变形。
+    #[test]
+    fn signed_below_matches_signed() {
+        let (r, cz) = (6.0f64, 6.0f64);
+        let (nu, nv) = (20usize, 10usize);
+        let p = |iu: usize, iv: usize| {
+            let u = iu as f64 / nu as f64 * std::f64::consts::TAU;
+            let v = iv as f64 / nv as f64 * std::f64::consts::PI;
+            DVec3::new(r * v.sin() * u.cos(), r * v.sin() * u.sin(), cz + r * v.cos())
+        };
+        let mut mesh: Vec<Tri> = Vec::new();
+        for iu in 0..nu {
+            for iv in 0..nv {
+                mesh.push([p(iu, iv), p(iu + 1, iv), p(iu + 1, iv + 1)]);
+                mesh.push([p(iu, iv), p(iu + 1, iv + 1), p(iu, iv + 1)]);
+            }
+        }
+        let st = Stock {
+            min: DVec3::new(-8.0, -8.0, -8.0),
+            max: DVec3::new(8.0, 8.0, 14.0),
+        };
+        let ix = MeshIndex::build(&mesh, st);
+        let mut rng = 987654u64;
+        let mut next = || {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for need in [0.37f64, 0.9, 3.3] {
+            for _ in 0..300 {
+                // 一半落在球面附近（闸门真正会问的地方），一半撒在整盒里
+                let q = if next() < 0.5 {
+                    let u = next() * std::f64::consts::TAU;
+                    let v = next() * std::f64::consts::PI;
+                    let rr = r + (next() - 0.5) * 2.0 * need;
+                    DVec3::new(rr * v.sin() * u.cos(), rr * v.sin() * u.sin(), cz + rr * v.cos())
+                } else {
+                    DVec3::new(
+                        -9.0 + 18.0 * next(),
+                        -9.0 + 18.0 * next(),
+                        -9.0 + 24.0 * next(),
+                    )
+                };
+                let slow = ix.min_dist_signed(q, need) < need;
+                let fast = ix.signed_below(q, need);
+                assert_eq!(slow, fast, "need {need} @ {q:?}：慢 {slow} / 快 {fast}");
+            }
+        }
+    }
 
     /// **索引自检**：随机点上的 `min_dist` 必须等于"全网格暴搜"的值。
     ///

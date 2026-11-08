@@ -632,7 +632,7 @@ fn ball_flute_hits(ix: &crate::MeshIndex, tip: DVec3, axis: DVec3, g: &Geo) -> b
     let step = (r * 0.8).clamp(0.5, 2.0);
     let mut z = r;
     while z < g.flute {
-        if ix.min_dist_signed(tip + axis * z, need_f) < need_f {
+        if ix.signed_below(tip + axis * z, need_f) {
             return true;
         }
         z += step;
@@ -656,7 +656,7 @@ fn neck_shank_hits(ix: &crate::MeshIndex, tip: DVec3, axis: DVec3, g: &Geo) -> b
     while z < g.tool.neck_top() + taper {
         let rr = g.tool.radius_at(z);
         let need = (rr + clearance).max(1e-3);
-        if ix.min_dist_signed(tip + axis * z, need) < need {
+        if ix.signed_below(tip + axis * z, need) {
             return true;
         }
         z += 0.3;
@@ -666,7 +666,7 @@ fn neck_shank_hits(ix: &crate::MeshIndex, tip: DVec3, axis: DVec3, g: &Geo) -> b
     let need_s = (shank_r + clearance).max(1e-3);
     let mut z = (g.tool.neck_top() + taper).max(flute_end);
     while z <= g.tool.neck_top() + 20.0 {
-        if ix.min_dist_signed(tip + axis * z, need_s) < need_s {
+        if ix.signed_below(tip + axis * z, need_s) {
             return true;
         }
         z += step;
