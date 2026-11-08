@@ -1719,6 +1719,10 @@ fn run_cam_multi(
     // "看不看得见"，不够定刀路。
     let mut surf_frag = String::new();
     let mut surf_tool: Option<cncsim_cam::ToolSpec> = None;
+    // 孔壁螺旋用的长刃球头。**必须进刀具表**：刀号不在表里时解释器会退到第一把
+    // （Ø6 平底），实测把过切从 0.0 抬到 2.4%、最深 1.02 mm、8 千点——和 §56
+    // "刀号写成 0"是同一个坑。
+    let mut hole_tool: Option<cncsim_cam::ToolSpec> = None;
     if want_surface && let Some((out0, table0)) = &probe {
         // ── 曲面道刀径：默认 `min(精刀, Ø0.5)` ──
         //
@@ -1889,6 +1893,63 @@ fn run_cam_multi(
                     }
                     surf_frag = sx.gcode;
                     surf_tool = Some(tool);
+
+                    // ── 孔壁螺旋铣：高度场和点铣都够不到的那一块 ──
+                    //
+                    // 孔/轴颈的**侧壁**是这套刀路的盲区：drop-cutter 每列只认最上面
+                    // 一层，哪个方向都轮不到孔壁；曲面道又因为刀杆要横穿孔心被拒。
+                    // 叶轮 Ø4.8×21 的底开口盲孔，孔壁 2762 个点到最近刀路**平均 25 mm**
+                    // （§62.5）。螺旋铣是唯一出路：刀轴沿孔轴、球面侧向贴壁。
+                    //
+                    // **参数必须显式给**（`--hole cx,cz,r,y0,y1`，只支持沿 Y 的孔）。
+                    // 试过从残料点自动拟合，走不通：曲面道那些点的残料是用**探针**
+                    // 段表（不含曲面道）算的，比 1 mm 远的一律返回 `∞`，三十万个 `∞`
+                    // 混在一起包围盒铺满整个工件，拟合出 r13/深78 的假圆柱、还啃出
+                    // 0.6% 过切。**残料值只能用来"确认"，不能用来"定位"。**
+                    if let Some((cx, cz, hr, y0, y1)) = hole_from_args() {
+                        let (mouth_y, out_axis) = if y0 <= y1 {
+                            (y0, cncsim_math::DVec3::new(0.0, -1.0, 0.0))
+                        } else {
+                            (y1, cncsim_math::DVec3::new(0.0, 1.0, 0.0))
+                        };
+                        let depth = (y1 - y0).abs();
+                        let hd_tool = cncsim_cam::ToolSpec::ball(
+                            (2 * passes.len() + 3) as u16,
+                            (2.0 * hr * 0.83).clamp(1.0, 4.0),
+                            depth + 2.0,
+                        )
+                        .with_shank(3.0)
+                        .with_neck(0.0);
+                        let ho = cncsim_cam::surface::spiral_hole(
+                            tris,
+                            stock,
+                            &cncsim_cam::surface::HoleSpec {
+                                center: cncsim_math::DVec3::new(cx, mouth_y, cz),
+                                axis: out_axis,
+                                radius: hr,
+                                depth,
+                            },
+                            &hd_tool,
+                            0.03,
+                            0.3,
+                            0.5,
+                            12000.0,
+                            300.0,
+                            stock.max.z + 5.0,
+                        );
+                        println!(
+                            "  └ 孔壁螺旋：r{hr:.2} × 深{depth:.1} → Ø{:.1} 球头（柄 Ø3 / 刃长 {:.0}）/ {} 圈 / 切 {:.2} m / 闸门拒 {} 段",
+                            hd_tool.diameter,
+                            depth + 2.0,
+                            ho.turns,
+                            ho.cut_mm / 1000.0,
+                            ho.rejected
+                        );
+                        if !ho.gcode.is_empty() {
+                            surf_frag.push_str(&ho.gcode);
+                        }
+                        hole_tool = Some(hd_tool);
+                    }
                 }
                 Err(e) => println!("  └ 五轴曲面道生成失败：{e}"),
             }
@@ -1923,6 +1984,9 @@ fn run_cam_multi(
         };
         plan.program.gcode.insert_str(at, &surf_frag);
         if let Some(t) = &surf_tool {
+            plan.tools.push(t.to_tool_def());
+        }
+        if let Some(t) = &hole_tool {
             plan.tools.push(t.to_tool_def());
         }
     }
@@ -2417,6 +2481,13 @@ M30
         // 分档上界：(0.15,0.25] / (0.25,0.5] / (0.5,1] / >1
         let bands = [0.25f64, 0.5, 1.0];
         let mut hist = [0usize; 4];
+        // **深残料（>1 mm）的几何归因**：光说"26 道工序没接近过"没用，得知道
+        // 它们住在什么几何里——孔壁 / 深腔底 / 纯背面，处置完全不同。
+        // 半径按 0.5 mm 一档、高度按 1 mm 一档，一眼看出是"孔"还是"平面"。
+        let mut deep_r: std::collections::BTreeMap<i32, usize> = Default::default();
+        let mut deep_y: std::collections::BTreeMap<i32, usize> = Default::default();
+        let (mut deep_cx, mut deep_cz, mut deep_n) = (0.0f64, 0.0f64, 0usize);
+        let mut deep_pts: Vec<cncsim_math::DVec3> = Vec::new();
         let mut cell: std::collections::HashMap<[i32; 3], (usize, f64, f64, cncsim_math::DVec3, cncsim_math::DVec3)> =
             std::collections::HashMap::new();
         const SZ: f64 = 4.0;
@@ -2427,6 +2498,15 @@ M30
             }
             let k = bands.iter().position(|&b| dd <= b).unwrap_or(3);
             hist[k] += 1;
+            if dd > 1.0 {
+                let r = (p.x * p.x + p.z * p.z).sqrt();
+                *deep_r.entry((r / 0.5).floor() as i32).or_insert(0) += 1;
+                *deep_y.entry(p.y.floor() as i32).or_insert(0) += 1;
+                deep_cx += p.x;
+                deep_cz += p.z;
+                deep_n += 1;
+                deep_pts.push(*p);
+            }
             if dd > 1.0e8 {
                 continue; // 刀具从没接近过：不进热区（它们没有空间中心）
             }
@@ -2459,6 +2539,46 @@ M30
                 hi.z,
                 sum / *n as f64
             );
+        }
+        if !deep_r.is_empty() {
+            let fmt = |m: &std::collections::BTreeMap<i32, usize>, scale: f64| {
+                m.iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "{:.1}–{:.1}: {}",
+                            *k as f64 * scale,
+                            (*k as f64 + 1.0) * scale,
+                            v
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            };
+            println!("  ├ 深残料半径 r：{}", fmt(&deep_r, 0.5));
+            println!("  └ 深残料高度 y：{}", fmt(&deep_y, 1.0));
+            // **圆柱面 = 孔的侧壁**：drop-cutter 每个方向都只看最上面一层，孔壁
+            // 永远轮不上；点铣又因为刀杆要横穿孔心被拒。只有螺旋铣能切（`--hole`）。
+            // 这里给的不只是诊断，是**下一步该敲的命令**。
+            let tot: usize = deep_r.values().sum();
+            if let Some((k, &n)) = deep_r.iter().max_by_key(|(_, v)| **v)
+                && tot > 100
+                && n * 10 >= tot * 8
+                && let Some((cx, cz, rr)) = fit_circle_xz(&deep_pts)
+            {
+                let _ = *k;
+                // **y0 要给孔口，不是深残料的起点**：深残料只说明"那段没切到"，
+                // 而刀必须从孔口进（刃部伸出孔口的瞬间会被闸门按整根刀判掉——
+                // 实测拿残料起点当孔口，409/441 段被拒、只切了 0.01 m）。
+                // 孔口一般就在毛坯近端（工件底面），所以取 `stock.min + 1`。
+                let ymin = ((stock.min.y + 1.0).round() as i32)
+                    .min(deep_y.keys().next().copied().unwrap_or(0));
+                let ymax = deep_y.keys().next_back().copied().unwrap_or(0) + 1;
+                println!(
+                    "    · 深残料 {:.0}% 挤在 r≈{rr:.2} 的圆柱面上 → 孔的侧壁，铣削刀路切不到；\
+                     试 `--hole {cx:.1},{cz:.1},{rr:.2},{ymin},{ymax}`",
+                    n as f64 / tot as f64 * 100.0,
+                );
+            }
         }
     }
 
@@ -3340,6 +3460,81 @@ fn surface_step_from_args() -> Option<f64> {
         .find(|(a, _)| a == "--surface-step")
         .and_then(|(_, v)| v.parse::<f64>().ok())
         .filter(|v| *v > 0.0)
+}
+
+/// `--hole cx,cz,r,y0,y1`：显式指定一个**沿 Y 轴**的圆柱孔，给孔壁螺旋铣。
+///
+/// 为什么不做自动识别：孔壁的"残料值"只能确认它没被切到，不能用来定位——曲面道
+/// 的目标点残料是拿**探针**段表（不含曲面道）算的，比 margin 远的一律返回 `∞`，
+/// 三十万个 `∞` 混在一起，包围盒铺满整个工件（实测拟合出 r13/深78 的假圆柱，
+/// 还啃出 0.6% 过切）。显式给参数反而可靠。
+fn hole_from_args() -> Option<(f64, f64, f64, f64, f64)> {
+    let s = std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--hole")
+        .map(|(_, v)| v)?;
+    let v: Vec<f64> = s
+        .split(',')
+        .filter_map(|x| x.trim().parse::<f64>().ok())
+        .collect();
+    if v.len() != 5 {
+        eprintln!("--hole 要 5 个数：cx,cz,r,y0,y1（目前只支持沿 Y 的孔）");
+        return None;
+    }
+    Some((v[0], v[1], v[2], v[3], v[4]))
+}
+
+/// 圆柱面点集 → (圆心 x, 圆心 z, 半径)，用于给出 `--hole` 的准确参数。
+///
+/// 最小二乘圆拟合（Kasa）：解 `x²+z² + D·x + E·z + F = 0`，圆心 `(−D/2, −E/2)`、
+/// 半径 `√((D²+E²)/4 − F)`。**不能拿质心当圆心**——点只覆盖部分圆弧时质心会偏
+/// （叶轮实测偏 0.5 mm），拟合出来偏 0.5 就等于整圈少切/多切半毫米。
+fn fit_circle_xz(pts: &[cncsim_math::DVec3]) -> Option<(f64, f64, f64)> {
+    let n = pts.len() as f64;
+    if n < 50.0 {
+        return None;
+    }
+    let (mut sxx, mut sxz, mut szz) = (0.0, 0.0, 0.0);
+    let (mut sx, mut sz) = (0.0, 0.0);
+    let (mut sxr, mut szr, mut sr) = (0.0, 0.0, 0.0);
+    for p in pts {
+        let r = p.x * p.x + p.z * p.z;
+        sxx += p.x * p.x;
+        sxz += p.x * p.z;
+        szz += p.z * p.z;
+        sx += p.x;
+        sz += p.z;
+        sxr += p.x * r;
+        szr += p.z * r;
+        sr += r;
+    }
+    // 3×3 正规方程，克拉默法则
+    let a = [[sxx, sxz, sx], [sxz, szz, sz], [sx, sz, n]];
+    let b = [-sxr, -szr, -sr];
+    let det = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let d0 = det(a);
+    if d0.abs() < 1e-12 {
+        return None;
+    }
+    let mut solve = |col: usize| {
+        let mut m = a;
+        for r in 0..3 {
+            m[r][col] = b[r];
+        }
+        det(m) / d0
+    };
+    let (d, e, f) = (solve(0), solve(1), solve(2));
+    let (cx, cz) = (-0.5 * d, -0.5 * e);
+    let rr = (0.25 * (d * d + e * e) - f).max(0.0).sqrt();
+    if !rr.is_finite() || rr <= 0.0 {
+        return None;
+    }
+    Some((cx, cz, rr))
 }
 
 /// 设计面密采步长（= 曲面道的事实行距）。默认按扇贝高度反算。

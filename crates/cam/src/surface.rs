@@ -194,6 +194,138 @@ pub fn stepover_for_scallop(r: f64, h: f64) -> f64 {
     2.0 * (2.0 * r * h - h * h).max(0.0).sqrt()
 }
 
+/// 一个圆柱孔（或圆柱面）的螺旋铣参数。
+///
+/// `axis` 指向**刀柄方向**（孔外），`center` 在孔口平面上，孔底在
+/// `center − axis·depth`。
+#[derive(Clone, Copy, Debug)]
+pub struct HoleSpec {
+    pub center: DVec3,
+    pub axis: DVec3,
+    pub radius: f64,
+    pub depth: f64,
+}
+
+#[derive(Default, Debug)]
+pub struct HoleOut {
+    pub gcode: String,
+    pub turns: usize,
+    pub cut_mm: f64,
+    pub rejected: usize,
+}
+
+/// 圆柱孔的**螺旋铣**：球头刀刀轴沿孔轴，球心绕孔轴画小圆、沿轴螺旋下沉。
+///
+/// 为什么非要它：高度场每列只认"最上面一层"，孔壁在任何方向的列里都排不上——
+/// 叶轮那个 Ø4.8×21 的底开口盲孔，孔壁 2762 个设计面点到最近刀路**平均 25 mm**，
+/// `--multi` 的 26 道工序从没接近过（§62.5）。曲面道也不行：孔壁法向是径向，
+/// 刀轴沿径向会让刀杆横穿孔心、从对面穿出去。
+///
+/// 刀轴沿孔轴就没有这些问题：球头靠**球面侧向**切孔壁（球心偏 `R_hole − R`），
+/// 整根刀在孔轴上，Ø3 避空柄能过 Ø4.8 的孔。姿态上也不需要翻面——把工件
+/// 绕 A 转到 90°、孔口朝上即可（`--multi` 的 ±Y 工序本来就在做这件事）。
+///
+/// 闸门与点铣同源：每一小段都问 `sweep_ok`。球面层 `need = R − tol` 而球心到
+/// 孔壁恰好 `R`（相切），所以它判的是"**别处有没有材料挡路**"，不是"有没有
+/// 切到孔壁"——孔壁正是要切的。
+pub fn spiral_hole(
+    mesh: &[Tri],
+    stock: Stock,
+    hole: &HoleSpec,
+    tool: &ToolSpec,
+    tol: f64,
+    clear: f64,
+    pitch: f64,
+    rpm: f64,
+    feed: f64,
+    safe_z: f64,
+) -> HoleOut {
+    let mut out = HoleOut::default();
+    if tool.kind != ToolKind::Ball || hole.radius <= tool.radius() {
+        return out; // 球比孔还大：没有螺旋的空间
+    }
+    let ix = crate::MeshIndex::build(mesh, stock);
+    let g = Geo::of(tool, tol, clear);
+    let r = tool.radius();
+    let ax = hole.axis.normalize();
+    let rc = hole.radius - r;
+    // 孔轴的两个正交基
+    let helper = if ax.z.abs() < 0.9 { DVec3::Z } else { DVec3::Y };
+    let u = helper.cross(ax).normalize();
+    let v = ax.cross(u);
+    // 球心沿轴的行程：从孔口（球刚好切到口沿）到孔底（球与底面相切）
+    let s_max = (hole.depth - r).max(0.0);
+    let pitch = pitch.max(0.05);
+    let turns = (s_max / pitch).ceil().max(1.0) as usize;
+    let per_turn = 24usize;
+    let steps = turns * per_turn;
+    let (a_deg, c_deg) = crate::rotary::ac_of(ax);
+    let tip_at = |s: f64, th: f64| -> DVec3 {
+        let ball = hole.center - ax * s + (u * th.cos() + v * th.sin()) * rc;
+        ball - ax * r
+    };
+    let mut e = String::with_capacity(1 << 16);
+    e.push_str(&format!(
+        "(PASS HOLE T{} D{:.2} BALL 螺旋铣孔 r{:.2} 深{:.1} 螺距{:.2})\n",
+        tool.number, tool.diameter, hole.radius, hole.depth, pitch
+    ));
+    e.push_str("G49\n");
+    e.push_str(&format!("G0 Z{safe_z:.3}\n"));
+    e.push_str(&format!("T{} M6\n", tool.number));
+    e.push_str(&format!("S{rpm:.0} M3\n"));
+    e.push_str("G43.4 H1\n");
+    e.push_str(&format!("G0 A{a_deg:.3} C{c_deg:.3}\n"));
+    // 沿轴退 3 mm 再进孔，避开孔口毛刺
+    let up = tip_at(-3.0f64.min(-(r * 1.5)), 0.0);
+    e.push_str(&format!("G0 X{:.4} Y{:.4} Z{:.4}\n", up.x, up.y, up.z));
+    let mut prev = tip_at(0.0, 0.0);
+    e.push_str(&format!(
+        "G0 X{:.4} Y{:.4} Z{:.4}\n",
+        prev.x, prev.y, prev.z
+    ));
+    let mut last = prev;
+    for k in 0..=steps {
+        let t = k as f64 / steps as f64;
+        let s = s_max * t;
+        let th = t * turns as f64 * std::f64::consts::TAU;
+        let tip = tip_at(s, th);
+        if !sweep_ok(&ix, last, ax, tip, ax, &g) {
+            out.rejected += 1;
+            last = tip;
+            continue;
+        }
+        e.push_str(&format!(
+            "G1 X{:.4} Y{:.4} Z{:.4} A{a_deg:.3} C{c_deg:.3} F{feed:.0}\n",
+            tip.x, tip.y, tip.z
+        ));
+        out.cut_mm += (tip - last).length();
+        last = tip;
+        prev = tip;
+        let _ = prev;
+    }
+    // 孔底清底：球心在孔轴上走一圈，把中心那点料切掉
+    let bottom = hole.center - ax * s_max;
+    let mut ring_prev = last;
+    for k in 0..=per_turn {
+        let th = k as f64 / per_turn as f64 * std::f64::consts::TAU;
+        let ball = bottom + (u * th.cos() + v * th.sin()) * (rc * (1.0 - k as f64 / per_turn as f64));
+        let tip = ball - ax * r;
+        if sweep_ok(&ix, ring_prev, ax, tip, ax, &g) {
+            e.push_str(&format!(
+                "G1 X{:.4} Y{:.4} Z{:.4} A{a_deg:.3} C{c_deg:.3} F{feed:.0}\n",
+                tip.x, tip.y, tip.z
+            ));
+            out.cut_mm += (tip - ring_prev).length();
+        }
+        ring_prev = tip;
+    }
+    let _ = prev;
+    e.push_str(&format!("G0 Z{safe_z:.3}\n"));
+    out.turns = turns;
+    out.gcode = e;
+    out
+}
+
 pub fn generate_surface(
     mesh: &[Tri],
     stock: Stock,
