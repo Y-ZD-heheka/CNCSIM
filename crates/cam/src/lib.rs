@@ -823,6 +823,21 @@ impl MeshIndex {
             }
             cell *= 1.35;
         }
+        // **格数太少也不行**：薄大件（爪子刀 120×219×11）按"最长边/48"得到
+        // `cell = 4.56`，只有 3888 格——**每格 53 个三角形**，而叶轮是 0.37 个/格。
+        // `min_dist_signed` 每次都要扫那一格的全部三角形，于是慢两个数量级
+        // （爪子刀 158 万目标点跑 10 分钟没进串链）。把格数拉到 5 万以上：
+        // 每格三角形数跟着掉一个量级，而总内存只涨几 MB。
+        let mut guard = 0;
+        while n[0] * n[1] * n[2] < 50_000 && cell > 0.35 && guard < 64 {
+            cell *= 0.7;
+            n = [
+                ((ext.x / cell).ceil() as usize + 1).max(1),
+                ((ext.y / cell).ceil() as usize + 1).max(1),
+                ((ext.z / cell).ceil() as usize + 1).max(1),
+            ];
+            guard += 1;
+        }
         let (nx, ny, nz) = (n[0], n[1], n[2]);
         let ncells = nx * ny * nz;
         // 两遍计数排序：① 数每格的三角形数 → ② 前缀和 → ③ 填下标。

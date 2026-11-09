@@ -1581,7 +1581,22 @@ fn run_cam_multi(
     // 清根（小刀补残料圈）和五轴曲面道（补高度场看不见的面）都要这份数据，
     // 所以只跑一次。代价 = 一次纯粹的刀路走位（桌腿件 22 道 ~51 s）。
     let want_rest = !args_flag("--no-rest");
-    let want_surface = !args_flag("--no-surface");
+    let mut want_surface = !args_flag("--no-surface");
+    // **可达性太低的件直接跳过曲面道**：这条道的成本 ∝ 残料点数，而它对"大部分面
+    // 本来就够不到"的件帮助有限。阈值取 30%：爪子刀（褶皱薄件，可达 39.3%、
+    // 遮挡 20.8%、背面 39.9%）有 160 万个残料点，曲面道要跑 6 分钟才有结果——
+    // 但它确实把合格率从"无曲面道"抬到 58.3%，所以**不该跳**。
+    // 低于 30% 才是"跑了也基本是无用功"。
+    if want_surface {
+        let cov = reach.coverage();
+        if cov < 0.30 {
+            println!(
+                "  └ 曲面道跳过：可达性只有 {:.0}%（< 30%）——跑了也是给够不到的面做无用功",
+                cov * 100.0
+            );
+            want_surface = false;
+        }
+    }
     let mut probe: Option<(cncsim_sim::run::RunOutput, cncsim_tool::ToolTable)> = None;
     if want_rest || want_surface {
         let t0 = std::time::Instant::now();
@@ -3603,6 +3618,7 @@ fn fit_circle_xz(pts: &[cncsim_math::DVec3]) -> Option<(f64, f64, f64)> {
     }
     Some((cx, cz, rr))
 }
+
 
 /// 设计面密采步长（= 曲面道的事实行距）。默认按扇贝高度反算。
 fn surface_sample_from_args() -> Option<f64> {
