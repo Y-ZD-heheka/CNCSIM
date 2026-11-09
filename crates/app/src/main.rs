@@ -1874,7 +1874,11 @@ fn run_cam_multi(
                     .unwrap_or_else(|| (0.22 * stock.size().z).clamp(0.0, 12.0)));
             let mut o = cncsim_cam::surface::SurfaceOpts::new(tool.clone(), tn, stock);
             o.follow_flow = args_flag("--flow");
-            o.max_tilt_deg = surface_tilt_from_args().unwrap_or(60.0);
+            // 不写死 60：默认值由 `SurfaceOpts::new` 给（§66 起是 65°），
+            // 这里只在显式给了 `--surface-tilt` 时覆盖。写死会让改默认值失效。
+            if let Some(t) = surface_tilt_from_args() {
+                o.max_tilt_deg = t;
+            }
             o.link_mm = (2.0 * step).clamp(0.5, 3.0);
             o.out_step_mm = surface_step_from_args()
                 .unwrap_or_else(|| (1.2 * tool.radius()).clamp(0.3, 1.2));

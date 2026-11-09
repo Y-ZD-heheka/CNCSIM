@@ -89,7 +89,12 @@ impl SurfaceOpts {
             gate_tol_mm: 0.03,
             follow_flow: false,
             max_a_deg: crate::rotary::A_LIMIT_DEG,
-            max_tilt_deg: 60.0,
+            // 刀轴最大倾斜角（候选轴 = 法向 + 0.6×tilt 圈 + 1.0×tilt 圈）。
+            // §66 扫过 60/65/70/75/80/85：**65 是两个件共同的最高点**——
+            //   叶轮 60→65：合格 99.6→99.8、残料 0.4→0.1（刀杆撞 46946→33609）；
+            //   桌腿 60/65/70 都是 99.9/0.0/0.1，75 才退到 99.8/0.2。
+            // 85 起刃部圆柱开始扫伤相邻面（过切 0.0→0.1%），所以不是越大越好。
+            max_tilt_deg: 65.0,
             spindle_rpm: 12_000,
             feed_mm_min: 600.0,
             plunge_mm_min: 200.0,
@@ -2196,25 +2201,30 @@ mod tests {
     }
 
     /// 链间快移**不许穿墙**：两个点分别在薄墙两侧时判"擦料"。
+    ///
+    /// **几何要留出刀柄间隙**：`link_ok` 查的是整根刀（球 + 刃部圆柱 + 颈/柄），
+    /// 老版本这堵墙放在 `x = 0.5`（正好等于球半径），那时只查球和刃部所以能过；
+    /// 加上柄检查后 Ø6 柄在 0.5 mm 处必然算撞——那是**对的**，所以把墙挪到
+    /// `x = 2.0` 并把柄缩到 Ø2（间隙 1.3 < 2.0）。
     #[test]
     fn link_check_refuses_to_cross_a_wall() {
         let wall = vec![
             [
-                DVec3::new(0.5, -5.0, -5.0),
-                DVec3::new(0.5, 5.0, -5.0),
-                DVec3::new(0.5, 5.0, 5.0),
+                DVec3::new(2.0, -5.0, -5.0),
+                DVec3::new(2.0, 5.0, -5.0),
+                DVec3::new(2.0, 5.0, 5.0),
             ],
             [
-                DVec3::new(0.5, -5.0, -5.0),
-                DVec3::new(0.5, 5.0, 5.0),
-                DVec3::new(0.5, -5.0, 5.0),
+                DVec3::new(2.0, -5.0, -5.0),
+                DVec3::new(2.0, 5.0, 5.0),
+                DVec3::new(2.0, -5.0, 5.0),
             ],
         ];
         let ix = crate::MeshIndex::build(&wall, stock());
-        let g = Geo::of(&ToolSpec::ball(0, 1.0, 10.0), 0.03, 0.3);
+        let g = Geo::of(&ToolSpec::ball(0, 1.0, 10.0).with_shank(1.0), 0.03, 0.3);
         let a = DVec3::new(0.0, 0.0, 0.0);
         let same = DVec3::new(0.0, 0.0, 2.0);
-        let across = DVec3::new(1.0, 0.0, 0.0);
+        let across = DVec3::new(4.0, 0.0, 0.0);
         assert!(link_ok(&ix, a, DVec3::Z, same, DVec3::Z, &g), "同侧该放行");
         assert!(
             !link_ok(&ix, a, DVec3::Z, across, DVec3::Z, &g),
