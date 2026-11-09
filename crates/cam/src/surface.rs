@@ -214,6 +214,43 @@ pub struct HoleOut {
     pub rejected: usize,
 }
 
+/// 只用**球面闸门**探一遍：给定刀径，多少比例的目标点"球塞不下"。
+///
+/// 这是选刀径的**廉价代理**：塞不下的点这条道永远切不到（刀具几何的硬门槛），
+/// 而它比"跑完整条道看合格率"便宜两个数量级——每点一次 `min_dist_signed`，
+/// 不用串链、不用出码。
+///
+/// 实测标定（§62/§67）：
+///
+/// | 件 | Ø0.5 | Ø0.3 | 最优 |
+/// |---|---|---|---|
+/// | 叶轮 | 1.3% | 2.2% | Ø0.5（再小球进去了 Ø6 柄进不去） |
+/// | 桌腿 | 19.2% | 15.9% | Ø0.3（**合格 99.7 → 99.9、残料 0.3 → 0.1**） |
+///
+/// 所以判据是"塞不下 > 10% 就说明刀太大"，而不是"越小越好"。
+pub fn probe_ball_blocked(
+    mesh: &[Tri],
+    stock: Stock,
+    targets: &[(DVec3, DVec3)],
+    d: f64,
+    tol: f64,
+) -> f64 {
+    if targets.is_empty() || d <= 0.0 {
+        return 0.0;
+    }
+    let ix = crate::MeshIndex::build(mesh, stock);
+    let r = 0.5 * d;
+    let need = (r - tol).max(1e-6);
+    let blocked = targets
+        .par_iter()
+        .filter(|(p, n)| {
+            let n = n.normalize();
+            ix.min_dist_signed(*p + n * r, need) < need
+        })
+        .count();
+    blocked as f64 / targets.len() as f64
+}
+
 /// 圆柱孔的**螺旋铣**：球头刀刀轴沿孔轴，球心绕孔轴画小圆、沿轴螺旋下沉。
 ///
 /// 为什么非要它：高度场每列只认"最上面一层"，孔壁在任何方向的列里都排不上——

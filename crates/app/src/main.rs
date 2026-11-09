@@ -1735,8 +1735,8 @@ fn run_cam_multi(
         // 再小（Ø0.3）叶轮反而变差（刀杆撞 9.5% → 18.2%：球进去了、Ø6 柄
         // 进不去），所以 **0.5 是两件的共同最优**；薄壁件可用 `--surface-d`
         // 单独压到 0.3（桌腿 → 99.9%）。
-        let ds = surface_d_from_args().unwrap_or(d_finish.min(0.5));
-        let rs = 0.5 * ds;
+        let ds0 = surface_d_from_args().unwrap_or(d_finish.min(0.5));
+        let scallop = surface_scallop_from_args().unwrap_or(0.04);
         // ── 采样步长 = **事实上的行距**，按允许扇贝高度反算 ──
         //
         //   s = 2·√(2·R·h − h²)，h = `--surface-scallop`（默认 0.04）
@@ -1746,26 +1746,56 @@ fn run_cam_multi(
         // （h = R − √(R²−(s/2)²)）。实测桌腿残料 0.15–0.5、均值 0.29，与
         // 公式逐点吻合；把行距收到 0.3 后残料 2.0% → 0.5%，配上 Ø0.5 刀到 0.3%。
         // 采样步长还顺带定了串链半径（`link = 2×step`），两者必须一起变。
-        let scallop = surface_scallop_from_args().unwrap_or(0.04);
-        let step = surface_sample_from_args().unwrap_or_else(|| {
-            cncsim_cam::surface::stepover_for_scallop(rs, scallop).clamp(0.15, 0.8)
-        });
-        let smp = cncsim_voxel::meshvol::surface_samples(tris, step);
-        lap.lap("曲面目标采样");
-        let pts: Vec<cncsim_math::DVec3> = smp.iter().map(|(p, _, _)| *p).collect();
-        let d = cncsim_sim::compare::sweep_deviation(&out0.cut_segs, table0, &pts, 1.0);
-        lap.lap("曲面偏差扫描");
-        let targets: Vec<(cncsim_math::DVec3, cncsim_math::DVec3)> = smp
-            .iter()
-            .zip(&d)
-            // **`+∞` 也是残料**：`sweep_deviation` 用 `margin` 剪枝后，"比
-            // margin 还远"的点如实返回 `∞`（以前是粗 AABB 兜住了大半工件，
-            // 让它们以有限值混进来）。原来的 `is_finite()` 过滤因此会把**深
-            // 残料整片挡在目标集外**——实测桌腿件 1.6% 的设计面没人管
-            // （合格 96.5% → 98.1%、残料 3.5% → 1.9%）。这里显式接住 ∞。
-            .filter(|(_, dd)| **dd > 0.15)
-            .map(|((p, n, _), _)| (*p, *n))
-            .collect();
+        let step_of = |d: f64| {
+            surface_sample_from_args().unwrap_or_else(|| {
+                cncsim_cam::surface::stepover_for_scallop(0.5 * d, scallop).clamp(0.15, 0.8)
+            })
+        };
+        // 采样 → 偏差 → 残料点三步是绑定的：刀径一变，行距、采样、目标点全要重来。
+        let build = |step: f64| {
+            let smp = cncsim_voxel::meshvol::surface_samples(tris, step);
+            let pts: Vec<cncsim_math::DVec3> = smp.iter().map(|(p, _, _)| *p).collect();
+            let d = cncsim_sim::compare::sweep_deviation(&out0.cut_segs, table0, &pts, 1.0);
+            let targets: Vec<(cncsim_math::DVec3, cncsim_math::DVec3)> = smp
+                .iter()
+                .zip(&d)
+                // **`+∞` 也是残料**（`margin` 剪枝后如实返回 ∞，别用 `is_finite` 挡掉）
+                .filter(|(_, dd)| !dd.is_finite() || **dd > 0.15)
+                .map(|((p, n, _), _)| (*p, *n))
+                .collect();
+            (smp, pts, d, targets)
+        };
+        let mut step = step_of(ds0);
+        let (mut smp, mut pts, mut d, mut targets) = build(step);
+        // ── 刀径自适应：残料点里"球面塞不下"超过 10% 就说明刀太大，缩一档 ──
+        //
+        // 两个件的最优刀径**不一样**：桌腿 Ø0.3 → 合格 99.9%、残料 0.1%；
+        // 叶轮 Ø0.5 → 98.6%，缩到 Ø0.3 反而坏（球进去了 Ø6 柄进不去，
+        // 刀杆撞 9.5% → 18.2%）。
+        // 分母必须是**残料点**：桌腿全设计面只有 1.9% 塞不下（被大片好面稀释），
+        // 而残料点里是 **19.2%**——用全设计面判，永远不会触发。
+        let ds = if surface_d_from_args().is_some() {
+            ds0
+        } else {
+            let frac = cncsim_cam::surface::probe_ball_blocked(tris, stock, &targets, ds0, 0.03);
+            if frac > 0.10 {
+                let d2 = (ds0 * 0.6).max(0.3);
+                println!(
+                    "  └ 刀径自适应：Ø{ds0:.1} 的残料点里球面塞不下 {:.0}% → 换 Ø{d2:.1}",
+                    frac * 100.0
+                );
+                step = step_of(d2);
+                let t = build(step);
+                smp = t.0;
+                pts = t.1;
+                d = t.2;
+                targets = t.3;
+                d2
+            } else {
+                ds0
+            }
+        };
+        lap.lap("曲面目标采样 + 偏差扫描");
         println!(
             "五轴曲面：设计面密采 {} 点（{:.2} mm）→ 残料 {} 点（{:.1}%）",
             smp.len(),
