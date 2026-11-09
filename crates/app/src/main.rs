@@ -1746,10 +1746,24 @@ fn run_cam_multi(
         // （h = R − √(R²−(s/2)²)）。实测桌腿残料 0.15–0.5、均值 0.29，与
         // 公式逐点吻合；把行距收到 0.3 后残料 2.0% → 0.5%，配上 Ø0.5 刀到 0.3%。
         // 采样步长还顺带定了串链半径（`link = 2×step`），两者必须一起变。
+        // **采样点预算**：`surface_samples` 采的是**全表面积**，不是投影面积。
+        // 爪子刀（20 万三角形、120×219 的褶皱薄件）表面积 ≈ 0.29 m²，
+        // 0.2 行距下就是 **721 万点**——实测跑到 7 分钟还没进串链。
+        // 所以按"预算 300 万点"反算一个步长下限，行距比它小就抬到它。
+        // 大件的残料点本来就有 80%+ 不可达（爪子刀 84%），精度让给可完成性。
+        // 显式 `--surface-sample` 时不套预算（用户自己负责）。
+        let area: f64 = tris
+            .iter()
+            .map(|t| (t[1] - t[0]).cross(t[2] - t[0]).length() * 0.5)
+            .sum();
+        let step_budget = (area / 3.0e6).sqrt();
         let step_of = |d: f64| {
-            surface_sample_from_args().unwrap_or_else(|| {
-                cncsim_cam::surface::stepover_for_scallop(0.5 * d, scallop).clamp(0.15, 0.8)
-            })
+            if let Some(v) = surface_sample_from_args() {
+                return v;
+            }
+            let want =
+                cncsim_cam::surface::stepover_for_scallop(0.5 * d, scallop).clamp(0.15, 0.8);
+            want.max(step_budget)
         };
         // 采样 → 偏差 → 残料点三步是绑定的：刀径一变，行距、采样、目标点全要重来。
         let build = |step: f64| {
@@ -1778,7 +1792,7 @@ fn run_cam_multi(
             ds0
         } else {
             let frac = cncsim_cam::surface::probe_ball_blocked(tris, stock, &targets, ds0, 0.03);
-            if frac > 0.10 {
+            if frac > 0.10 && frac < 0.40 {
                 let d2 = (ds0 * 0.6).max(0.3);
                 println!(
                     "  └ 刀径自适应：Ø{ds0:.1} 的残料点里球面塞不下 {:.0}% → 换 Ø{d2:.1}",
@@ -1792,6 +1806,15 @@ fn run_cam_multi(
                 targets = t.3;
                 d2
             } else {
+                if frac >= 0.40 {
+                    // **> 40% 不缩刀**：那不是"刀太大"，是这些点根本不可达
+                    // （背面/深腔/褶皱里）。爪子刀实测 55%，缩到 Ø0.3 后残料
+                    // 仍有 84%——白把点数翻了 3.5 倍（721 万）。
+                    println!(
+                        "  └ 刀径自适应：Ø{ds0:.1} 塞不下 {:.0}% 但多为不可达面，不缩刀",
+                        frac * 100.0
+                    );
+                }
                 ds0
             }
         };
