@@ -251,6 +251,35 @@ pub fn probe_ball_blocked(
     blocked as f64 / targets.len() as f64
 }
 
+/// 只保留"球面塞得下"的目标点。
+///
+/// 塞不下的点这条道**任何刀轴都切不到**（球心 `p+R·n` 处放不下球 = 别的面挡着），
+/// 是**最严格**的可达性必要条件——不像"面朝 45°"那种近似判据会把陡壁/朝下的面
+/// 误杀。用它预筛能把"注定切不到"的点挡在串链之外：爪子刀（褶皱薄件）350 万
+/// 残料点里 55% 是这种，全送进曲面道要跑十分钟。
+pub fn filter_ball_ok(
+    mesh: &[Tri],
+    stock: Stock,
+    targets: Vec<(DVec3, DVec3)>,
+    d: f64,
+    tol: f64,
+) -> Vec<(DVec3, DVec3)> {
+    if targets.is_empty() || d <= 0.0 {
+        return targets;
+    }
+    let ix = crate::MeshIndex::build(mesh, stock);
+    let r = 0.5 * d;
+    let need = (r - tol).max(1e-6);
+    targets
+        .par_iter()
+        .filter(|(p, n)| {
+            let n = n.normalize();
+            ix.min_dist_signed(*p + n * r, need) >= need
+        })
+        .cloned()
+        .collect()
+}
+
 /// 圆柱孔的**螺旋铣**：球头刀刀轴沿孔轴，球心绕孔轴画小圆、沿轴螺旋下沉。
 ///
 /// 为什么非要它：高度场每列只认"最上面一层"，孔壁在任何方向的列里都排不上——

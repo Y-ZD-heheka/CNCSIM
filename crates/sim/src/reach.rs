@@ -133,9 +133,108 @@ pub struct Visibility {
     pub total_area_mm2: f64,
 }
 
+/// 可达性掩码的空间索引：任意点 → 最近样本的 `masks` / `facing`。
+///
+/// 为什么需要它：曲面道的目标点是**自己的密采**（行距 0.2~0.8 mm，几十万到几百万点），
+/// 和 `visibility` 的样本（1.5 mm 步距，十几万点）不是同一套点。想在曲面道里做
+/// "只切够得到的面"的筛选，就得把密采点映射回样本。
+///
+/// **判据用 `facing == 0` 而不是 `masks == 0`**：后者是"被挡住"——换刀轴/倾斜可能
+/// 救得回来，而曲面道（5 轴点铣）正是干这个的；前者是"背面"，任何方向都朝不到，
+/// 除了翻面装夹。只有后者该筛掉。
+pub struct MaskIndex {
+    cell: f64,
+    lo: DVec3,
+    n: [usize; 3],
+    buckets: Vec<Vec<u32>>,
+    points: Vec<DVec3>,
+    masks: Vec<DirMask>,
+    facing: Vec<DirMask>,
+}
+
+impl MaskIndex {
+    pub fn build(vis: &Visibility, cell: f64) -> Self {
+        let cell = cell.max(1e-3);
+        let (mut lo, mut hi) = (
+            DVec3::splat(f64::INFINITY),
+            DVec3::splat(f64::NEG_INFINITY),
+        );
+        for p in &vis.points {
+            lo = DVec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+            hi = DVec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+        }
+        if vis.points.is_empty() {
+            lo = DVec3::ZERO;
+            hi = DVec3::ZERO;
+        }
+        let dim = |a: f64, b: f64| (((b - a) / cell).floor() as usize + 1).max(1);
+        let n = [dim(lo.x, hi.x), dim(lo.y, hi.y), dim(lo.z, hi.z)];
+        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); n[0] * n[1] * n[2]];
+        let cell_of = |p: DVec3| -> usize {
+            let f = |v: f64, l: f64, m: usize| {
+                (((v - l) / cell).floor() as i64).clamp(0, m as i64 - 1) as usize
+            };
+            (f(p.z, lo.z, n[2]) * n[1] + f(p.y, lo.y, n[1])) * n[0] + f(p.x, lo.x, n[0])
+        };
+        for (i, p) in vis.points.iter().enumerate() {
+            buckets[cell_of(*p)].push(i as u32);
+        }
+        Self {
+            cell,
+            lo,
+            n,
+            buckets,
+            points: vis.points.clone(),
+            masks: vis.masks.clone(),
+            facing: vis.facing.clone(),
+        }
+    }
+
+    /// `p` 最近样本的 `(masks, facing)`；3×3×3 格内无样本时返回 `(0, 0)`——保守，
+    /// 但调用方只用 `facing` 判"背面"，查不到就当背面（不切它）。
+    pub fn near(&self, p: DVec3) -> (DirMask, DirMask) {
+        let f = |v: f64, l: f64, m: usize| {
+            (((v - l) / self.cell).floor() as i64).clamp(0, m as i64 - 1) as i32
+        };
+        let (ci, cj, ck) = (
+            f(p.x, self.lo.x, self.n[0]),
+            f(p.y, self.lo.y, self.n[1]),
+            f(p.z, self.lo.z, self.n[2]),
+        );
+        let mut best = f64::INFINITY;
+        let mut out = (0, 0);
+        for dk in -1..=1 {
+            for dj in -1..=1 {
+                for di in -1..=1 {
+                    let (i, j, k) = (ci + di, cj + dj, ck + dk);
+                    if i < 0
+                        || j < 0
+                        || k < 0
+                        || i >= self.n[0] as i32
+                        || j >= self.n[1] as i32
+                        || k >= self.n[2] as i32
+                    {
+                        continue;
+                    }
+                    let c =
+                        (k as usize * self.n[1] + j as usize) * self.n[0] + i as usize;
+                    for &s in &self.buckets[c] {
+                        let s = s as usize;
+                        let d = (self.points[s] - p).length_squared();
+                        if d < best {
+                            best = d;
+                            out = (self.masks[s], self.facing[s]);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 impl Visibility {
-    pub fn coverage(&self, m: DirMask) -> f64 {
-        if self.total_area_mm2 <= 0.0 {
+    pub fn coverage(&self, m: DirMask) -> f64 {        if self.total_area_mm2 <= 0.0 {
             return 1.0;
         }
         self.area_with(m) / self.total_area_mm2

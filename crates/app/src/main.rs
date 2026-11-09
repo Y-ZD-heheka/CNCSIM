@@ -1818,6 +1818,20 @@ fn run_cam_multi(
                 ds0
             }
         };
+        // **球面预筛**（在刀径定下来之后做，见下）：塞不下的点这条道任何刀轴都
+        // 切不到，别送进串链。爪子刀（褶皱薄件）350 万残料点里 55% 是这种。
+        //
+        // 位置很关键：`probe_ball_blocked` 必须用**未筛**的点，否则筛完就"都塞得下"、
+        // 自适应永远不触发（桌腿的 24% 正是缩刀的依据）。
+        let n_raw = targets.len();
+        targets = cncsim_cam::surface::filter_ball_ok(tris, stock, targets, ds, 0.03);
+        if n_raw > 0 && targets.len() < n_raw {
+            println!(
+                "  └ 球面预筛：残料 {n_raw} 点 → {} 点（挡掉 {:.0}%：球心放不下 Ø{ds:.1} 球）",
+                targets.len(),
+                (1.0 - targets.len() as f64 / n_raw as f64) * 100.0
+            );
+        }
         lap.lap("曲面目标采样 + 偏差扫描");
         println!(
             "五轴曲面：设计面密采 {} 点（{:.2} mm）→ 残料 {} 点（{:.1}%）",
