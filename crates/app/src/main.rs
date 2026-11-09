@@ -2368,6 +2368,19 @@ M30
     lap.lap(if dry { "刀路体检（dry）" } else { "仿真" });
     let dsw = cncsim_sim::compare::sweep_deviation(&out.cut_segs, &table, &pts, 1.0);
     lap.lap("解析口径：扫掠偏差");
+    // 调试/出图用：把逐点偏差写成 CSV（`x,y,z,d`，d 为 +∞ 表示刀具从没接近）。
+    // 只在环境变量给了路径时写，不占 CLI、不影响任何指标。
+    if let Ok(p) = std::env::var("CNCSIM_DUMP_DEV") {
+        use std::io::Write as _;
+        if let Ok(f) = std::fs::File::create(&p) {
+            let mut w = std::io::BufWriter::new(f);
+            for (q, d) in pts.iter().zip(&dsw) {
+                let _ = writeln!(w, "{:.3},{:.3},{:.3},{:.4}", q.x, q.y, q.z, d);
+            }
+            let _ = w.flush();
+            println!("  └ 逐点偏差已写出：{p}（{} 点）", pts.len());
+        }
+    }
     let ss = cncsim_sim::compare::sweep_stats(&dsw, 0.15, 1.0);
     println!(
         "解析口径（扫掠体，与 h 无关）：{} 点 / 平均 |d| {:.3} / P95 {:.3} / 合格(±0.15) {:.1}% / 过切 {:.1}% / 残料 {:.1}% / 最大过切 {:+.2}",
