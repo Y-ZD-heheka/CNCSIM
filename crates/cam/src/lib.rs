@@ -782,7 +782,35 @@ pub(crate) struct MeshIndex {
     watertight: bool,
 }
 
+/// 一批点（通常是**仿真出来的加工面顶点**）到设计网格的有符号距离。
+///
+/// 正 = 留在设计面外（残料），负 = 切进设计面（过切）。出图用：把加工面本身
+/// 按这个值上色，看到的就是"实际切出来的形状差在哪"，而不是设计面上的采样。
+pub fn design_signed_distances(
+    mesh: &[Tri],
+    stock: Stock,
+    points: &[DVec3],
+    reach: f64,
+) -> Vec<f64> {
+    MeshIndex::build(mesh, stock).signed_distances(points, reach)
+}
+
 impl MeshIndex {
+    /// 一批点到网格的**有符号距离**（正 = 在材料外，负 = 埋在材料里）。
+    ///
+    /// 出图用：把仿真出来的加工面顶点逐点问"离设计面多远"，正的就是残料、
+    /// 负的就是过切。口径与所有闸门完全一致（同一个 `min_dist_signed`），
+    /// 所以图上看到的红蓝和报告里的百分比是同一套数，不是另算一套。
+    ///
+    /// `reach` 之外的返回截断值——出图只关心 1~2 mm 量级，没必要算精确。
+    pub fn signed_distances(&self, points: &[DVec3], reach: f64) -> Vec<f64> {
+        use rayon::prelude::*;
+        points
+            .par_iter()
+            .map(|p| self.min_dist_signed(*p, reach))
+            .collect()
+    }
+
     pub(crate) fn build(mesh: &[Tri], stock: Stock) -> Self {
         let ext = stock.size();
         // ── 格子尺寸 ──

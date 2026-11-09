@@ -2968,6 +2968,39 @@ M30
             &rmesh,
             0.15,
         );
+        // 调试/出图用：把**仿真出来的加工面**逐点写成 CSV（位置 + 到设计面的
+        // 有符号距离 + 法向）。和 `CNCSIM_DUMP_DEV` 同一套格式，能直接喂给
+        // `tools/make_3d_viewer.py`——区别是那个画的是**设计面**上的采样，
+        // 这个画的是**实际切出来的面**。
+        if let Ok(p) = std::env::var("CNCSIM_DUMP_MACHINED") {
+            use std::io::Write as _;
+            let q: Vec<cncsim_math::DVec3> = rmesh
+                .positions
+                .iter()
+                .map(|v| cncsim_math::DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64))
+                .collect();
+            let d = cncsim_cam::design_signed_distances(&tris, stock, &q, 2.0);
+            if let Ok(f) = std::fs::File::create(&p) {
+                let mut w = std::io::BufWriter::new(f);
+                for (i, v) in q.iter().enumerate() {
+                    let n = rmesh.normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
+                    let _ = writeln!(
+                        w,
+                        "{:.3},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4}",
+                        v.x, v.y, v.z, d[i], n[0], n[1], n[2]
+                    );
+                }
+                let _ = w.flush();
+                let (nr, ng) = (
+                    d.iter().filter(|x| **x > 0.15).count(),
+                    d.iter().filter(|x| **x < -0.15).count(),
+                );
+                println!(
+                    "  └ 加工面已写出：{p}（{} 顶点，残料 {nr} / 过切 {ng}）",
+                    q.len()
+                );
+            }
+        }
         println!(
             "相似度（LOD{lod} / {} 顶点）：Hausdorff {:.3}（正向 {:.3} / 反向 {:.3}） / Chamfer {:.3} / F1@0.15 {:.3}（P {:.3} / R {:.3}）",
             sim.actual_points, sim.hausdorff, sim.design_max, sim.actual_max, sim.chamfer,

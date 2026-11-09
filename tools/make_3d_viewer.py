@@ -15,6 +15,13 @@ import numpy as np
 src, dst = sys.argv[1], sys.argv[2]
 name = sys.argv[3] if len(sys.argv) > 3 else "工件"
 TARGET = 125000
+# 第 4 个参数：去重格子边长（mm）。**加工面顶点**是等密度网格顶点，去重会把
+# 本来就均匀的采样挖成麻点——那种输入传 0 关掉去重。
+CELL = float(sys.argv[4]) if len(sys.argv) > 4 else 0.30
+# 第 5 个参数：容差带（mm）。加工面顶点本身带体素离散误差（≈0.3），用 0.15 判
+# 会把离散噪声全点亮；加工面视图一般给 0.5。
+TOL = float(sys.argv[5]) if len(sys.argv) > 5 else 0.15
+NOTE = sys.argv[6] if len(sys.argv) > 6 else ""
 
 rows = np.loadtxt(src, delimiter=",")
 P = rows[:, 0:3]
@@ -23,7 +30,7 @@ N = rows[:, 4:7]
 good = np.isfinite(D) & (np.abs(D) < 1e8)
 P, D, N = P[good], D[good], N[good]
 
-tol = 0.15
+tol = TOL
 bad = np.abs(D) > tol
 hot = int(bad.sum())
 # 统计必须在**抽稀之前**算：抽稀后分母变成图内点数，合格率会算成 98.7% 那种假数
@@ -34,17 +41,20 @@ ok = 100.0 * (1 - (n_res + n_gouge) / allp)
 
 
 # 抽稀：按 0.55 mm 的立方格投票，每格留一个（超差点不参与抽稀）
-cell = 0.30
-key = np.floor(P / cell).astype(np.int64)
+cell = CELL
+key = np.floor(P / max(cell, 1e-6)).astype(np.int64)
 key = (key[:, 0] * 73856093) ^ (key[:, 1] * 19349663) ^ (key[:, 2] * 83492791)
 keep = np.zeros(len(P), dtype=bool)
 keep[bad] = True
-seen = {}
-for i in np.where(~bad)[0]:
-    k = int(key[i])
-    if k not in seen:
-        seen[k] = i
-        keep[i] = True
+if cell <= 0:
+    keep[:] = True                      # 不去重：加工面本来就是均匀网格顶点
+else:
+    seen = {}
+    for i in np.where(~bad)[0]:
+        k = int(key[i])
+        if k not in seen:
+            seen[k] = i
+            keep[i] = True
 idx = np.where(keep)[0]
 if len(idx) > TARGET:
     # 只抽"好点"，超差点一个不动——否则 442 个残料点会被抽走三成
@@ -104,8 +114,7 @@ html = f"""<!DOCTYPE html>
   .foot {{ color:#6f7b8a; font-size:12px; margin-top:12px; }}
 </style></head><body><div class="wrap">
   <h1>{name} · 3D 偏差视图</h1>
-  <div class="sub">解析口径逐点偏差（{allp} 点采样，图中 {len(P)} 点）· 拖动旋转 / 滚轮缩放 ·
-    颜色＝偏离设计面，明暗＝曲率朝向</div>
+  <div class="sub">{allp} 个点（图中 {len(P)} 点）· 拖动旋转 / 滚轮缩放 · 颜色＝到设计面的距离，明暗＝法向朝向</div>
 
   <div class="stage">
     <canvas id="cv" width="980" height="700"></canvas>
@@ -122,14 +131,13 @@ html = f"""<!DOCTYPE html>
   </div>
 
   <div class="legend">
-    <span class="sw"><i style="background:linear-gradient(90deg,#969aa0,#c3c6ca)"></i>合格带内 |d| ≤ 0.15</span>
+    <span class="sw"><i style="background:linear-gradient(90deg,#969aa0,#c3c6ca)"></i>合格带内 |d| ≤ {TOL}</span>
     <span class="sw"><i style="background:linear-gradient(90deg,#ffb066,#ff3b1f)"></i>残料（切少了）</span>
     <span class="sw"><i style="background:linear-gradient(90deg,#74a8ff,#2b6fe0)"></i>过切（切多了）</span>
-    <span style="margin-left:auto">合格率 {ok:.1f}% · 残料 0.1% · 过切 0.0%</span>
+    <span style="margin-left:auto">带内（±{TOL}）{ok:.1f}% · 超差 {n_res + n_gouge} 点</span>
   </div>
 
-  <div class="foot">点云来自 `CNCSIM_DUMP_DEV` 的逐点偏差；超差点<b>一个不抽</b>，
-    其余按 0.55 mm 空间格抽稀——否则 442 个残料点会被 33 万好点稀释得看不见。</div>
+  <div class="foot">{NOTE}</div>
 </div>
 <script>
 const B64 = "{blob}";
@@ -167,7 +175,7 @@ const num = (k, d) => qs.has(k) ? parseFloat(qs.get(k)) : d;
 let yaw = num('yaw', 0.6), pitch = num('pitch', -0.45), zoom = num('zoom', 1.0);
 let spin = !qs.has('static'), onlyBad = qs.has('only');
 
-const TOL = 0.15;
+const TOL = {TOL};
 function colorOf(d, shade, out) {{
   let r, g, b;
   if (d > TOL) {{
