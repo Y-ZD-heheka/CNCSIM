@@ -2368,17 +2368,41 @@ M30
     lap.lap(if dry { "刀路体检（dry）" } else { "仿真" });
     let dsw = cncsim_sim::compare::sweep_deviation(&out.cut_segs, &table, &pts, 1.0);
     lap.lap("解析口径：扫掠偏差");
-    // 调试/出图用：把逐点偏差写成 CSV（`x,y,z,d`，d 为 +∞ 表示刀具从没接近）。
+    // 调试/出图用：把逐点偏差写成 CSV（`x,y,z,d,nx,ny,nz`，d 为 +∞ 表示刀具从没接近）。
     // 只在环境变量给了路径时写，不占 CLI、不影响任何指标。
     if let Ok(p) = std::env::var("CNCSIM_DUMP_DEV") {
         use std::io::Write as _;
+        // 法向用于出图着色。`surface_points_with_normals` 会跳过退化三角形，
+        // 点数对不上时说明网格里有退化面——那就只写位置，让出图端退化成平光。
+        let pn = cncsim_voxel::meshvol::surface_points_with_normals(tris, 0.8);
+        let with_n = pn.len() == pts.len();
+        if !with_n {
+            println!(
+                "  └ 警告：法向点数 {} ≠ 采样点数 {}，本次只写位置",
+                pn.len(),
+                pts.len()
+            );
+        }
         if let Ok(f) = std::fs::File::create(&p) {
             let mut w = std::io::BufWriter::new(f);
-            for (q, d) in pts.iter().zip(&dsw) {
-                let _ = writeln!(w, "{:.3},{:.3},{:.3},{:.4}", q.x, q.y, q.z, d);
+            for (i, (q, d)) in pts.iter().zip(&dsw).enumerate() {
+                if with_n {
+                    let n = pn[i].1;
+                    let _ = writeln!(
+                        w,
+                        "{:.3},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4}",
+                        q.x, q.y, q.z, d, n.x, n.y, n.z
+                    );
+                } else {
+                    let _ = writeln!(w, "{:.3},{:.3},{:.3},{:.4},0,0,1", q.x, q.y, q.z, d);
+                }
             }
             let _ = w.flush();
-            println!("  └ 逐点偏差已写出：{p}（{} 点）", pts.len());
+            println!(
+                "  └ 逐点偏差已写出：{p}（{} 点，含法向 {}）",
+                pts.len(),
+                with_n
+            );
         }
     }
     let ss = cncsim_sim::compare::sweep_stats(&dsw, 0.15, 1.0);
