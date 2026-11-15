@@ -782,6 +782,26 @@ pub(crate) struct MeshIndex {
     watertight: bool,
 }
 
+/// 一批点（通常设计面采样）的**局部壁厚**：沿 `-n` 到对面反向面的距离。
+///
+/// 返回 `f64::INFINITY` 表示这个方向没有对面壁（开放面/外轮廓）。判定"切穿"
+/// 时用它做分母：`切深 > 壁厚` 就是整壁穿透，`切深 > 0.5·壁厚` 是切过中线。
+pub fn wall_thicknesses(
+    mesh: &[Tri],
+    stock: Stock,
+    points: &[DVec3],
+    normals: &[DVec3],
+    reach: f64,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    let ix = MeshIndex::build(mesh, stock);
+    points
+        .par_iter()
+        .zip(normals)
+        .map(|(p, n)| ix.opposite_wall(*p, n.normalize(), reach))
+        .collect()
+}
+
 /// 一批点（通常是**仿真出来的加工面顶点**）到设计网格的有符号距离。
 ///
 /// 正 = 留在设计面外（残料），负 = 切进设计面（过切）。出图用：把加工面本身
@@ -1002,6 +1022,71 @@ impl MeshIndex {
     /// **精确性**：壳层 `r`（切比雪夫半径）里的格子，其 AABB 到 `p` 的距离
     /// ≥ `(r−1)·cell`，所以 `best < ((r−1)·cell)²` 时后续壳层不可能含更近的
     /// 三角形——提前收工不改任何读数。格内仍按格子 AABB 做同一道剪枝。
+    /// 沿 `-n` 找到的**对面壁**距离（局部壁厚）；找不到返回 `f64::INFINITY`。
+    ///
+    /// 为什么需要它：现有所有偏差口径都是"点到刀具扫掠体"的距离，**没有壁完整性
+    /// 的概念**。一根 0.20 mm 的薄壁被球头切穿，距离值只报 −0.28，和"切深 0.28
+    /// 的浅坑"在数值上完全一样——百分比一四舍五入就成了 0.0%。判"切穿"必须
+    /// 拿切深和局部壁厚比。
+    ///
+    /// 判据三条，缺一不可：
+    /// * 对面三角形法向与 `+n` 同向（`n_far · n > 0.3`）——否则会把同一侧的
+    ///   邻近面当成"对面的壁"，壁厚算成 0.1；
+    /// * 沿 `-n` 的距离为正且在 `reach` 内；
+    /// * **投影点落在三角形内**（重心坐标）——只按平面距离算，斜掠的相邻面
+    ///   会给出一个不存在的壁。
+    pub(crate) fn opposite_wall(&self, p: DVec3, n: DVec3, reach: f64) -> f64 {
+        let (nx, ny) = (self.n[0], self.n[1]);
+        let (i0, i1) = self.span(0, p.x, reach);
+        let (j0, j1) = self.span(1, p.y, reach);
+        let (k0, k1) = self.span(2, p.z, reach);
+        let mut best = f64::INFINITY;
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                let base = (k * ny + j) * nx;
+                for i in i0..=i1 {
+                    for &ti in self.cell_tris(base + i) {
+                        let t = &self.tris[ti as usize];
+                        let e1 = t[1] - t[0];
+                        let e2 = t[2] - t[0];
+                        let cr = e1.cross(e2);
+                        let l = cr.length();
+                        if l <= 1e-12 {
+                            continue;
+                        }
+                        // **对面的壁 = 法向与本点法向相反的面**（`cr·n ≤ -0.3`）。
+                        // 写成 `≥ +0.3` 会把"同一侧的下一个平行面"当成壁，量出来
+                        // 的是相邻叶片间距，不是壁厚——实测这把叶轮的壁厚从
+                        // 0.20 量成 0.40，切穿点数从 11 掉到 0。
+                        if cr.dot(n) / l > -0.3 {
+                            continue;
+                        }
+                        let d = -((t[0] - p).dot(n));
+                        if d <= 0.02 || d >= best || d > reach {
+                            continue;
+                        }
+                        // 投影点是否真的落在这块三角形上
+                        let q = p - n * d;
+                        let w = q - t[0];
+                        let (d00, d01, d11) = (e1.dot(e1), e1.dot(e2), e2.dot(e2));
+                        let (d20, d21) = (w.dot(e1), w.dot(e2));
+                        let den = d00 * d11 - d01 * d01;
+                        if den.abs() < 1e-12 {
+                            continue;
+                        }
+                        let u = (d11 * d20 - d01 * d21) / den;
+                        let v = (d00 * d21 - d01 * d20) / den;
+                        if u < -0.05 || v < -0.05 || u + v > 1.05 {
+                            continue;
+                        }
+                        best = d;
+                    }
+                }
+            }
+        }
+        best
+    }
+
     fn scan_shells<F: FnMut(usize, f64)>(&self, p: DVec3, reach: f64, mut f: F) {
         let (nx, ny) = (self.n[0], self.n[1]);
         let (i0, i1) = self.span(0, p.x, reach);
@@ -2488,6 +2573,57 @@ mod tests {
             }
         }
         assert!(n > 10, "没扫到平底刀精加工点：{n}");
+    }
+
+    /// 平行双板：从下板朝上量，壁厚应等于两板间距。
+    ///
+    /// 这条钉住"对面的壁 = 法向相反的面"。写成"法向同向"会把上板当成壁是
+    /// 另一种错，而这版代码真犯过——量出来的壁厚是相邻叶片的间距，把 11 个
+    /// 切穿点全部掩盖成 0 个（§67）。
+    #[test]
+    fn opposite_wall_measures_a_plate() {
+        let plate = |z: f64, up: bool| -> Vec<Tri> {
+            let v = [
+                DVec3::new(0.0, 0.0, z),
+                DVec3::new(4.0, 0.0, z),
+                DVec3::new(4.0, 4.0, z),
+                DVec3::new(0.0, 4.0, z),
+            ];
+            if up {
+                vec![[v[0], v[1], v[2]], [v[0], v[2], v[3]]]
+            } else {
+                vec![[v[0], v[2], v[1]], [v[0], v[3], v[2]]]
+            }
+        };
+        let st = Stock {
+            min: DVec3::new(-1.0, -1.0, -1.0),
+            max: DVec3::new(5.0, 5.0, 5.0),
+        };
+        // 法向朝 -z ⇒ 材质在 +z 侧 ⇒ 对面的壁在 **-n = +z** 方向 2 mm 处，
+        // 且它自己的外法向必须朝 +z（背对材质）。
+        let mut two = plate(0.0, false);
+        two.extend(plate(2.0, true));
+        let ix = MeshIndex::build(&two, st);
+        let t = ix.opposite_wall(
+            DVec3::new(2.0, 2.0, 0.0),
+            DVec3::new(0.0, 0.0, -1.0),
+            5.0,
+        );
+        assert!((t - 2.0).abs() < 1e-9, "壁厚应为 2.0，实得 {t}");
+
+        // 0.3 mm 处再来一块**同向**（朝 -z）的面：它不是"对面的壁"，必须量不到
+        let mut same = plate(0.0, false);
+        same.extend(plate(0.3, false));
+        let ix2 = MeshIndex::build(&same, st);
+        let t2 = ix2.opposite_wall(
+            DVec3::new(2.0, 2.0, 0.0),
+            DVec3::new(0.0, 0.0, -1.0),
+            5.0,
+        );
+        assert!(
+            t2.is_infinite(),
+            "同向面不该被当成壁，实得壁厚 {t2}"
+        );
     }
 
     /// 开网格（单面片）：signed 距离回退到"最近三角形法向定符号"。

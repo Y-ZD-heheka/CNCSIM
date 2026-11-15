@@ -2405,17 +2405,106 @@ M30
             );
         }
     }
-    let ss = cncsim_sim::compare::sweep_stats(&dsw, 0.15, 1.0);
+    // 验收带：`--tol` 可改（默认 0.15）。客户按 ±0.10 收货时要能直接看到同一套数字，
+    // 否则只能拿 ±0.15 的结果"心算"，那是另一种自欺。
+    let ac_tol = accept_tol_from_args();
+    let ss = cncsim_sim::compare::sweep_stats(&dsw, ac_tol, 1.0);
     println!(
-        "解析口径（扫掠体，与 h 无关）：{} 点 / 平均 |d| {:.3} / P95 {:.3} / 合格(±0.15) {:.1}% / 过切 {:.1}% / 残料 {:.1}% / 最大过切 {:+.2}",
+        "解析口径（扫掠体，与 h 无关）：{} 点 / 平均 |d| {:.3} / P95 {:.3} / 合格(±{:.2}) {:.3}% / 过切 {:.3}%（{} 点）/ 残料 {:.3}%（{} 点）/ 最大过切 {:+.2}",
         ss.points,
         ss.mean_abs,
         ss.p95_abs,
+        ac_tol,
         ss.ok_frac() * 100.0,
         ss.gouge_frac() * 100.0,
+        ss.gouge,
         ss.residual_frac() * 100.0,
+        ss.residual,
         ss.max_gouge
     );
+    // ── 薄壁切穿检查：**距离口径看不见"壁没了"** ──
+    //
+    // 上面那行只回答"这一点离刀具扫掠体多远"。一根 0.20 mm 的薄壁被球头切穿，
+    // 读数也只是 −0.28，和"切深 0.28 的浅坑"在数值上完全同值——占 0.045%，
+    // 一舍入就显示成 0.0%，看起来像没问题。**判"切穿"必须拿切深和局部壁厚比**，
+    // 所以这里单独立一项，并且**只报绝对点数、不报百分比**：这种缺陷是按
+    // "有没有"算的，不是按比例算的。
+    {
+        let idx: Vec<usize> = dsw
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.is_finite() && **d < -0.05)
+            .map(|(i, _)| i)
+            .collect();
+        let pn = cncsim_voxel::meshvol::surface_points_with_normals(tris, 0.8);
+        if !idx.is_empty() && pn.len() == pts.len() {
+            let sub: Vec<cncsim_math::DVec3> = idx.iter().map(|i| pts[*i]).collect();
+            let nor: Vec<cncsim_math::DVec3> = idx.iter().map(|i| pn[*i].1).collect();
+            let th = cncsim_cam::wall_thicknesses(tris, stock, &sub, &nor, 1.5);
+            let mut with_wall: Vec<(f64, f64, cncsim_math::DVec3)> = Vec::new();
+            for (k, t) in th.iter().enumerate() {
+                if t.is_finite() {
+                    with_wall.push((-dsw[idx[k]], *t, pts[idx[k]]));
+                }
+            }
+            if !with_wall.is_empty() {
+                let mut tt: Vec<f64> = with_wall.iter().map(|x| x.1).collect();
+                tt.sort_by(f64::total_cmp);
+                let med = tt[tt.len() / 2];
+                let past_mid = with_wall.iter().filter(|x| x.0 > 0.5 * x.1).count();
+                let through: Vec<&(f64, f64, cncsim_math::DVec3)> =
+                    with_wall.iter().filter(|x| x.0 > x.1).collect();
+                // **刃口 vs 实壁必须分开报**：刀尖处壁厚本来就趋近 0，任何球头
+                // 都会把尖边倒圆——那是工艺必然，不是"切穿了一堵墙"。把两者
+                // 混成一个"切穿 38 点"，会让人以为零件废了。
+                let edge_through = through.iter().filter(|x| x.1 < 0.15).count();
+                let solid: Vec<&(f64, f64, cncsim_math::DVec3)> =
+                    through.iter().copied().filter(|x| x.1 >= 0.15).collect();
+                let worst = solid
+                    .iter()
+                    .max_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)));
+                println!(
+                    "薄壁检查：切深 >0.05 的 {} 点中 {} 点有对面壁（壁厚中位 {:.2} / 最薄 {:.2} mm）/ 切过中线 {} 点",
+                    idx.len(),
+                    with_wall.len(),
+                    med,
+                    tt[0],
+                    past_mid
+                );
+                println!(
+                    "  ├ 刃口（壁厚 <0.15）切穿 {} 点 —— 球头把尖边倒圆，属工艺必然",
+                    edge_through
+                );
+                if solid.is_empty() {
+                    println!("  └ **实壁（≥0.15）切穿 0 点** —— 没有把墙切透");
+                } else {
+                    println!(
+                        "  └ **实壁（≥0.15）切穿 {} 点** —— 这是废品特征，必须改刀路",
+                        solid.len()
+                    );
+                    if let Some(w) = worst {
+                        println!(
+                            "     最深：切深 {:.2} mm vs 壁厚 {:.2} mm（{:.1}×）@ ({:.1},{:.1},{:.1})",
+                            w.0,
+                            w.1,
+                            w.0 / w.1,
+                            w.2.x,
+                            w.2.y,
+                            w.2.z
+                        );
+                    }
+                }
+            } else {
+                // 一个对面壁都测不到 → 这个件没有薄壁结构。**也要出一行**：
+                // 完全不打字会让人以为检查没跑（§67 的桌腿件就是这样）。
+                println!(
+                    "薄壁检查：切深 >0.05 的 {} 点里没有测到对面壁（该件无薄壁结构）",
+                    idx.len()
+                );
+            }
+        }
+    }
+    lap.lap("薄壁检查");
     // ── 过切归因（解析口径）：每个过切点是被**哪把刀**扫过的 ──
     //
     // 体素口径那套归因要跑完整仿真；这里只吃 `cut_segs`，所以 `--dry` 也能出。
@@ -3600,6 +3689,17 @@ fn slope_deg() -> f64 {
 }
 
 /// `--finish-step <mm>`：精加工行距（默认 0.4×刀径）。
+/// `--tol <mm>`：验收带半宽（默认 0.15）。只影响**报告口径**，不参与刀路生成。
+fn accept_tol_from_args() -> f64 {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--tol")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0 && *v < 5.0)
+        .unwrap_or(0.15)
+}
+
 fn surface_tilt_from_args() -> Option<f64> {
     std::env::args()
         .skip(1)
