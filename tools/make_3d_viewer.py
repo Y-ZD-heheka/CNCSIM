@@ -27,6 +27,9 @@ rows = np.loadtxt(src, delimiter=",")
 P = rows[:, 0:3]
 D = rows[:, 3]
 N = rows[:, 4:7]
+# 第 8 列 = 局部壁厚（`CNCSIM_DUMP_WALL=1` 才有）；-1 表示没有对面壁
+T = rows[:, 7] if rows.shape[1] >= 8 else None
+HAS_T = T is not None
 good = np.isfinite(D) & (np.abs(D) < 1e8)
 P, D, N = P[good], D[good], N[good]
 
@@ -67,6 +70,8 @@ if len(idx) > TARGET:
     idx = np.sort(np.concatenate([hot_idx, calm_idx]))
 
 P, D, N = P[idx], D[idx], N[idx]
+if HAS_T:
+    T = T[idx]
 c = P.mean(axis=0)
 P = P - c
 scale = float(np.abs(P).max())
@@ -78,14 +83,24 @@ dq = np.round(np.clip(D, -2.5, 2.5) * 200.0).astype(np.int8)
 # **按点交错**写：每点 10 字节 = xyz(6) + n(3) + d(1)。
 # 分段写（全部 xyz → 全部 n → 全部 d）会让解码端一读就串位，
 # 症状是"满屏橙蓝"——法向的 127 被当成 d。
-buf = np.empty((len(q), 10), dtype=np.uint8)
+REC = 11 if HAS_T else 10
+buf = np.empty((len(q), REC), dtype=np.uint8)
 buf[:, 0:6] = q.astype("<i2").view(np.uint8).reshape(len(q), 6)
 buf[:, 6:9] = nq.view(np.uint8).reshape(len(q), 3)
 buf[:, 9] = dq.view(np.uint8)
+if HAS_T:
+    # 壁厚：0.02 mm 一档，封顶 2.54；没有对面壁记 255
+    tq = np.where(T < 0, 255, np.clip(np.round(T / 0.02), 0, 254)).astype(np.uint8)
+    buf[:, 10] = tq
 blob = base64.b64encode(buf.tobytes()).decode()
 
 
 
+MODE_BTN = '<button id="mode">按壁厚</button>' if HAS_T else ''
+SUB_DEV = f"{allp} 个点（图中 {len(P)} 点）· 拖动旋转 / 滚轮缩放 · 颜色＝到设计面的距离，明暗＝法向朝向"
+SUB_THK = f"{allp} 个点（图中 {len(P)} 点）· 颜色＝局部壁厚（沿 −n 到对面反向面），明暗＝法向朝向"
+_n_thin = int((T < 0.15).sum()) if HAS_T else 0
+_n_wall = int((T > 0).sum()) if HAS_T else 0
 html = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>{name} · 3D 偏差</title>
 <style>
@@ -114,11 +129,11 @@ html = f"""<!DOCTYPE html>
   .foot {{ color:#6f7b8a; font-size:12px; margin-top:12px; }}
 </style></head><body><div class="wrap">
   <h1>{name} · 3D 偏差视图</h1>
-  <div class="sub">{allp} 个点（图中 {len(P)} 点）· 拖动旋转 / 滚轮缩放 · 颜色＝到设计面的距离，明暗＝法向朝向</div>
+  <div class="sub" id="sub">{SUB_DEV}</div>
 
   <div class="stage">
     <canvas id="cv" width="980" height="700"></canvas>
-    <div class="hud">
+    <div class="hud" id="hud">
       <div><span class="dot" style="background:#ff7a2f"></span>残料 <b>{n_res}</b> 点</div>
       <div><span class="dot" style="background:#4aa8ff"></span>过切 <b>{n_gouge}</b> 点</div>
       <div><span class="dot" style="background:#8fa3b8"></span>合格带内</div>
@@ -127,14 +142,24 @@ html = f"""<!DOCTYPE html>
       <button id="spin" class="on">自动旋转</button>
       <button id="only">只看超差</button>
       <button id="reset">复位</button>
+      {MODE_BTN}
     </div>
   </div>
 
-  <div class="legend">
+  <div class="legend" id="legend1">
     <span class="sw"><i style="background:linear-gradient(90deg,#969aa0,#c3c6ca)"></i>合格带内 |d| ≤ {TOL}</span>
     <span class="sw"><i style="background:linear-gradient(90deg,#ffb066,#ff3b1f)"></i>残料（切少了）</span>
     <span class="sw"><i style="background:linear-gradient(90deg,#74a8ff,#2b6fe0)"></i>过切（切多了）</span>
     <span style="margin-left:auto">带内（±{TOL}）{ok:.1f}% · 超差 {n_res + n_gouge} 点</span>
+  </div>
+
+  <div class="legend" id="legend2" style="display:none">
+    <span class="sw"><i style="background:#ff3c30"></i>壁厚 &lt; 0.15（刃口/超薄）</span>
+    <span class="sw"><i style="background:#ffaa3c"></i>0.15 – 0.35</span>
+    <span class="sw"><i style="background:#ebe278"></i>0.35 – 0.80</span>
+    <span class="sw"><i style="background:#96b0c4"></i>&gt; 0.80（实心）</span>
+    <span class="sw"><i style="background:#969aa0"></i>测不到对面壁</span>
+    <span style="margin-left:auto">壁厚沿 −n 量到最近的**反向面**（§67）</span>
   </div>
 
   <div class="foot">{NOTE}</div>
@@ -148,9 +173,11 @@ for (let i=0;i<raw.length;i++) bytes[i] = raw.charCodeAt(i);
 // 不能用 `new Int16Array(buf, 0, N*3)` 那种分段解析——那假设"先全部 xyz"，
 // 与写入布局不符，会让坐标整体错位（表现：形状散架、颜色乱）。
 const dv = new DataView(bytes.buffer);
+const REC = {REC}, HAS_T = {str(HAS_T).lower()};
 const PX = new Float32Array(N*3), NR = new Float32Array(N*3), DD = new Float32Array(N);
+const TT = HAS_T ? new Float32Array(N) : null;
 for (let i=0;i<N;i++) {{
-  const o = i*10;
+  const o = i*REC;
   PX[i*3]   = dv.getInt16(o,   true)/100;
   PX[i*3+1] = dv.getInt16(o+2, true)/100;
   PX[i*3+2] = dv.getInt16(o+4, true)/100;
@@ -158,6 +185,10 @@ for (let i=0;i<N;i++) {{
   NR[i*3+1] = dv.getInt8(o+7)/127;
   NR[i*3+2] = dv.getInt8(o+8)/127;
   DD[i]     = dv.getInt8(o+9)/200;
+  if (HAS_T) {{
+    const b = dv.getUint8(o+10);
+    TT[i] = (b === 255) ? -1 : b*0.02;   // -1 = 没有对面壁
+  }}
 }}
 
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
@@ -174,8 +205,20 @@ const qs = new URLSearchParams(location.search);
 const num = (k, d) => qs.has(k) ? parseFloat(qs.get(k)) : d;
 let yaw = num('yaw', 0.6), pitch = num('pitch', -0.45), zoom = num('zoom', 1.0);
 let spin = !qs.has('static'), onlyBad = qs.has('only');
+let mode = num('mode', 0);              // 0 = 偏差，1 = 壁厚
+const SUB_DEV = "{SUB_DEV}", SUB_THK = "{SUB_THK}";
 
 const TOL = {TOL};
+function colorWall(t, shade, out) {{
+  let r, g, b;
+  if (t < 0) {{ r = 150; g = 154; b = 160; }}            // 没有对面壁：中性灰
+  else if (t < 0.15) {{ r = 255; g = 60; b = 48; }}      // 刃口/超薄：红
+  else if (t < 0.35) {{ r = 255; g = 170; b = 60; }}     // 薄壁：橙
+  else if (t < 0.8) {{ r = 235; g = 226; b = 120; }}     // 中等：黄
+  else {{ r = 150; g = 176; b = 196; }}                  // 实心：冷灰蓝
+  out[0] = r*shade; out[1] = g*shade; out[2] = b*shade;
+}}
+
 function colorOf(d, shade, out) {{
   let r, g, b;
   if (d > TOL) {{
@@ -219,10 +262,13 @@ function draw() {{
     let lam = nx1*Lx + ny1*Ly + nz2*Lz;
     if (lam < 0) lam = -lam*0.35;              // 背面给一点环境光，别全黑
     const shade = (0.34 + 0.66*Math.min(1, lam)) * (dim ? 0.40 : 1);
-    colorOf(d, shade, col);
+    if (mode === 1 && HAS_T) colorWall(TT[i], shade, col);
+    else colorOf(d, shade, col);
     const depth = z2;
     // 超差点画大一圈：442 个点在 9 万点里否则根本看不见
-    const r = (dim ? 1 : Math.max(1, Math.min(5, Math.round(1.9*zoom)))
+    // 默认 3（7×7）。点间距 ≈ 0.4~0.6 mm，2 px 半径会露背景，
+    // 看上去像"切穿了"——这个坑在 §67 里把人骗过一次。
+    const r = (dim ? 1 : Math.max(2, Math.min(6, Math.round(2.6*zoom)))
                      + (Math.abs(d) > TOL ? 1 : 0));
     for (let dy=-r; dy<=r; dy++) {{
       const row = (py+dy)*W;
@@ -254,6 +300,20 @@ cv.addEventListener('wheel', e => {{
   draw();
 }}, {{passive:false}});
 
+const bm = document.getElementById('mode');
+if (bm) {{
+  bm.onclick = () => {{
+    mode = mode ? 0 : 1;
+    bm.classList.toggle('on', mode === 1);
+    bm.textContent = mode ? '按偏差' : '按壁厚';
+    document.getElementById('legend1').style.display = mode ? 'none' : 'flex';
+    document.getElementById('legend2').style.display = mode ? 'flex' : 'none';
+    document.getElementById('sub').textContent = mode ? SUB_THK : SUB_DEV;
+    document.getElementById('hud').style.display = mode ? 'none' : 'block';
+    draw();
+  }};
+  if (mode === 1) bm.click(), bm.click();   // 初始就是壁厚模式时把按钮状态同步
+}}
 const bs = document.getElementById('spin');
 bs.classList.toggle('on', spin);
 bs.onclick = () => {{ spin = !spin; bs.classList.toggle('on', spin); }};
@@ -261,6 +321,13 @@ const bo = document.getElementById('only');
 bo.onclick = () => {{ onlyBad = !onlyBad; bo.classList.toggle('on', onlyBad); draw(); }};
 document.getElementById('reset').onclick = () => {{ yaw=0.6; pitch=-0.45; zoom=1; draw(); }};
 
+if (mode === 1 && bm) {{
+  document.getElementById('legend1').style.display = 'none';
+  document.getElementById('legend2').style.display = 'flex';
+  document.getElementById('sub').textContent = SUB_THK;
+  document.getElementById('hud').style.display = 'none';
+  bm.classList.add('on'); bm.textContent = '按偏差';
+}}
 draw();
 function loop() {{
   if (spin) {{ yaw += 0.0042; draw(); }}

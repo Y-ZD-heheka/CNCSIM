@@ -2388,14 +2388,36 @@ M30
         }
         if let Ok(f) = std::fs::File::create(&p) {
             let mut w = std::io::BufWriter::new(f);
+            // `CNCSIM_DUMP_WALL=1` 时多写一列**局部壁厚**（第 8 列，找不到对面壁
+            // 写 -1）。它让"薄壁在哪"从数字变成一张图——这也是唯一能判断
+            // "切穿的是刃口还是实壁"的可视化手段。
+            let want_wall = std::env::var("CNCSIM_DUMP_WALL").is_ok() && with_n;
+            let wall = if want_wall {
+                let nor: Vec<cncsim_math::DVec3> = (0..pts.len()).map(|i| pn[i].1).collect();
+                cncsim_cam::wall_thicknesses(tris, stock, &pts, &nor, 1.5)
+            } else {
+                Vec::new()
+            };
+            if want_wall {
+                println!("  └ 壁厚已计算（{} 点）", wall.len());
+            }
             for (i, (q, d)) in pts.iter().zip(&dsw).enumerate() {
                 if with_n {
                     let n = pn[i].1;
-                    let _ = writeln!(
-                        w,
-                        "{:.3},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4}",
-                        q.x, q.y, q.z, d, n.x, n.y, n.z
-                    );
+                    if want_wall {
+                        let t = if wall[i].is_finite() { wall[i] } else { -1.0 };
+                        let _ = writeln!(
+                            w,
+                            "{:.3},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4},{:.3}",
+                            q.x, q.y, q.z, d, n.x, n.y, n.z, t
+                        );
+                    } else {
+                        let _ = writeln!(
+                            w,
+                            "{:.3},{:.3},{:.3},{:.4},{:.4},{:.4},{:.4}",
+                            q.x, q.y, q.z, d, n.x, n.y, n.z
+                        );
+                    }
                 } else {
                     let _ = writeln!(w, "{:.3},{:.3},{:.3},{:.4},0,0,1", q.x, q.y, q.z, d);
                 }
