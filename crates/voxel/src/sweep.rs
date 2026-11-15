@@ -303,10 +303,53 @@ pub fn sd_sweep_sampled(p: DVec3, from: &Pose, to: &Pose, profile: &Profile, sam
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cncsim_tool::flat_end_mill;
+    use cncsim_tool::{ball_end_mill, flat_end_mill};
 
     fn up(tip: DVec3) -> Pose {
         Pose { tip, axis: DVec3::Z }
+    }
+
+    /// 球头刀**水平直线扫掠**有闭式解：扫掠体就是以线段为轴的胶囊，点到它的
+    /// 距离 = `|p − 最近点| − R`。这条给"差异算法的数值误差"一个**外部基准**
+    /// ——不是拿自己跟自己对拍。
+    ///
+    /// 取赤道以下（z < 0）的点：那里刀具的最近特征一定是球面，胶囊解严格成立
+    /// （赤道以上会切到刃部圆柱）。
+    #[test]
+    fn ball_sweep_matches_analytic_capsule() {
+        let prof = ball_end_mill(1.0, 10.0, 24); // 与生产一致：母线 24 段
+        // **`tip` 是最低点，球心在它上方 R 处**：胶囊的轴线要抬 R。
+        // 用 tip 连线当轴线会差整整一个半径（第一版本就是这么错的）。
+        let r = 0.5;
+        let (a, b) = (
+            DVec3::new(0.0, 0.0, r),
+            DVec3::new(10.0, 0.0, r),
+        );
+        let (from, to) = (
+            up(DVec3::new(0.0, 0.0, 0.0)),
+            up(DVec3::new(10.0, 0.0, 0.0)),
+        );
+        let seg = b - a;
+        let mut worst: f64 = 0.0;
+        let mut n = 0;
+        for i in 0..=50 {
+            for j in -8..=8 {
+                for k in -8..=-1 {
+                    let p = DVec3::new(
+                        i as f64 * 0.26 - 1.5,
+                        j as f64 * 0.22,
+                        k as f64 * 0.22,
+                    );
+                    let t = ((p - a).dot(seg) / seg.length_squared()).clamp(0.0, 1.0);
+                    let want = (p - (a + seg * t)).length() - r;
+                    let got = sd_sweep(p, &from, &to, &prof);
+                    worst = worst.max((got - want).abs());
+                    n += 1;
+                }
+            }
+        }
+        println!("胶囊基准：{n} 点，最大误差 {:.3e} mm", worst);
+        assert!(worst < 1e-3, "球头扫掠应等于胶囊距离，最大误差 {worst} mm");
     }
 
     #[test]
