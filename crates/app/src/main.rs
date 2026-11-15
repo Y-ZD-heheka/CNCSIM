@@ -2341,7 +2341,10 @@ M30
     }
 
     // ── 名义曲面逐点偏差：和回转链路同一套口径，直接回答"像不像原版" ──
-    let pts = cncsim_voxel::meshvol::surface_points(tris, 0.8);
+    // 采样步长 = **最小可检缺陷尺度**：0.8 mm 的网格查不出落在点之间的亚毫米穿孔。
+    // `--dev-step` 可加密（代价是点数按 (0.8/s)² 涨）。
+    let dev_step = dev_step_from_args();
+    let pts = cncsim_voxel::meshvol::surface_points(tris, dev_step);
     lap.lap("解析口径：设计面采样");
     let mut sd = cncsim_sim::surface_dev::SurfaceStats::default();
     let mut dev: Vec<f64> = Vec::new();
@@ -2374,7 +2377,7 @@ M30
         use std::io::Write as _;
         // 法向用于出图着色。`surface_points_with_normals` 会跳过退化三角形，
         // 点数对不上时说明网格里有退化面——那就只写位置，让出图端退化成平光。
-        let pn = cncsim_voxel::meshvol::surface_points_with_normals(tris, 0.8);
+        let pn = cncsim_voxel::meshvol::surface_points_with_normals(tris, dev_step);
         let with_n = pn.len() == pts.len();
         if !with_n {
             println!(
@@ -2436,7 +2439,7 @@ M30
             .filter(|(_, d)| d.is_finite() && **d < -0.05)
             .map(|(i, _)| i)
             .collect();
-        let pn = cncsim_voxel::meshvol::surface_points_with_normals(tris, 0.8);
+        let pn = cncsim_voxel::meshvol::surface_points_with_normals(tris, dev_step);
         if !idx.is_empty() && pn.len() == pts.len() {
             let sub: Vec<cncsim_math::DVec3> = idx.iter().map(|i| pts[*i]).collect();
             let nor: Vec<cncsim_math::DVec3> = idx.iter().map(|i| pn[*i].1).collect();
@@ -3689,6 +3692,18 @@ fn slope_deg() -> f64 {
 }
 
 /// `--finish-step <mm>`：精加工行距（默认 0.4×刀径）。
+/// `--dev-step <mm>`：设计面采样步长（默认 0.8）。它同时是**最小可检缺陷尺度**
+/// ——小于它的穿孔可能整个落在采样点之间。
+fn dev_step_from_args() -> f64 {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--dev-step")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v >= 0.1 && *v <= 5.0)
+        .unwrap_or(0.8)
+}
+
 /// `--tol <mm>`：验收带半宽（默认 0.15）。只影响**报告口径**，不参与刀路生成。
 fn accept_tol_from_args() -> f64 {
     std::env::args()
