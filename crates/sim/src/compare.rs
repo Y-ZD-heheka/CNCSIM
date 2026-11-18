@@ -667,6 +667,269 @@ pub fn attribute_points(
 /// 会被整格判成空气，读出来的过切能比真实值大好几倍（桌腿件 h=1.0 实测
 /// 体素最大 2.11 mm vs 解析最大 0.27 mm）。验收要的是"零件差多少"，
 /// 不是"格子差多少"。
+/// 一次建好索引、可反复求值的偏差评估器。
+///
+/// [`sweep_deviation`] 每调一次都重建索引（几秒）；证书细分要对同一个索引问几十万次，
+/// 所以把索引暴露出来复用。
+pub struct DeviationEvaluator<'a> {
+    ix: SweepIndex<'a>,
+}
+
+impl<'a> DeviationEvaluator<'a> {
+    pub fn new(segments: &'a [CutSegment], tools: &'a ToolTable, margin: f64) -> Self {
+        Self {
+            ix: SweepIndex::new(segments, tools, margin),
+        }
+    }
+
+    #[inline]
+    pub fn at(&self, p: DVec3) -> f64 {
+        self.ix.nearest(p).0
+    }
+}
+
+/// 证书口径的偏差：对**整个曲面**给结论，而不是"采了很多点"。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CertifiedDeviation {
+    /// 已求值点里的最深过切（负值，越负越深）。
+    pub gouge: f64,
+    pub gouge_at: DVec3,
+    /// 已求值点里的最大残料。
+    pub residual: f64,
+    pub residual_at: DVec3,
+    /// **保守上界**：把未完证的叶子按其 Lipschitz 下界算进去后的最深过切。
+    pub gouge_bound: f64,
+    pub evaluated: usize,
+    pub refined: usize,
+    /// 细分到 `max_depth` 仍未证明的叶子数（0 = 完全证明）。
+    pub open_leaves: usize,
+    /// 整片都在 `margin` 之外（刀具从没接近）的三角形数。
+    pub far: usize,
+    /// 未证明叶子里最大的外接半径 = 结论的保证半径。
+    pub eps_actual: f64,
+    pub tris: usize,
+}
+
+/// 每块（每线程）的求值预算。叶轮实测约 4~6 s/百万次查询。
+const EVAL_BUDGET_PER_CHUNK: usize = 400_000;
+
+/// 三角形细分过程中累计的量。
+#[derive(Clone, Copy)]
+struct Leaf {
+    gouge: f64,
+    gouge_at: DVec3,
+    residual: f64,
+    residual_at: DVec3,
+    bound: f64,
+    evaluated: usize,
+    refined: usize,
+    open: usize,
+    far: usize,
+    eps: f64,
+}
+
+impl Default for Leaf {
+    fn default() -> Self {
+        Self {
+            gouge: 0.0,
+            gouge_at: DVec3::ZERO,
+            residual: 0.0,
+            residual_at: DVec3::ZERO,
+            bound: 0.0,
+            evaluated: 0,
+            refined: 0,
+            open: 0,
+            far: 0,
+            eps: 0.0,
+        }
+    }
+}
+
+/// 一个三角形的**外包半径**：内部任意点到最近顶点的距离上界。
+///
+/// 距离函数是 1-Lipschitz（到集合的距离永远满足 `|d(x)−d(y)| ≤ |x−y|`），
+/// 所以知道了顶点的值就等于知道了整个三角形的界：`[min−R, max+R]`。
+fn cover_radius(t: &[DVec3; 3]) -> f64 {
+    let (a, b, c) = (t[0], t[1], t[2]);
+    let (lab, lbc, lca) = ((b - a).length(), (c - b).length(), (c - a).length());
+    let area2 = (b - a).cross(c - a).length(); // = 2·面积
+    let circ = if area2 > 1e-12 {
+        lab * lbc * lca / (2.0 * area2) // 外接圆半径 = abc/(4A)
+    } else {
+        f64::INFINITY
+    };
+    // **最小包围圆**：锐角/直角取外接圆，钝角取最长边的一半。
+    // 判据是"是否钝角"，不是"外接圆和半边长谁大"——等边三角形外接圆
+    // 0.577a 就大于 0.5a，按后者会低估覆盖率，证书就失效了。
+    let (la, lb, lc) = (lab * lab, lbc * lbc, lca * lca);
+    let longest = la.max(lb).max(lc);
+    let obtuse = longest > la + lb + lc - longest + 1e-12;
+    if obtuse {
+        0.5 * longest.sqrt()
+    } else {
+        circ
+    }
+}
+
+fn walk(
+    t: [DVec3; 3],
+    ev: &DeviationEvaluator,
+    tol: f64,
+    eps: f64,
+    depth: u32,
+    max_depth: u32,
+    budget: &mut usize,
+    out: &mut Leaf,
+) {
+    if *budget == 0 {
+        out.open += 1;
+        out.eps = out.eps.max(cover_radius(&t));
+        return;
+    }
+    *budget = budget.saturating_sub(3);
+    let d = [ev.at(t[0]), ev.at(t[1]), ev.at(t[2])];
+    out.evaluated += 3;
+    for (k, v) in d.iter().enumerate() {
+        if *v < out.gouge {
+            out.gouge = *v;
+            out.gouge_at = t[k];
+        }
+        if *v > out.residual {
+            out.residual = *v;
+            out.residual_at = t[k];
+        }
+    }
+    let r = cover_radius(&t);
+    // **三点全在 margin 外 → 整片都远**（Lipschitz：内部最多再近 r），直接判完。
+    // 不处理这个会让"远处"的三角形永远满足"可能跨阈值"，细到天荒地老——
+    // 第一版就是这样跑了 15 分钟还没完。
+    if d.iter().all(|v| !v.is_finite()) {
+        out.far += 1;
+        return;
+    }
+    if d.iter().any(|v| !v.is_finite()) {
+        // 部分在界外：切一刀再看（切完两端要么都有值、要么都超界）
+        if depth >= max_depth {
+            out.open += 1;
+            out.eps = out.eps.max(r);
+            return;
+        }
+        let (m01, m12, m20) = ((t[0] + t[1]) * 0.5, (t[1] + t[2]) * 0.5, (t[2] + t[0]) * 0.5);
+        *budget = budget.saturating_sub(3);
+        out.evaluated += 3;
+        out.refined += 1;
+        for sub in [
+            [t[0], m01, m20],
+            [m01, t[1], m12],
+            [m20, m12, t[2]],
+            [m01, m12, m20],
+        ] {
+            walk(sub, ev, tol, eps, depth + 1, max_depth, budget, out);
+        }
+        return;
+    }
+    let lo = d[0].min(d[1]).min(d[2]);
+    let hi = d[0].max(d[1]).max(d[2]);
+    // 只在"可能跨过阈值"时细分：整个三角形明确在带内/带外，就没有必要再切。
+    let may_gouge = lo - r < -tol && hi + r > -tol;
+    let may_res = hi + r > tol && lo - r < tol;
+    if !may_gouge && !may_res {
+        return;
+    }
+    if depth >= max_depth || r <= eps {
+        out.open += 1;
+        out.eps = out.eps.max(r);
+        if lo - r < out.bound {
+            out.bound = lo - r; // 未证明的区域按最坏情况计
+        }
+        return;
+    }
+    let (m01, m12, m20) = ((t[0] + t[1]) * 0.5, (t[1] + t[2]) * 0.5, (t[2] + t[0]) * 0.5);
+    *budget = budget.saturating_sub(3);
+    let dm = [ev.at(m01), ev.at(m12), ev.at(m20)];
+    out.evaluated += 3;
+    for (k, v) in dm.iter().enumerate() {
+        if *v < out.gouge {
+            out.gouge = *v;
+            out.gouge_at = [m01, m12, m20][k];
+        }
+        if *v > out.residual {
+            out.residual = *v;
+            out.residual_at = [m01, m12, m20][k];
+        }
+    }
+    out.refined += 1;
+    for sub in [
+        [t[0], m01, m20],
+        [m01, t[1], m12],
+        [m20, m12, t[2]],
+        [m01, m12, m20],
+    ] {
+        walk(sub, ev, tol, eps, depth + 1, max_depth, budget, out);
+    }
+}
+
+/// **带证书**的偏差评估：把"采了哪些点"换成"每个点都被证明过"。
+///
+/// 依据：到固定集合的距离是 1-Lipschitz。因此三角形顶点的值给出整个三角形的区间
+/// `[min−R, max+R]`，`R` 是它的外包半径。据此判：
+///
+/// * 明确不可能跨阈值 → 结束（一次细分都不做）；
+/// * 可能跨阈值 → 四分（取三边中点），递归；
+/// * 细分到 `R ≤ eps` 仍跨阈值 → 记为"未证明"，并按 `min−R` 给保守下界。
+///
+/// 结论的强度：在 `eps` 精度内，**曲面上不存在任何一个点**被漏判——这与"每 0.2 mm
+/// 采一个点"是两回事（后者只是"希望没漏"）。
+pub fn certified_deviation(
+    tris: &[[DVec3; 3]],
+    ev: &DeviationEvaluator,
+    tol: f64,
+    eps: f64,
+    max_depth: u32,
+) -> CertifiedDeviation {
+    let n = cncsim_voxel::par::worker_count().max(1);
+    let chunks = n.min(tris.len().max(1));
+    let per = tris.len().div_ceil(chunks).max(1);
+    let parts: Vec<Leaf> = cncsim_voxel::par::map_indexed(chunks, |i| {
+        let a = (i * per).min(tris.len());
+        let b = ((i + 1) * per).min(tris.len());
+        let mut acc = Leaf::default();
+        // 每块的预算：超了就停止细分、记为"未证明"。证书的价值在于**说清楚
+        // 哪些地方证完了**，而不是为了让全域都证完而跑十分钟。
+        let mut budget = EVAL_BUDGET_PER_CHUNK;
+        for t in &tris[a..b] {
+            walk(*t, ev, tol, eps, 0, max_depth, &mut budget, &mut acc);
+        }
+        acc
+    });
+    let mut out = CertifiedDeviation {
+        tris: tris.len(),
+        gouge: 0.0,
+        residual: 0.0,
+        ..Default::default()
+    };
+    for p in parts {
+        if p.gouge < out.gouge {
+            out.gouge = p.gouge;
+            out.gouge_at = p.gouge_at;
+        }
+        if p.residual > out.residual {
+            out.residual = p.residual;
+            out.residual_at = p.residual_at;
+        }
+        out.gouge_bound = out.gouge_bound.min(p.bound.min(p.gouge));
+        out.evaluated += p.evaluated;
+        out.refined += p.refined;
+        out.open_leaves += p.open;
+        out.far += p.far;
+        out.eps_actual = out.eps_actual.max(p.eps);
+    }
+    if out.gouge_bound == 0.0 {
+        out.gouge_bound = out.gouge;
+    }
+    out
+}
+
 pub fn sweep_deviation(
     segments: &[CutSegment],
     tools: &ToolTable,

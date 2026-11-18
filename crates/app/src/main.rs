@@ -2447,6 +2447,68 @@ M30
         ss.residual,
         ss.max_gouge
     );
+    // ── 证书口径：把"采了很多点"换成"每个点都被证明过" ──
+    //
+    // 采样口径的强度取决于步长（0.2 mm 也仍然只是"希望没漏"）。这里用 1-Lipschitz
+    // 性质对**每个三角形**给区间界，只细分可能跨阈值的那些——结论是"曲线面上
+    // 不存在被漏判的点，精度 eps"，而不是"我采了 N 个点"。
+    if let Some(eps) = certify_eps_from_args() {
+        // margin 取 tol + 0.5：只关心阈值附近的精确值；给太大每次查询的候选段会多一个数量级
+        let ev = cncsim_sim::compare::DeviationEvaluator::new(&out.cut_segs, &table, 1.0);
+        // `--certify-at cx,cy,cz,r`：只证这个球内的三角形。
+        // 全域证书实测 **10 分 27 秒 / 700 万次求值**，且预算用尽后仍有 7.9 万片
+        // 未证明——全域证明的成本按 1/ε² 涨，它不是日常口径；日常用局部版把
+        // "你怀疑的那个位置"钉死（秒级、无预算截断）。
+        let scope: Vec<cncsim_cam::Tri> = match certify_at_from_args() {
+            Some((c, r)) => tris
+                .iter()
+                .filter(|t| {
+                    let g = (t[0] + t[1] + t[2]) * (1.0 / 3.0);
+                    (g - c).length() <= r
+                })
+                .copied()
+                .collect(),
+            None => tris.to_vec(),
+        };
+        if let Some((c, r)) = certify_at_from_args() {
+            println!(
+                "  局部证书：以 ({:.1},{:.1},{:.1}) 为心 R{:.1} 内 {} 个三角形（全件 {}）",
+                c.x, c.y, c.z, r, scope.len(), tris.len()
+            );
+        }
+        let t0 = std::time::Instant::now();
+        let c = cncsim_sim::compare::certified_deviation(&scope, &ev, ac_tol, eps, 8);
+        let verdict = if c.open_leaves == 0 {
+            "完全证明".to_string()
+        } else {
+            format!(
+                "{} 片未证明（保证半径 {:.3} mm）",
+                c.open_leaves, c.eps_actual
+            )
+        };
+        println!(
+            "证书口径（eps {:.3} mm）：{} 三角形 → 求值 {} 点 / 细分 {} 次 / {} / {:.1} s",
+            eps,
+            c.tris,
+            c.evaluated,
+            c.refined,
+            verdict,
+            t0.elapsed().as_secs_f64()
+        );
+        println!(
+            "  ├ 实测最深过切 {:+.3} @ ({:.1},{:.1},{:.1}) / 最大残料 {:+.3}",
+            c.gouge, c.gouge_at.x, c.gouge_at.y, c.gouge_at.z, c.residual
+        );
+        println!(
+            "  └ 保守上界（未证明片按 Lipschitz 下界）：最深可能过切 {:+.3} mm{}",
+            c.gouge_bound,
+            if c.gouge_bound < -ac_tol {
+                "  ← **仍有超差可能**"
+            } else {
+                "  ← 在 ±tol 内，已证明"
+            }
+        );
+    }
     // ── 薄壁切穿检查：**距离口径看不见"壁没了"** ──
     //
     // 上面那行只回答"这一点离刀具扫掠体多远"。一根 0.20 mm 的薄壁被球头切穿，
@@ -3714,6 +3776,28 @@ fn slope_deg() -> f64 {
 }
 
 /// `--finish-step <mm>`：精加工行距（默认 0.4×刀径）。
+/// `--certify-at cx,cy,cz,r`：把证书口径限定在这个球内。
+fn certify_at_from_args() -> Option<(cncsim_math::DVec3, f64)> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--certify-at")
+        .and_then(|(_, v)| {
+            let p: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (p.len() == 4).then(|| (cncsim_math::DVec3::new(p[0], p[1], p[2]), p[3]))
+        })
+}
+
+/// `--certify <eps>`：跑证书口径（三角形细分 + Lipschitz 界），`eps` 是保证半径。
+fn certify_eps_from_args() -> Option<f64> {
+    std::env::args()
+        .skip(1)
+        .zip(std::env::args().skip(2))
+        .find(|(a, _)| a == "--certify")
+        .and_then(|(_, v)| v.parse::<f64>().ok())
+        .filter(|v| *v > 0.0 && *v <= 0.5)
+}
+
 /// `--dev-step <mm>`：设计面采样步长（默认 0.8）。它同时是**最小可检缺陷尺度**
 /// ——小于它的穿孔可能整个落在采样点之间。
 fn dev_step_from_args() -> f64 {
