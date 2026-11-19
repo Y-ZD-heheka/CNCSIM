@@ -51,6 +51,8 @@ EXTERNAL = {
     "cncsim-config":  {"serde", "ron"},
     # 并行：常驻线程池（每次 fork-join 491 µs → ~5 µs）。见 ADR-009 §1.1
     "cncsim-voxel":   {"rayon"},
+    # CAM 已用工作区的线程池计算逐点可行性和独立工序，依据 ADR-009 §1.3。
+    "cncsim-cam":     {"rayon"},
     # 窗口层 UI：egui 是 Bevy 生态里唯一成熟的即时模式 UI。只在 `window`
     # feature 下编译，默认构建零依赖。见 ADR-011（显示层）。
     "cncsim-render":  {"bevy-egui"},
