@@ -345,6 +345,60 @@ fn empty_grid_lod_is_empty() {
     assert!(g.extract_surface_lod(4).positions.is_empty());
 }
 
+#[test]
+fn quantized_zero_endpoint_is_closed_and_has_no_collapsed_display_faces() {
+    let mut g = grid();
+    g.fill_box([0; 3], [17; 3], -48);
+    // An air pocket ends exactly on a sampled point. Adjacent surface cells may
+    // put their vertices on the same endpoint even though their indices differ.
+    g.set([6, 6, 6], 0);
+    g.set([8, 6, 6], 32);
+    for mut mesh in [
+        g.extract_surface(),
+        g.extract_surface_lod(1),
+        g.extract_surface_lod(2),
+    ] {
+        assert_watertight(&mesh);
+        mesh.split_crease_normals(0.707);
+        let collapsed = mesh
+            .indices
+            .chunks_exact(3)
+            .filter(|face| {
+                let [a, b, c] = [face[0], face[1], face[2]].map(|id| mesh.positions[id as usize]);
+                a == b || b == c || c == a
+            })
+            .count();
+        assert_eq!(
+            collapsed, 0,
+            "an edge with identical endpoints creates a zero-area face"
+        );
+        // The display mesh duplicates vertices at crease seams. Check incidence
+        // at the actual f32 positions rather than at its split shading indices.
+        let mut positions = std::collections::HashMap::new();
+        let mut welded = MeshData::default();
+        for &id in &mesh.indices {
+            let pos = mesh.positions[id as usize].map(f32::to_bits);
+            let next = positions.len() as u32;
+            welded.indices.push(*positions.entry(pos).or_insert(next));
+        }
+        assert_watertight(&welded);
+        let pocket: Vec<_> = mesh
+            .indices
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let p = mesh.positions[id as usize];
+                (0.4..1.1).contains(&p[0])
+                    && (0.4..1.0).contains(&p[1])
+                    && (0.4..1.0).contains(&p[2])
+            })
+            .collect();
+        assert!(
+            pocket.len() >= 12,
+            "the positive sample must retain a closed pocket"
+        );
+    }
+}
 
 /// 性能基准（默认跳过）：200×200×100 mm 毛坯 @ h=0.1，k=4。
 ///

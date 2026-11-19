@@ -172,85 +172,155 @@ fn parity_pass(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
     }
 }
 
-/// 距离 pass：逐三角形把"AABB+band ∩ 域"内的体素精确化。
+/// 三角 AABB 以及可触及的体素中心区间。下标按输入三角顺序进入各桶。
+struct RasterTriangle<'a> {
+    points: &'a Tri,
+    lo: DVec3,
+    hi: DVec3,
+    first: [i32; 3],
+    last: [i32; 3],
+}
+
+type DistanceLeaf = ([i32; 3], Box<[i8; crate::tree::LEAF_VOXELS]>);
+
+/// 距离 pass：按 (y,z) 叶条带分工。条带相互独立，条带内按输入顺序精确求最近距离。
+/// 完成一批即写回稀疏树，避免分配整个域大小的稠密网格。
 fn distance_pass(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
-    if domain[0] <= 0 || domain[1] <= 0 || domain[2] <= 0 {
+    if domain.iter().any(|&n| n <= 0) {
         return;
     }
-    let h = grid.config.h;
-    let o = grid.origin;
-    let band = grid.config.band_mm();
+    // 分批建桶并提交。每批最多 64K 条三角记录（64 位平台约 5 MiB），
+    // 局部候选编号用 u16；百万面输入的临时索引无需随总面数增长。
+    for group in tris.chunks(1 << 16) {
+        raster_triangle_batch(group, grid, domain);
+    }
+}
 
+fn raster_triangle_batch(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
+    let h = grid.config.h;
+    let band = grid.config.band_mm();
+    let mut records = Vec::with_capacity(tris.len());
+    let mut buckets = FxHashMap::<[i32; 2], Vec<u16>>::default();
     for t in tris {
-        let (lo, hi) = (
-            DVec3::new(
-                t[0].x.min(t[1].x).min(t[2].x),
-                t[0].y.min(t[1].y).min(t[2].y),
-                t[0].z.min(t[1].z).min(t[2].z),
-            ),
-            DVec3::new(
-                t[0].x.max(t[1].x).max(t[2].x),
-                t[0].y.max(t[1].y).max(t[2].y),
-                t[0].z.max(t[1].z).max(t[2].z),
-            ),
+        let [a, b, c] = *t;
+        let lo = DVec3::new(
+            a.x.min(b.x).min(c.x),
+            a.y.min(b.y).min(c.y),
+            a.z.min(b.z).min(c.z),
         );
-        // 体素中心落在 [lo−band, hi+band] 内才可能 < band
-        let idx = |v: DVec3| {
-            DVec3::new((v.x - o.x) / h - 0.5, (v.y - o.y) / h - 0.5, (v.z - o.z) / h - 0.5)
-        };
-        let lox = idx(lo).x;
-        let hix = idx(hi).x;
-        let loy = idx(lo).y;
-        let hiy = idx(hi).y;
-        let loz = idx(lo).z;
-        let hiz = idx(hi).z;
-        let i0 = ((lox - band / h).floor() as i32 - 1).max(0);
-        let i1 = ((hix + band / h).ceil() as i32 + 1).min(domain[0] - 1);
-        let j0 = ((loy - band / h).floor() as i32 - 1).max(0);
-        let j1 = ((hiy + band / h).ceil() as i32 + 1).min(domain[1] - 1);
-        let k0 = ((loz - band / h).floor() as i32 - 1).max(0);
-        let k1 = ((hiz + band / h).ceil() as i32 + 1).min(domain[2] - 1);
-        if i0 > i1 || j0 > j1 || k0 > k1 {
+        let hi = DVec3::new(
+            a.x.max(b.x).max(c.x),
+            a.y.max(b.y).max(c.y),
+            a.z.max(b.z).max(c.z),
+        );
+        let origins = [grid.origin.x, grid.origin.y, grid.origin.z];
+        let first = std::array::from_fn(|i| {
+            let n = (([lo.x, lo.y, lo.z][i] - origins[i]) / h - 0.5 - band / h).floor() as i32;
+            n.saturating_sub(1).max(0)
+        });
+        let last = std::array::from_fn(|i| {
+            let n = (([hi.x, hi.y, hi.z][i] - origins[i]) / h - 0.5 + band / h).ceil() as i32;
+            n.saturating_add(1).min(domain[i] - 1)
+        });
+        if (0..3).any(|axis| first[axis] > last[axis]) {
             continue;
         }
-        for k in k0..=k1 {
-            for j in j0..=j1 {
-                for i in i0..=i1 {
-                    let p = grid.voxel_center([i, j, k]);
-                    // **先用"点到三角形 AABB 的距离"筛两道**——它是真实距离的**下界**
-                    //（点到 AABB 的距离 ≤ 点到 AABB 内任何点的距离）。
-                    //
-                    //   下界 ≥ band    ⟹ 真实距离也 ≥ band，连 `get` 都不用；
-                    //   下界 ≥ |当前值| ⟹ 算了也不会更新。
-                    //
-                    // 代价是 3 次 max + 1 次 sqrt（~5 ns），换掉一次
-                    // `closest_point_on_triangle`（~20 ns）。三角形密集处跳过率很高。
-                    // `+1e-9` 是浮点余量：数学上下界 ≤ 真实距离，但舍入可能差 1 ulp，
-                    // 严格用 `>` 会偶尔误跳过一个本该更新的体素。
-                    let (ex, ey, ez) = (lo.x - p.x, lo.y - p.y, lo.z - p.z);
-                    let (fx, fy, fz) = (p.x - hi.x, p.y - hi.y, p.z - hi.z);
-                    let (gx, gy, gz) = (ex.max(fx).max(0.0), ey.max(fy).max(0.0), ez.max(fz).max(0.0));
-                    let d_lb = (gx * gx + gy * gy + gz * gz).sqrt();
-                    if d_lb >= band + 1e-9 {
+        let id = records.len() as u16;
+        records.push(RasterTriangle {
+            points: t,
+            lo,
+            hi,
+            first,
+            last,
+        });
+        for z in (first[2] >> 3)..=(last[2] >> 3) {
+            for y in (first[1] >> 3)..=(last[1] >> 3) {
+                buckets.entry([y, z]).or_default().push(id);
+            }
+        }
+    }
+    let mut buckets: Vec<_> = buckets.into_iter().collect();
+    buckets.sort_unstable_by_key(|b| b.0);
+    let mut write_cache = crate::tree::WriteCache::default();
+    for batch in buckets.chunks(crate::par::worker_count().max(1) * 4) {
+        let results = crate::par::map_indexed(batch.len(), |i| {
+            let (tile, candidates) = &batch[i];
+            raster_strip(grid, &records, *tile, candidates)
+        });
+        for (leaf, values) in results.into_iter().flatten() {
+            grid.blit_leaf(leaf, values.as_slice(), &mut write_cache);
+        }
+    }
+}
+
+fn raster_strip(
+    grid: &SparseGrid<i8>,
+    records: &[RasterTriangle],
+    [by, bz]: [i32; 2],
+    candidates: &[u16],
+) -> Vec<DistanceLeaf> {
+    use crate::tree::{LEAF_VOXELS, Leaf, LeafView, leaf_index};
+    let band = grid.config.band_mm();
+    let mut leaves = FxHashMap::<i32, (Box<[i8; LEAF_VOXELS]>, bool)>::default();
+    for &id in candidates {
+        let RasterTriangle {
+            points,
+            lo,
+            hi,
+            first,
+            last,
+        } = &records[id as usize];
+        for bx in (first[0] >> 3)..=(last[0] >> 3) {
+            let origin = [bx << 3, by << 3, bz << 3];
+            let (values, dirty) = leaves.entry(bx).or_insert_with(|| {
+                let values = match grid.leaf_or_tile(origin) {
+                    Some(LeafView::Leaf(Leaf::Dense(values))) => values.clone(),
+                    Some(LeafView::Leaf(Leaf::Constant(v))) => Box::new([*v; LEAF_VOXELS]),
+                    Some(LeafView::Tile(v)) => Box::new([v; LEAF_VOXELS]),
+                    None => Box::new([grid.background; LEAF_VOXELS]),
+                };
+                (values, false)
+            });
+            let xmin = first[0].max(origin[0]);
+            let xmax = last[0].min(origin[0] + 7);
+            for z in first[2].max(origin[2])..=last[2].min(origin[2] + 7) {
+                for y in first[1].max(origin[1])..=last[1].min(origin[1] + 7) {
+                    let row = grid.voxel_center([xmin, y, z]);
+                    let gy = (lo.y - row.y).max(row.y - hi.y).max(0.0);
+                    let gz = (lo.z - row.z).max(row.z - hi.z).max(0.0);
+                    let yz2 = gy * gy + gz * gz;
+                    if yz2 >= (band + 1e-9) * (band + 1e-9) {
                         continue;
                     }
-                    let cur = grid.to_distance(grid.get([i, j, k]));
-                    if d_lb >= cur.abs() + 1e-9 {
-                        continue;
-                    }
-                    let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
-                    let d = (p - q).length();
-                    if d >= band {
-                        continue;
-                    }
-                    if d < cur.abs() {
-                        let signed = if cur < 0.0 { -d } else { d };
-                        grid.set([i, j, k], grid.to_value(signed));
+                    for x in xmin..=xmax {
+                        let p = grid.voxel_center([x, y, z]);
+                        let gx = (lo.x - p.x).max(p.x - hi.x).max(0.0);
+                        let idx = leaf_index([x, y, z]);
+                        let cur = grid.to_distance(values[idx]);
+                        // AABB 距离是真实距离的下界。余量保留定点量化边界附近的候选。
+                        let limit = cur.abs().min(band) + 1e-9;
+                        if gx * gx + yz2 >= limit * limit {
+                            continue;
+                        }
+                        let q = closest_point_on_triangle(p, points[0], points[1], points[2]);
+                        let d = (p - q).length();
+                        if d < band && d < cur.abs() {
+                            let v = grid.to_value(if cur < 0.0 { -d } else { d });
+                            *dirty |= values[idx] != v;
+                            values[idx] = v;
+                        }
                     }
                 }
             }
         }
     }
+    let mut changed: Vec<_> = leaves
+        .into_iter()
+        .filter(|(_, (_, dirty))| *dirty)
+        .map(|(bx, (data, _))| ([bx, by, bz], data))
+        .collect();
+    changed.sort_unstable_by_key(|(leaf, _)| leaf[0]);
+    changed
 }
 
 /// 设计面采样点：每条三角形按 `step` 铺 barycentric 网格（面片中心）。
@@ -455,6 +525,58 @@ mod tests {
         // 读回 −128/127 × band ≈ −0.403（略超 −band 的饱和值）
         let c = grid.sdf(DVec3::new(1.5, 1.5, 1.5));
         assert!((c - grid.to_distance(i8::MIN)).abs() < 1e-12, "体内深部应是饱和材料，实际 {c}");
+    }
+
+    #[test]
+    fn distance_raster_matches_brute_force_at_clipped_tile_boundaries() {
+        let mut tris = box_tris((-0.23, 0.04, 0.05), (1.41, 1.62, 1.47));
+        tris.extend(box_tris((1.62, 0.55, 0.19), (2.16, 1.24, 1.28)));
+        let origin = DVec3::new(-0.33, -0.29, -0.25);
+        let domain = [23, 19, 17];
+        let grid = mesh_to_field(&tris, cfg(), origin, domain);
+        for z in 0..domain[2] {
+            for y in 0..domain[1] {
+                for x in 0..domain[0] {
+                    let ijk = [x, y, z];
+                    let p = grid.voxel_center(ijk);
+                    let distance = tris
+                        .iter()
+                        .map(|t| (p - closest_point_on_triangle(p, t[0], t[1], t[2])).length())
+                        .fold(f64::INFINITY, f64::min);
+                    let inside = box_sdf(
+                        p,
+                        DVec3::new(-0.23, 0.04, 0.05),
+                        DVec3::new(1.41, 1.62, 1.47),
+                    ) < 0.0
+                        || box_sdf(
+                            p,
+                            DVec3::new(1.62, 0.55, 0.19),
+                            DVec3::new(2.16, 1.24, 1.28),
+                        ) < 0.0;
+                    let expected = if distance >= cfg().band_mm() && inside {
+                        i8::MIN
+                    } else {
+                        grid.to_value(if inside { -distance } else { distance })
+                    };
+                    assert_eq!(grid.get(ijk), expected, "distance mismatch at {ijk:?}");
+                }
+            }
+        }
+        assert_eq!(grid.get([22, 19, 16]), grid.background);
+    }
+
+    #[test]
+    fn last_u16_candidate_and_next_batch_both_contribute_distances() {
+        let patch = |x, z| {
+            [DVec3::new(x, 0.0, z), DVec3::new(x + 0.16, 0.0, z), DVec3::new(x, 0.16, z)]
+        };
+        let mut tris = vec![patch(0.0, 0.33); u16::MAX as usize];
+        tris.push(patch(0.8, 0.16));
+        tris.push(patch(0.0, 0.09));
+        let mut grid = SparseGrid::<i8>::new(cfg(), DVec3::ZERO);
+        distance_pass(&tris, &mut grid, [9, 1, 1]);
+        assert_eq!(grid.get([8, 0, 0]), grid.to_value(0.11));
+        assert_eq!(grid.get([0, 0, 0]), grid.to_value(0.04));
     }
 
     #[test]

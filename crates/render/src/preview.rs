@@ -22,12 +22,7 @@ pub struct PreviewStats {
 
 /// 把网格写成自包含的 HTML。
 pub fn write_html(path: &Path, mesh: &MeshData, title: &str) -> std::io::Result<PreviewStats> {
-    let html = build_html(mesh, title);
-    let stats = PreviewStats {
-        vertices: mesh.positions.len(),
-        triangles: mesh.indices.len() / 3,
-        bytes: html.len(),
-    };
+    let (html, stats) = build_html_with_stats(mesh, title);
     if let Some(dir) = path.parent()
         && !dir.as_os_str().is_empty()
     {
@@ -40,6 +35,10 @@ pub fn write_html(path: &Path, mesh: &MeshData, title: &str) -> std::io::Result<
 
 /// 生成 HTML 文本（测试直接查它）。
 pub fn build_html(src: &MeshData, title: &str) -> String {
+    build_html_with_stats(src, title).0
+}
+
+fn build_html_with_stats(src: &MeshData, title: &str) -> (String, PreviewStats) {
     // 与窗口一致：导出页也把 90° 棱做成硬边（否则同一个零件在窗口和网页里
     // 棱上的明暗不一样）。只影响显示，见 `MeshData::split_crease_normals`。
     let mut owned = src.clone();
@@ -85,7 +84,7 @@ pub fn build_html(src: &MeshData, title: &str) -> String {
         hi = [1.0; 3];
     }
 
-    TEMPLATE
+    let html = TEMPLATE
         .replace("__TITLE__", &escape(title))
         .replace("__POS__", &base64(&pos))
         .replace("__NRM__", &base64(&nrm))
@@ -101,7 +100,13 @@ pub fn build_html(src: &MeshData, title: &str) -> String {
         .replace(
             "__HI__",
             &format!("[{},{},{}]", hi[0], hi[1], hi[2]),
-        )
+        );
+    let stats = PreviewStats {
+        vertices: mesh.positions.len(),
+        triangles: mesh.indices.len() / 3,
+        bytes: html.len(),
+    };
+    (html, stats)
 }
 
 /// 把 [`crate::PALETTE`] 渲染成 GLSL 的 `vec3[16]` 初始化列表。
@@ -545,6 +550,29 @@ mod tests {
         let html = build_html(&tri(), "<script>x</script>");
         assert!(html.contains("&lt;script&gt;"), "标题必须转义，否则能注入");
         assert!(!html.contains("<title><script>"));
+    }
+
+    #[test]
+    fn exporting_collapsed_faces_preserves_surviving_corner_attributes_and_counts() {
+        let mut original = tri();
+        original.positions.push(original.positions[0]);
+        original.positions.push([0.0, 0.0, 2.0]);
+        original.normals.extend([[1.0, 0.0, 0.0]; 2]);
+        original.colors = (1..=5).map(|color| [color, 128, 0, 255]).collect();
+        original.indices = vec![0, 1, 2, 3, 2, 4];
+        let mut candidate = original.clone();
+        candidate.indices.splice(3..3, [0, 3, 1]);
+        assert!(
+            build_html(&candidate, "part") == build_html(&original, "part"),
+            "adding a collapsed face changed the exported geometry or corner attributes"
+        );
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-out/cncsim_collapsed_face.html");
+        let stats = write_html(&path, &candidate, "part").unwrap();
+        let html = std::fs::read_to_string(path).unwrap();
+        assert_eq!(stats.triangles, 2);
+        assert!(html.contains(&format!("{} 顶点 · 2 三角形", stats.vertices)));
     }
 
     #[test]
