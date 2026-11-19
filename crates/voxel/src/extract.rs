@@ -180,6 +180,7 @@ pub(crate) fn emit_quads_in(
     blocks: std::ops::Range<usize>,
     inside: impl Fn([i32; 3]) -> bool,
     keep: impl Fn([i32; 3]) -> bool,
+    resolve: &impl Fn(u32, usize, usize) -> u32,
 ) -> Quads {
     let mut out = Quads { indices: Vec::new(), skipped: 0 };
     let mut cache = BlockCache::default();
@@ -213,7 +214,18 @@ pub(crate) fn emit_quads_in(
             };
 
             // 内 → 外（沿 +a）时用逆时针，否则翻转
-            let q = if v0 { [i00, i10, i11, i01] } else { [i01, i11, i10, i00] };
+            // 同一条棱在四个单元格中的局部起点分别为 0、e_b、e_b+e_c、e_c。
+            let ring = [
+                resolve(i00, a, 0),
+                resolve(i10, a, 1 << b),
+                resolve(i11, a, (1 << b) | (1 << c)),
+                resolve(i01, a, 1 << c),
+            ];
+            let q = if v0 {
+                ring
+            } else {
+                [ring[3], ring[2], ring[1], ring[0]]
+            };
             out.indices.extend_from_slice(&[q[0], q[1], q[2]]);
             out.indices.extend_from_slice(&[q[0], q[2], q[3]]);
         }
@@ -548,7 +560,7 @@ pub(crate) fn split_quads(
     inside: &(impl Fn([i32; 3]) -> bool + Sync),
     threads: usize,
 ) -> Quads {
-    split_quads_in(cellmap, inside, threads, |_| true)
+    split_quads_in(cellmap, inside, threads, |_| true, |id, _, _| id)
 }
 
 /// 带单元格过滤的并行发射。
@@ -557,13 +569,14 @@ pub(crate) fn split_quads_in(
     inside: &(impl Fn([i32; 3]) -> bool + Sync),
     threads: usize,
     keep: impl Fn([i32; 3]) -> bool + Sync,
+    resolve: impl Fn(u32, usize, usize) -> u32 + Sync,
 ) -> Quads {
     let n = cellmap.block_count();
     if n == 0 {
         return Quads { indices: Vec::new(), skipped: 0 };
     }
     if n < 4 || threads == 1 {
-        return emit_quads_in(cellmap, 0..n, inside, keep);
+        return emit_quads_in(cellmap, 0..n, inside, keep, &resolve);
     }
     let chunks = (threads * 4).min(n);
     let per = n.div_ceil(chunks).max(1);
@@ -572,7 +585,7 @@ pub(crate) fn split_quads_in(
         if s >= n {
             return Quads { indices: Vec::new(), skipped: 0 };
         }
-        emit_quads_in(cellmap, s..(s + per).min(n), inside, &keep)
+        emit_quads_in(cellmap, s..(s + per).min(n), inside, &keep, &resolve)
     });
     let mut out = Quads {
         indices: Vec::with_capacity(parts.iter().map(|p| p.indices.len()).sum()),

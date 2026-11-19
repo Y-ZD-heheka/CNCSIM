@@ -11,16 +11,32 @@
 // 光照方向与 `render::preview` 的 WebGL 着色器**保持一致**（0.45,0.80,0.55 /
 // -0.65,-0.25,0.45），这样窗口和预览页看起来是同一个东西。
 
-// **不 import `bevy_pbr::forward_io`**：那个模块在 0.20 里没注册进 shader registry，
-// import 会报 "no shader registered for this module path"。自己声明输入结构，
-// location 按 Bevy 默认 vertex shader 的约定编号（0=world_pos / 1=world_normal /
-// 5=color，与 `forward_io.wesl` 里 `VertexOutput` 的定义一致）。
-struct FsIn {
+import bevy_pbr::render::{
+    forward_io::{Vertex, decompress_vertex},
+    mesh_functions,
+    view_transformations::position_world_to_clip,
+};
+
+// 顶点和片元共用这个接口，保证离散色号在三角形内始终取同一个顶点的值。
+struct CutVaryings {
     @builtin(position) position: vec4<f32>,
-    @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(5) @interpolate(flat) color: vec4<f32>,
 };
+
+@vertex
+fn vertex(input: Vertex) -> CutVaryings {
+    let v = decompress_vertex(input, input.instance_index);
+    let world_from_local = mesh_functions::get_world_from_local(input.instance_index);
+    let world_position = mesh_functions::mesh_position_local_to_world(
+        world_from_local, vec4<f32>(v.position, 1.0)
+    );
+    var out: CutVaryings;
+    out.position = position_world_to_clip(world_position.xyz);
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(v.normal, input.instance_index);
+    out.color = v.color;
+    return out;
+}
 
 // 名字必须与 Rust 结构体一致：`AsBindGroup` 的 derive 用类型名生成 WGSL 结构体名。
 //
@@ -42,7 +58,7 @@ const L1: vec3<f32> = vec3<f32>(0.4696, 0.8348, 0.5739);
 const L2: vec3<f32> = vec3<f32>(-0.7759, -0.2984, 0.5371);
 
 @fragment
-fn fragment(in: FsIn, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+fn fragment(in: CutVaryings, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // 剖切/双面：背面翻转法向，否则内腔一片死黑
     var n = normalize(in.world_normal);
     if (!front) { n = -n; }

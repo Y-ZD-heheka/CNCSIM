@@ -530,6 +530,10 @@ mod tests {
         assert!(html.contains("flat out vec4 vC;"), "WebGL 顶点输出仍在插值调色板编号");
         assert!(html.contains("flat in vec4 vC;"), "WebGL 片元输入仍在插值调色板编号");
         let wesl = include_str!("../../../assets/shaders/cut.wesl");
+        // 两阶段必须共用带 flat 的接口。只在片元侧声明会通过文本检查，
+        // 但与 Bevy 默认顶点阶段的 perspective 输出配对时，GPU 会拒绝建管线。
+        assert!(wesl.contains("-> CutVaryings"), "缺少输出切面数据的顶点阶段");
+        assert!(wesl.contains("fragment(in: CutVaryings"), "片元输入和顶点输出应共用类型");
         assert!(
             wesl.contains("@location(5) @interpolate(flat) color: vec4<f32>"),
             "窗口着色器仍在插值调色板编号，跨色三角形会生成第三种颜色"
