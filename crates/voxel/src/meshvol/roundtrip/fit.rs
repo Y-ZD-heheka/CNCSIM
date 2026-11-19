@@ -1,9 +1,11 @@
 //! 用所属壳的切平面校准 Surface Nets 顶点。平面投影保留薄壁的两侧；
 //! 多个法向共同约束折边或尖角的位置。索引和颜色均由原提取器给出。
 
+use super::Crease;
 use crate::{MeshData, meshvol::closest_point_on_triangle, stl::Tri};
 use cncsim_math::{DMat3, DVec3};
 use std::collections::{BTreeMap, HashMap};
+mod creases;
 
 struct Sample {
     point: DVec3,
@@ -65,7 +67,13 @@ impl Sample {
     }
 }
 
-pub(super) fn align(mesh: &mut MeshData, tris: &[Tri], width: f64, inward: bool) {
+pub(super) fn align(
+    mesh: &mut MeshData,
+    tris: &[Tri],
+    creases: &[Crease],
+    width: f64,
+    inward: bool,
+) {
     // 搜索尺度取提取格正方形面的半对角线。
     let radius = std::f64::consts::FRAC_1_SQRT_2 * width;
     let mut ids = HashMap::new();
@@ -148,6 +156,7 @@ pub(super) fn align(mesh: &mut MeshData, tris: &[Tri], width: f64, inward: bool)
         }
     }
 
+    drop(rows);
     // 依照节点顺序移动，逐面检查最终 f32 值。新面在原法向上的有向投影面积
     // 必须保留至少 1/8；冲突时对半缩步，八次均失败就保留原节点。
     let mut placed: Vec<_> = samples.iter().map(|s| s.point).collect();
@@ -166,20 +175,33 @@ pub(super) fn align(mesh: &mut MeshData, tris: &[Tri], width: f64, inward: bool)
         }
     }
     for (i, s) in samples.iter().enumerate() {
-        let mut q = s.fitted(radius);
-        for _ in 0..8 {
-            let [x, y, z] = [q.x, q.y, q.z].map(|v| f64::from(v as f32));
-            let candidate = DVec3::new(x, y, z);
-            let valid = incident[i].iter().all(|&f| {
-                let (face, n) = faces[f];
-                let [a, b, c] = face.map(|v| if v == i { candidate } else { placed[v] });
-                (b - a).cross(c - a).dot(n) > 0.125 * n.length_squared()
+        placed[i] = guarded_position(i, s.fitted(radius), &placed, &incident[i], &faces, |_| true);
+    }
+    let targets = creases::targets(creases, width, &placed, &samples);
+    if !targets.is_empty() {
+        // 不相邻的节点投到同一个棱端点时，有向面积测试不能发现新粘连。
+        // 按导出的实际 f32 坐标计数，保留原本已有的重合。
+        let key =
+            |p: DVec3| [p.x, p.y, p.z].map(|v| if v == 0.0 { 0 } else { (v as f32).to_bits() });
+        let mut occupied = HashMap::with_capacity(placed.len());
+        for &p in &placed {
+            *occupied.entry(key(p)).or_insert(0usize) += 1;
+        }
+        for (i, target) in targets {
+            let old = key(placed[i]);
+            let q = guarded_position(i, target, &placed, &incident[i], &faces, |p| {
+                key(p) == old || !occupied.contains_key(&key(p))
             });
-            if valid {
-                placed[i] = candidate;
-                break;
+            let next = key(q);
+            if old != next {
+                let count = occupied.get_mut(&old).unwrap();
+                *count -= 1;
+                if *count == 0 {
+                    occupied.remove(&old);
+                }
+                occupied.insert(next, 1);
+                placed[i] = q;
             }
-            q = s.point.lerp(q, 0.5);
         }
     }
     for (p, i) in mesh.positions.iter_mut().zip(corners) {
@@ -188,9 +210,65 @@ pub(super) fn align(mesh: &mut MeshData, tris: &[Tri], width: f64, inward: bool)
     }
 }
 
+fn guarded_position(
+    i: usize,
+    mut q: DVec3,
+    placed: &[DVec3],
+    incident: &[usize],
+    faces: &[([usize; 3], DVec3)],
+    available: impl Fn(DVec3) -> bool,
+) -> DVec3 {
+    for _ in 0..8 {
+        let [x, y, z] = [q.x, q.y, q.z].map(|v| f64::from(v as f32));
+        let candidate = DVec3::new(x, y, z);
+        let valid = incident.iter().all(|&f| {
+            let (face, n) = faces[f];
+            let [a, b, c] = face.map(|v| if v == i { candidate } else { placed[v] });
+            (b - a).cross(c - a).dot(n) > 0.125 * n.length_squared()
+        });
+        if valid && available(candidate) {
+            return candidate;
+        }
+        q = placed[i].lerp(q, 0.5);
+    }
+    placed[i]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extrapolates_a_supported_acute_crease_beyond_the_query_ball() {
+        // 两片面夹角约 44°，交线沿 Z。粗格上的圆钝尖端距真棱 0.9 格，
+        // 两个支持平面均在查询球内，真实交线则在球外。
+        let a = DVec3::new(0.0, 0.0, -3.0);
+        let b = DVec3::new(0.0, 0.0, 3.0);
+        let top = DVec3::new(3.0, 1.2, 0.0);
+        let bottom = DVec3::new(3.0, -1.2, 0.0);
+        let surfaces = [[a, b, top], [b, a, bottom]];
+        let mut mesh = MeshData {
+            positions: vec![[0.9, 0.0, 0.0]],
+            normals: vec![[-1.0, 0.0, 0.0]],
+            ..MeshData::default()
+        };
+        align(
+            &mut mesh,
+            &surfaces,
+            &[Crease {
+                start: a,
+                end: b,
+                bisector: -DVec3::X,
+            }],
+            1.0,
+            false,
+        );
+        assert!(
+            mesh.positions[0][0].abs() < 0.15,
+            "ridge {:?}",
+            mesh.positions[0]
+        );
+    }
 
     #[test]
     fn thin_wall_uses_the_sheet_matching_the_extract_normal() {
@@ -215,7 +293,7 @@ mod tests {
         };
         let mut back = wall(0.02);
         back.swap(1, 2);
-        align(&mut mesh, &[wall(0.0), back], 0.2, false);
+        align(&mut mesh, &[wall(0.0), back], &[], 0.2, false);
         for p in &mesh.positions {
             assert!(p[0].abs() < 1e-6, "thin face shifted to x={}", p[0]);
         }

@@ -26,9 +26,28 @@ fn root(parents: &mut [usize], mut face: usize) -> usize {
     face
 }
 
+struct Crease {
+    start: DVec3,
+    end: DVec3,
+    bisector: DVec3,
+}
+
+struct Shell<'a> {
+    tris: Cow<'a, [Tri]>,
+    creases: Vec<Crease>,
+}
+
+#[derive(Default)]
+struct Incidence {
+    first_half: usize,
+    other_face: usize,
+    count: usize,
+    balance: isize,
+}
+
 /// 同一几何边上的面归为一组。每条边的正、反向次数必须相等；
 /// 开口网格或绕向不一致时，整份输入仍交给原来的奇偶场处理。
-fn closed_shells(tris: &[Tri]) -> (Vec<Cow<'_, [Tri]>>, bool) {
+fn closed_shells(tris: &[Tri]) -> (Vec<Shell<'_>>, bool) {
     let mut parents: Vec<_> = (0..tris.len()).collect();
     // 闭合三角网格通常有约 F/2 个顶点和 3F/2 条边。
     let mut vertices = HashMap::with_capacity(tris.len() / 2);
@@ -40,14 +59,21 @@ fn closed_shells(tris: &[Tri]) -> (Vec<Cow<'_, [Tri]>>, bool) {
             let next = vertices.len();
             *vertices.entry(key).or_insert(next)
         });
-        for (a, b) in [(ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])] {
+        for k in 0..3 {
+            let (a, b) = (ids[k], ids[(k + 1) % 3]);
             if a == b {
                 continue;
             }
-            let (owner, balance) = edges.entry((a.min(b), a.max(b))).or_insert((face, 0isize));
-            *balance += if a < b { 1 } else { -1 };
-            if *owner != face {
-                let r = root(&mut parents, *owner);
+            let edge = edges.entry((a.min(b), a.max(b))).or_insert(Incidence {
+                first_half: 3 * face + k,
+                ..Incidence::default()
+            });
+            edge.count += 1;
+            edge.other_face = face;
+            edge.balance += if a < b { 1 } else { -1 };
+            let owner = edge.first_half / 3;
+            if owner != face {
+                let r = root(&mut parents, owner);
                 let s = root(&mut parents, face);
                 if r != s {
                     parents[r.max(s)] = r.min(s);
@@ -56,24 +82,76 @@ fn closed_shells(tris: &[Tri]) -> (Vec<Cow<'_, [Tri]>>, bool) {
             }
         }
     }
-    let oriented = !edges.is_empty() && edges.values().all(|&(_, balance)| balance == 0);
-    if groups <= 1 || !oriented {
-        return (vec![Cow::Borrowed(tris)], oriented);
-    }
-    drop(edges);
     drop(vertices);
+    let oriented = !edges.is_empty() && edges.values().all(|e| e.balance == 0);
+    if !oriented {
+        return (
+            vec![Shell {
+                tris: Cow::Borrowed(tris),
+                creases: vec![],
+            }],
+            false,
+        );
+    }
+    // 沿用连通性检查的边表。开边、多于两面的边及退化法向均不提供棱线约束。
+    let normals: Vec<_> = tris
+        .iter()
+        .map(|t| {
+            let n = (t[1] - t[0]).cross(t[2] - t[0]);
+            let length = n.length();
+            if length > 0.0 {
+                n / length
+            } else {
+                DVec3::ZERO
+            }
+        })
+        .collect();
+    let mut sharp = Vec::new();
+    for edge in edges.into_values().filter(|e| e.count == 2) {
+        let half = edge.first_half;
+        let owner = half / 3;
+        let (n, m) = (normals[owner], normals[edge.other_face]);
+        if n != DVec3::ZERO && m != DVec3::ZERO && n.dot(m) <= 0.5 {
+            let t = tris[owner];
+            sharp.push((
+                half,
+                Crease {
+                    start: t[half % 3],
+                    end: t[(half + 1) % 3],
+                    bisector: n + m,
+                },
+            ));
+        }
+    }
+    sharp.sort_unstable_by_key(|e| e.0);
+    if groups <= 1 {
+        return (
+            vec![Shell {
+                tris: Cow::Borrowed(tris),
+                creases: sharp.into_iter().map(|e| e.1).collect(),
+            }],
+            true,
+        );
+    }
     // 遍历源面，在每组首面处创建输出，哈希表的迭代顺序不参与网格排序。
     let mut slots = HashMap::with_capacity(groups);
-    let mut shells: Vec<Vec<Tri>> = Vec::with_capacity(groups);
+    let mut shells = Vec::with_capacity(groups);
     for (face, tri) in tris.iter().enumerate() {
         let owner = root(&mut parents, face);
         let slot = slots.entry(owner).or_insert_with(|| {
-            shells.push(Vec::new());
+            shells.push(Shell {
+                tris: Cow::Owned(Vec::new()),
+                creases: vec![],
+            });
             shells.len() - 1
         });
-        shells[*slot].push(*tri);
+        shells[*slot].tris.to_mut().push(*tri);
     }
-    (shells.into_iter().map(Cow::Owned).collect(), oriented)
+    for (half, crease) in sharp {
+        let owner = root(&mut parents, half / 3);
+        shells[slots[&owner]].creases.push(crease);
+    }
+    (shells, true)
 }
 
 fn is_inward(tris: &[Tri]) -> bool {
@@ -104,7 +182,11 @@ pub fn reconstruct_surface(
         voxel_time: start.elapsed(),
         extract_time: Duration::ZERO,
     };
-    for shell in shells {
+    for Shell {
+        tris: shell,
+        creases,
+    } in shells
+    {
         let start = Instant::now();
         let source_inward = oriented && is_inward(&shell);
         let inward = result.shells > 1 && source_inward;
@@ -135,7 +217,13 @@ pub fn reconstruct_surface(
             } else {
                 1
             };
-            fit::align(&mut part, &shell, step as f64 * config.h, source_inward);
+            fit::align(
+                &mut part,
+                &shell,
+                &creases,
+                step as f64 * config.h,
+                source_inward,
+            );
         }
         if inward {
             for face in part.indices.as_chunks_mut::<3>().0 {
@@ -211,6 +299,60 @@ mod tests {
                 a.dot(b.cross(c)) / 6.0
             })
             .sum()
+    }
+
+    #[test]
+    fn only_two_incident_faces_define_a_source_crease() {
+        let tris = cube(0.6, 2.4);
+        let (parts, oriented) = closed_shells(&tris);
+        assert!(oriented);
+        assert_eq!(parts[0].creases.len(), 12);
+        let doubled = tris.repeat(2);
+        let (parts, oriented) = closed_shells(&doubled);
+        assert!(oriented);
+        assert!(parts[0].creases.is_empty());
+    }
+
+    #[test]
+    fn recovers_the_tip_of_a_closed_wedge_at_the_requested_lod() {
+        let vertices = [
+            (0.67, 1.44, 0.51),
+            (2.45, 0.72, 0.51),
+            (2.45, 2.16, 0.51),
+            (0.67, 1.44, 2.51),
+            (2.45, 0.72, 2.51),
+            (2.45, 2.16, 2.51),
+        ]
+        .map(|(x, y, z)| DVec3::new(x, y, z));
+        let tris = [
+            [0, 2, 1],
+            [3, 4, 5],
+            [0, 1, 4],
+            [0, 4, 3],
+            [1, 2, 5],
+            [1, 5, 4],
+            [2, 0, 3],
+            [2, 3, 5],
+        ]
+        .map(|t| t.map(|i| vertices[i]));
+        let mesh = run(&tris).mesh;
+        for z in [1.02, 1.19, 1.41, 1.78, 1.93] {
+            let p = DVec3::new(0.67, 1.44, z);
+            let error = mesh
+                .indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|f| {
+                    let [a, b, c] = f.map(|i| {
+                        let [x, y, z] = mesh.positions[i as usize].map(f64::from);
+                        DVec3::new(x, y, z)
+                    });
+                    (super::super::closest_point_on_triangle(p, a, b, c) - p).length()
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(error < 0.025, "wedge tip distance {error} at {z}");
+        }
     }
 
     #[test]
