@@ -64,8 +64,7 @@ fn main() {
     );
 
     // ── 体素化 ──
-    let t1 = std::time::Instant::now();
-    let g = cncsim_voxel::meshvol::mesh_to_field(
+    let result = cncsim_voxel::meshvol::reconstruct_surface(
         &tris,
         GridConfig {
             h,
@@ -74,24 +73,21 @@ fn main() {
         },
         origin,
         domain,
+        k,
     );
     println!(
-        "体素化 {:.0} ms：{} 叶，材料 {:.1} mm³",
-        t1.elapsed().as_secs_f64() * 1e3,
-        g.leaf_count(),
-        g.material_volume()
+        "体素化 {:.0} ms：{} 壳，{} 叶，各壳有向材料体积和 {:.1} mm³",
+        result.voxel_time.as_secs_f64() * 1e3,
+        result.shells,
+        result.leaves,
+        result.signed_material_mm3
     );
 
     // ── 提取 + 导出 ──
-    let t2 = std::time::Instant::now();
-    let mesh = if k > 1 && k <= g.max_lod_factor() {
-        g.extract_surface_lod(k)
-    } else {
-        g.extract_surface()
-    };
+    let mesh = result.mesh;
     println!(
         "提取 {:.0} ms：{} 顶点 / {} 三角形（丢洞 {}）",
-        t2.elapsed().as_secs_f64() * 1e3,
+        result.extract_time.as_secs_f64() * 1e3,
         mesh.positions.len(),
         mesh.indices.len() / 3,
         mesh.skipped_quads

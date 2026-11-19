@@ -19,6 +19,9 @@ use crate::tree::SparseGrid;
 use crate::GridConfig;
 use cncsim_math::DVec3;
 
+mod roundtrip;
+pub use roundtrip::{Reconstruction, reconstruct_surface};
+
 /// 点到三角形的最近点（clamped barycentric，Ericson《Real-Time Collision Detection》§5.1.5）。
 ///
 /// 按顶点/边/内部的区域划分，无迭代、无退化分支陷阱。
@@ -115,6 +118,7 @@ fn parity_pass(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
     // (y,z) 平面的 2D 桶：8×8 体素一桶，键 = (j>>3, k>>3)。
     // 三角形按其 (y,z) 投影 AABB 插桶（±1 体素余量盖住抖动）。
     let mut buckets: FxHashMap<[i32; 2], Vec<u32>> = FxHashMap::default();
+    let (mut rows_y, mut rows_z) = (domain[1]..0, domain[2]..0);
     for (ti, t) in tris.iter().enumerate() {
         let (ylo, yhi) = (t[0].y.min(t[1].y).min(t[2].y), t[0].y.max(t[1].y).max(t[2].y));
         let (zlo, zhi) = (t[0].z.min(t[1].z).min(t[2].z), t[0].z.max(t[1].z).max(t[2].z));
@@ -125,6 +129,10 @@ fn parity_pass(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
         if j0 > j1 || k0 > k1 {
             continue; // 投影在域外
         }
+        rows_y.start = rows_y.start.min(j0 & !7);
+        rows_y.end = rows_y.end.max((j1 | 7).saturating_add(1).min(domain[1]));
+        rows_z.start = rows_z.start.min(k0 & !7);
+        rows_z.end = rows_z.end.max((k1 | 7).saturating_add(1).min(domain[2]));
         // **每桶一次**，不是每格一次——重复插入会让同一平面产生几十个
         // 相同交点，奇偶视差被两两抵消，整场判定为外（实测踩过）。
         for bk in (k0 >> 3)..=(k1 >> 3) {
@@ -134,9 +142,22 @@ fn parity_pass(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
         }
     }
 
+    // 只访问该壳投影覆盖的行，格点坐标和射线抖动仍按全域整数索引计算。
+    let first_after = |x: f64| {
+        let (mut lo, mut hi) = (0, domain[0]);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if o.x + (mid as f64 + 0.5) * h <= x {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
     let mut xs: Vec<f64> = Vec::new();
-    for k in 0..domain[2] {
-        for j in 0..domain[1] {
+    for k in rows_z {
+        for j in rows_y.clone() {
             // 行的 (y,z)：分量顺序是 (i=x, j=y, k=z)——取 [0, j, k]
             let c = grid.voxel_center([0, j, k]);
             let (dj, dk) = jitter(j, k);
@@ -155,16 +176,12 @@ fn parity_pass(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
             }
             xs.sort_by(f64::total_cmp);
 
-            // 行走：交点严格在体素中心之前 → 奇偶翻转
-            let mut idx = 0usize;
-            let mut crossings = 0usize;
-            for i in 0..domain[0] {
-                let x = grid.voxel_center([i, j, k]).x;
-                while idx < xs.len() && xs[idx] < x {
-                    crossings += 1;
-                    idx += 1;
-                }
-                if crossings % 2 == 1 {
+            // 两交点间满足 enter < x ≤ exit 的格点为材料。奇数个交点时
+            // 仍保留旧语义：末区间一直延伸到域边界。
+            for pair in xs.chunks(2) {
+                let first = first_after(pair[0]);
+                let last = pair.get(1).map_or(domain[0], |&end| first_after(end));
+                for i in first..last {
                     grid.set([i, j, k], i8::MIN);
                 }
             }
@@ -525,6 +542,30 @@ mod tests {
         // 读回 −128/127 × band ≈ −0.403（略超 −band 的饱和值）
         let c = grid.sdf(DVec3::new(1.5, 1.5, 1.5));
         assert!((c - grid.to_distance(i8::MIN)).abs() < 1e-12, "体内深部应是饱和材料，实际 {c}");
+    }
+
+    #[test]
+    fn cropped_parity_matches_full_ray_scan_at_domain_and_center_ties() {
+        let config = GridConfig { h: 1.0, ..cfg() };
+        let domain = [15, 19, 23];
+        // 半整数 X 正好对应体素中心。去掉第二个盒子的 +X 壁，覆盖奇数交点。
+        let mut tris = box_tris((-1.5, 1.2, 3.2), (3.5, 12.6, 17.8));
+        let open = box_tris((7.5, 2.2, 5.2), (11.5, 16.4, 26.8));
+        tris.extend(&open[..10]);
+        let mut grid = SparseGrid::new(config, DVec3::ZERO);
+        parity_pass(&tris, &mut grid, domain);
+        for k in 0..domain[2] {
+            for j in 0..domain[1] {
+                let c = grid.voxel_center([0, j, k]);
+                let (dj, dk) = jitter(j, k);
+                let hits: Vec<_> = tris.iter().filter_map(|t| ray_x_hit(t, c.y + dj, c.z + dk)).collect();
+                for i in 0..domain[0] {
+                    let x = grid.voxel_center([i, j, k]).x;
+                    let inside = hits.len() >= 2 && hits.iter().filter(|&&hit| hit < x).count() % 2 == 1;
+                    assert_eq!(grid.get([i, j, k]) < 0, inside, "grid [{i}, {j}, {k}]");
+                }
+            }
+        }
     }
 
     #[test]
