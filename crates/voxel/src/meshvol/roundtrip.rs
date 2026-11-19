@@ -119,7 +119,12 @@ pub fn reconstruct_surface(
             grid.extract_surface()
         };
         if result.shells > 1 {
-            fit::align(&mut part, &shell, config.h);
+            let step = if k > 1 && k <= grid.max_lod_factor() {
+                k
+            } else {
+                1
+            };
+            fit::align(&mut part, &shell, step as f64 * config.h, inward);
         }
         if inward {
             for face in part.indices.as_chunks_mut::<3>().0 {
@@ -241,6 +246,57 @@ mod tests {
             }
             assert!(count > 10);
         }
+    }
+
+    #[test]
+    fn fitted_corner_follows_all_three_source_planes() {
+        let mut tris = cube(0.601, 2.401);
+        let first_len = run(&tris).mesh.positions.len();
+        tris.extend(cube(0.63, 2.43));
+        let result = run(&tris);
+        let distance = result.mesh.positions[..first_len]
+            .iter()
+            .map(|p| {
+                let [x, y, z] = p.map(f64::from);
+                (DVec3::new(x, y, z) - DVec3::splat(0.601)).length()
+            })
+            .fold(f64::INFINITY, f64::min);
+        assert!(distance < 0.004, "cube corner missed by {distance} mm");
+    }
+
+    #[test]
+    fn closed_slab_thinner_than_the_lod_spacing_keeps_both_faces() {
+        let mut tris = cube(0.6, 2.4);
+        for p in tris.iter_mut().flatten() {
+            p.x = if p.x < 1.0 { 0.56 } else { 0.74 };
+        }
+        let single = run(&tris).mesh;
+        tris.extend(cube(1.0, 1.4));
+        let restored = run(&tris);
+        let n = single.positions.len();
+        let mut sides = [0, 0];
+        for (p, normal) in restored.mesh.positions[..n]
+            .iter()
+            .zip(&restored.mesh.normals[..n])
+        {
+            if (1.0..2.0).contains(&p[1]) && (1.0..2.0).contains(&p[2]) {
+                let right = normal[0] > 0.0;
+                let expected = if right { 0.74 } else { 0.56 };
+                assert!(
+                    (p[0] - expected).abs() < 1e-5,
+                    "slab face x={} expected {expected}",
+                    p[0]
+                );
+                sides[usize::from(right)] += 1;
+            }
+        }
+        assert!(sides.into_iter().all(|n| n > 10));
+        assert_eq!(restored.mesh.skipped_quads, 0);
+        assert_eq!(
+            &restored.mesh.indices[..single.indices.len()],
+            &single.indices
+        );
+        assert_eq!(&restored.mesh.colors[..single.colors.len()], &single.colors);
     }
 
     #[test]
