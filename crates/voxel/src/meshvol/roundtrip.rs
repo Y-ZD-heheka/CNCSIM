@@ -28,7 +28,7 @@ fn root(parents: &mut [usize], mut face: usize) -> usize {
 
 /// 同一几何边上的面归为一组。每条边的正、反向次数必须相等；
 /// 开口网格或绕向不一致时，整份输入仍交给原来的奇偶场处理。
-fn closed_shells(tris: &[Tri]) -> Vec<Cow<'_, [Tri]>> {
+fn closed_shells(tris: &[Tri]) -> (Vec<Cow<'_, [Tri]>>, bool) {
     let mut parents: Vec<_> = (0..tris.len()).collect();
     // 闭合三角网格通常有约 F/2 个顶点和 3F/2 条边。
     let mut vertices = HashMap::with_capacity(tris.len() / 2);
@@ -56,8 +56,9 @@ fn closed_shells(tris: &[Tri]) -> Vec<Cow<'_, [Tri]>> {
             }
         }
     }
-    if groups <= 1 || edges.values().any(|&(_, balance)| balance != 0) {
-        return vec![Cow::Borrowed(tris)];
+    let oriented = !edges.is_empty() && edges.values().all(|&(_, balance)| balance == 0);
+    if groups <= 1 || !oriented {
+        return (vec![Cow::Borrowed(tris)], oriented);
     }
     drop(edges);
     drop(vertices);
@@ -72,7 +73,7 @@ fn closed_shells(tris: &[Tri]) -> Vec<Cow<'_, [Tri]>> {
         });
         shells[*slot].push(*tri);
     }
-    shells.into_iter().map(Cow::Owned).collect()
+    (shells.into_iter().map(Cow::Owned).collect(), oriented)
 }
 
 fn is_inward(tris: &[Tri]) -> bool {
@@ -94,7 +95,7 @@ pub fn reconstruct_surface(
     k: u32,
 ) -> Reconstruction {
     let start = Instant::now();
-    let shells = closed_shells(tris);
+    let (shells, oriented) = closed_shells(tris);
     let mut result = Reconstruction {
         mesh: MeshData::default(),
         shells: shells.len(),
@@ -105,7 +106,8 @@ pub fn reconstruct_surface(
     };
     for shell in shells {
         let start = Instant::now();
-        let inward = result.shells > 1 && is_inward(&shell);
+        let source_inward = oriented && is_inward(&shell);
+        let inward = result.shells > 1 && source_inward;
         let grid = mesh_to_field(&shell, config, origin, domain);
         result.voxel_time += start.elapsed();
         result.leaves += grid.leaf_count();
@@ -118,13 +120,22 @@ pub fn reconstruct_surface(
         } else {
             grid.extract_surface()
         };
-        if result.shells > 1 {
+        // 截断单壳的域边界是人工生成的断面，不能用未裁剪的源三角形去拟合。
+        let fit_shell = oriented
+            && (result.shells > 1
+                || shell.iter().flatten().all(|p| {
+                    (0..3).all(|a| {
+                        let x = p.component(a) - origin.component(a);
+                        x >= 0.0 && x <= domain[a] as f64 * config.h
+                    })
+                }));
+        if fit_shell {
             let step = if k > 1 && k <= grid.max_lod_factor() {
                 k
             } else {
                 1
             };
-            fit::align(&mut part, &shell, step as f64 * config.h, inward);
+            fit::align(&mut part, &shell, step as f64 * config.h, source_inward);
         }
         if inward {
             for face in part.indices.as_chunks_mut::<3>().0 {
@@ -262,6 +273,40 @@ mod tests {
             })
             .fold(f64::INFINITY, f64::min);
         assert!(distance < 0.004, "cube corner missed by {distance} mm");
+    }
+
+    #[test]
+    fn one_closed_shell_recovers_its_crease_in_either_winding() {
+        let mut tris = cube(0.601, 2.401);
+        for _ in 0..2 {
+            let model = run(&tris).mesh;
+            let corner = model
+                .positions
+                .iter()
+                .map(|p| {
+                    let [x, y, z] = p.map(f64::from);
+                    (DVec3::new(x, y, z) - DVec3::splat(0.601)).length()
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(corner < 0.004, "single-shell crease missed by {corner} mm");
+            assert!(volume(&model) > 5.5, "stock surface must face outward");
+            assert_eq!(model.skipped_quads, 0);
+            for tri in &mut tris {
+                tri.swap(1, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn cropped_single_shell_preserves_the_field_boundary_faces() {
+        let tris = cube(0.607, 3.413);
+        let restored = run(&tris);
+        let original = mesh_to_field(&tris, GridConfig::default(), DVec3::ZERO, [30; 3])
+            .extract_surface_lod(2);
+        assert_eq!(restored.mesh.positions, original.positions);
+        assert_eq!(restored.mesh.normals, original.normals);
+        assert_eq!(restored.mesh.indices, original.indices);
+        assert_eq!(restored.mesh.colors, original.colors);
     }
 
     #[test]

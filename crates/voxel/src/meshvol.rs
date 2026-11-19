@@ -156,6 +156,7 @@ fn parity_pass(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
         lo
     };
     let mut xs: Vec<f64> = Vec::new();
+    let mut write_cache = crate::tree::WriteCache::default();
     for k in rows_z {
         for j in rows_y.clone() {
             // 行的 (y,z)：分量顺序是 (i=x, j=y, k=z)——取 [0, j, k]
@@ -182,7 +183,7 @@ fn parity_pass(tris: &[Tri], grid: &mut SparseGrid<i8>, domain: [i32; 3]) {
                 let first = first_after(pair[0]);
                 let last = pair.get(1).map_or(domain[0], |&end| first_after(end));
                 for i in first..last {
-                    grid.set([i, j, k], i8::MIN);
+                    grid.set_cached([i, j, k], i8::MIN, &mut write_cache);
                 }
             }
         }
