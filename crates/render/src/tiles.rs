@@ -472,7 +472,7 @@ mod tests {
         let mut g = block();
         let mut cache = TileCache::new(4.0, 2);
         cache.update(&g, None, usize::MAX);
-        let n0 = cache.len();
+        let old_ids: Vec<_> = cache.tile_ids().collect();
         // 把毛坯从 z=4 以上整个铣掉（两道，覆盖 12 mm 宽）：
         // z∈[4,8] 那批块会变成空的，必须从缓存里删掉
         cut(&mut g, -1.0, 13.0, 3.0, 4.0);
@@ -483,8 +483,15 @@ mod tests {
             usize::MAX,
         );
         assert!(r.removed > 0, "顶面被削平后，上面的块应该是空的");
-        // 块数可能变多：切出来的新表面落在原来完全内部的块里，那些块本来是空的
-        assert!(cache.len() < n0, "整体应该变少：{} → {}", n0, cache.len());
+        let missing = old_ids.iter().filter(|id| !cache.tiles.contains_key(id)).count();
+        assert_eq!(r.removed, missing, "实际消失的旧块数应与报告一致");
+        // 削平会暴露原来的内部块。按切后几何核对缓存，块总数可以增加。
+        let mut fresh = TileCache::new(4.0, 2);
+        fresh.update(&g, None, usize::MAX);
+        assert!(cache.tile_ids().eq(fresh.tile_ids()), "增量和全量的块号应一致");
+        for (id, tile) in &cache.tiles {
+            assert!(same_mesh(&tile.mesh, &fresh.tiles[id].mesh), "块 {id} 和全量重建有差异");
+        }
         // 删掉之后不能还有几何悬在半空
         for id in cache.tile_ids() {
             let (_, hi) = mesh_bounds(&cache.tiles[&id].mesh);

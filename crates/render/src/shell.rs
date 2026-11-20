@@ -535,6 +535,11 @@ pub fn run_window(scene: ShellScene) {
         // 网格静默不渲染**，画面看起来像"材质全黑"（实测踩过）。
         .add_plugins(
             DefaultPlugins
+                .set(bevy::render::RenderPlugin {
+                    // 冷启动时后台编译可能迟于截图帧，导致只有 egui 面板入镜。
+                    synchronous_pipeline_compilation: shot.is_some(),
+                    ..default()
+                })
                 .set(AssetPlugin {
                     file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets")
                         .to_string(),
@@ -1050,6 +1055,10 @@ impl Default for CutMaterial {
 }
 
 impl Material for CutMaterial {
+    fn vertex_shader() -> ShaderRef {
+        Self::fragment_shader()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "shaders/cut.wesl".into()
     }
@@ -1065,6 +1074,16 @@ impl Material for CutMaterial {
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
+
+    #[test]
+    fn cut_material_loads_both_stages_from_its_shader() {
+        for shader in [CutMaterial::vertex_shader(), CutMaterial::fragment_shader()] {
+            let ShaderRef::Path(path) = shader else {
+                panic!("切面材质必须同时装载自己的顶点和片元阶段");
+            };
+            assert_eq!(path.path(), std::path::Path::new("shaders/cut.wesl"));
+        }
+    }
 
     fn pos_of(m: &Mesh) -> Vec<[f32; 3]> {
         match m.attribute(Mesh::ATTRIBUTE_POSITION) {

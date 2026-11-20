@@ -28,8 +28,9 @@
 //! ## 顶点的落在哪儿
 //!
 //! 粗格的格点**与细体素中心重合**（格点 `p` 对应细体素 `k·p`），所以
-//! `sdf()` 在格点上退化为直接取值（三线性权重退化成一个 1），无插值误差。
-//! 顶点位置 = 12 条棱零点的平均，与细格同一套 `vertex_of`。
+//! 直接用整数索引读取，避免世界坐标舍入把恰为零的距离读成微小负数。
+//! 粗格从棱交点的均值起步，沿粗格法向向细距离场的零面校正一次。
+//! 若粗格内有多个轮廓环，各环拥有独立顶点；棋盘格共享面的连通方式由面中心的细场决定。
 //!
 //! ## 只处理表面附近的粗格
 //!
@@ -44,8 +45,10 @@
 //! k=1 提取出 **0 个顶点**。现在三档判据（叶内混号 / 叶内有窄带体素 /
 //! 26 邻里有反号叶）都写在 [`SparseGrid::lod_candidates`] 上。
 
+mod contours;
+
 use crate::cellmap::{CellMap, VertexRecord};
-use crate::extract::{CORNER, PAR_MIN_LEAVES, split_quads, split_quads_in, vertex_of};
+use crate::extract::{CORNER, PAR_MIN_LEAVES, split_quads_in, vertex_of};
 use crate::fxhash::{FxHashMap, FxHashSet};
 use crate::tree::{LEAF_DIM, Leaf, Scalar, SparseGrid};
 use crate::MeshData;
@@ -414,34 +417,58 @@ impl<S: Scalar> SparseGrid<S> {
         };
         let per = cells.len().div_ceil(chunks).max(1);
         let grid: &Self = self;
-        let parts = crate::par::map_indexed(chunks, |i| {
+        let batches = crate::par::map_indexed(chunks, |i| {
             let s = i * per;
             let e = (s + per).min(cells.len());
             if s >= e {
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
             grid.lod_vertex_batch(&cells[s..e], k, hc)
         });
+        let (parts, split_parts): (Vec<_>, Vec<_>) = batches.into_iter().unzip();
 
         let t_vert = t0.elapsed().as_secs_f64() * 1e3;
         let t0 = std::time::Instant::now();
 
         // 与细格共用同一个索引构建器：**k=1 与细格逐位一致**靠的就是这一条
         let (mut mesh, cellmap) = CellMap::build(&parts);
+        let mut branches: FxHashMap<u32, [u32; 12]> = FxHashMap::default();
+        for (ring, record) in split_parts.into_iter().flatten() {
+            let base = cellmap.get(record.cell).expect("轮廓格有主顶点");
+            let index = if branches.contains_key(&base) {
+                let next = mesh.positions.len() as u32;
+                mesh.positions.push(record.pos);
+                mesh.normals.push(record.normal);
+                mesh.colors.push([record.creator, 128, 0, 255]);
+                next
+            } else {
+                base
+            };
+            let edges = branches.entry(base).or_insert([base; 12]);
+            for (i, edge) in edges.iter_mut().enumerate() {
+                if ring & (1 << i) != 0 {
+                    *edge = index;
+                }
+            }
+        }
         let t_cellmap = t0.elapsed().as_secs_f64() * 1e3;
         let t0 = std::time::Instant::now();
 
         // ── ② 四边形 ──
         //
-        // 符号来自格点的 `sdf()`：窄带外虽然被钳制到 ±band，但**符号是对的**，
-        // 而这一步只需要符号。这里不再共享 ① 的缓存（跨块就散了），
-        // 每格最多问 4 次 `sdf()`——比维护一张全局表便宜。
-        let inside = |p: [i32; 3]| self.sdf(self.lod_corner(p, k)) < 0.0;
-        let quads = match region {
-            Some((rlo, rhi)) => split_quads_in(&cellmap, &inside, threads, |p| {
-                (0..3).all(|a| p[a] >= rlo[a] && p[a] <= rhi[a])
-            }),
-            None => split_quads(&cellmap, &inside, threads),
+        // 发面与生成顶点使用相同的整型采样点，零值始终在外侧。
+        let inside = |p: [i32; 3]| self.get(p.map(|i| i * k)) < S::default();
+        let keep = |p: [i32; 3]| {
+            region.is_none_or(|(lo, hi)| (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]))
+        };
+        let quads = if branches.is_empty() {
+            split_quads_in(&cellmap, &inside, threads, keep, |id, _, _| id)
+        } else {
+            split_quads_in(&cellmap, &inside, threads, keep, |id, axis, corner| {
+                branches
+                    .get(&id)
+                    .map_or(id, |edges| edges[contours::edge_index(axis, corner)])
+            })
         };
         mesh.indices = quads.indices;
         mesh.skipped_quads = quads.skipped;
@@ -460,8 +487,14 @@ impl<S: Scalar> SparseGrid<S> {
     }
 
     /// 处理 `cells[..]` 这一批粗格，产出顶点（按格序）。
-    fn lod_vertex_batch(&self, cells: &[[i32; 3]], k: i32, hc: f64) -> Vec<VertexRecord> {
+    fn lod_vertex_batch(
+        &self,
+        cells: &[[i32; 3]],
+        k: i32,
+        hc: f64,
+    ) -> (Vec<VertexRecord>, Vec<(u16, VertexRecord)>) {
         let mut out: Vec<VertexRecord> = Vec::new();
+        let mut split = Vec::new();
         let mut corner_value: FxHashMap<[i32; 3], f64> = FxHashMap::default();
         // 根游标：一片叶 8³ 体素、root 是 64³，块内几乎不换 root
         let mut rc = crate::tree::RootCursor::default();
@@ -473,9 +506,47 @@ impl<S: Scalar> SparseGrid<S> {
                 let g = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
                 corners[i] = *corner_value
                     .entry(g)
-                    .or_insert_with(|| self.sdf_cached(self.lod_corner(g, k), &mut rc));
+                    .or_insert_with(|| self.to_distance(self.get_cached(g.map(|i| i * k), &mut rc)));
             }
-            if let Some((pos, normal)) = vertex_of(&corners, self.lod_corner(p, k), hc) {
+            let corner = self.lod_corner(p, k);
+            let Some(single_vertex) = vertex_of(&corners, corner, hc) else {
+                continue;
+            };
+            let mut rings = [0; 4];
+            if k > 1 {
+                rings = contours::loops(&corners, |face| {
+                    let axis = face / 2;
+                    let mut midpoint = p.map(|i| i * k + k / 2);
+                    midpoint[axis] = (p[axis] + (face % 2) as i32) * k;
+                    let mut sum = self.get_cached(midpoint, &mut rc).to_f64();
+                    if k % 2 != 0 {
+                        // 半格位置仅在面内两个方向插值；两侧单元格使用完全相同的采样。
+                        for (b, c) in [(0, 1), (1, 0), (1, 1)] {
+                            let mut neighbor = midpoint;
+                            neighbor[(axis + 1) % 3] += b;
+                            neighbor[(axis + 2) % 3] += c;
+                            sum += self.get_cached(neighbor, &mut rc).to_f64();
+                        }
+                    }
+                    sum < 0.0
+                });
+            }
+            let multiple = rings[1] != 0;
+            for (i, &ring) in rings.iter().enumerate() {
+                if i > 0 && ring == 0 {
+                    break;
+                }
+                let (pos, normal) = if multiple {
+                    contours::vertex(ring, &corners, corner, hc)
+                } else {
+                    single_vertex
+                };
+                // 二值毛坯只有内外标签，没有可用于投影的窄带距离。
+                let pos = if k > 1 && corners.iter().any(|v| v.abs() < self.config.band_mm()) {
+                    self.project_lod_vertex(pos, normal, corner, hc, &mut rc)
+                } else {
+                    pos
+                };
                 // **别改成"用细步长重算梯度"。**
                 //
                 // 试过：`gradient_at(pos)` 用 0.8h 的中心差分取 `sdf_cached` 的
@@ -488,7 +559,7 @@ impl<S: Scalar> SparseGrid<S> {
                 // 也就是说：粗步长差分在这里**恰好起了一个低通滤波的作用**，
                 // 它把体素场的格面噪声抹平了。要更光滑只能提高网格精度
                 // （k 更小）或换解析曲面，不能靠缩小差分步长。
-                out.push(VertexRecord {
+                let record = VertexRecord {
                     cell: p,
                     pos: [pos.x as f32, pos.y as f32, pos.z as f32],
                     normal: [normal.x as f32, normal.y as f32, normal.z as f32],
@@ -547,10 +618,46 @@ impl<S: Scalar> SparseGrid<S> {
                             c
                         }
                     },
-                });
+                };
+                if i == 0 {
+                    out.push(record);
+                }
+                if multiple {
+                    split.push((ring, record));
+                }
             }
         }
-        out
+        (out, split)
+    }
+
+    /// 棱交点的均值会把凸面向内拉。用实际细场的残差沿原法向走一步；
+    /// 保留原有粗格、连面和法向，避免跨薄壁投到另一张面。
+    fn project_lod_vertex(
+        &self,
+        pos: DVec3,
+        normal: DVec3,
+        corner: DVec3,
+        width: f64,
+        cursor: &mut crate::tree::RootCursor<S>,
+    ) -> DVec3 {
+        let distance = self.sdf_cached(pos, cursor);
+        let delta = normal * -distance;
+        let local = pos - corner;
+        // 将线段截在所属格内，保留到格面的少量间隙，避免两个格的顶点合并。
+        let mut fraction = 1.0_f64;
+        for (x, dx) in [(local.x, delta.x), (local.y, delta.y), (local.z, delta.z)] {
+            if dx > 0.0 {
+                fraction = fraction.min(0.99 * (width - x) / dx);
+            } else if dx < 0.0 {
+                fraction = fraction.min(0.99 * -x / dx);
+            }
+        }
+        let candidate = pos + delta * fraction.max(0.0);
+        if self.sdf_cached(candidate, cursor).abs() < distance.abs() {
+            candidate
+        } else {
+            pos
+        }
     }
 }
 

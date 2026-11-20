@@ -406,7 +406,10 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <h3 id="13">1.3 代价与边界</h3>
 <ul>
 <li><strong>6 个传递包</strong>：rayon / rayon-core / crossbeam-deque / crossbeam-epoch / crossbeam-utils / either。</li>
-<li>已在 <code>tools/check_deps.py</code> 的 <code>EXTERNAL</code> 表白名单登记（<code>cncsim-voxel → rayon</code>）。
+<li><code>tools/check_deps.py</code> 按 crate 登记 <code>cncsim-voxel → rayon</code> 和 <code>cncsim-cam → rayon</code>。
+  CAM 自 <code>5635410</code> 起复用工作区的 Rayon 版本，将每个采样点的刀轴可行性独立求值。
+  多方向规划也按输入工序下标收集结果，再按程序顺序生成 G 代码。各点的可行性与串链顺序无关，
+  复用常驻池可避免在这些批次之间反复建立线程。实现与历史测试数据见<a href="项目记忆.html">项目记忆</a> §56.5、§57。
   <strong>没登记的依赖直接判违规退出码 1</strong> —— 引依赖从此需要签字，不是"顺手加"。</li>
 <li><code>ADR-003</code> 的边界是"<strong>L2 领域</strong>全自研，L0 基础设施（<code>std</code>/<code>serde</code>）不自研"。池属于基础设施，
   与"自研运动学"不冲突：它不承担任何领域语义。</li>

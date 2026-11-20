@@ -207,6 +207,71 @@ fn lod_vertices_lie_on_the_true_field() {
     );
 }
 
+#[test]
+fn coarse_sphere_vertices_follow_the_fine_distance_field() {
+    // R=1.5 mm 的圆角只跨不到四个粗格，直接平均棱交点会明显向内收缩。
+    let radius = 1.5;
+    let center = DVec3::new(1.53, 1.57, 1.61);
+    let grid = sphere_grid(radius, center);
+    let mesh = grid.extract_surface_lod(4);
+    assert_watertight(&mesh);
+    let total_error: f64 = mesh.positions.iter().map(|p| {
+        let v = DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+        ((v - center).length() - radius).abs()
+    }).sum();
+    let mean_error = total_error / mesh.positions.len() as f64;
+    println!("R={radius} 球，k=4：平均径向误差 {:.3} µm", mean_error * 1e3);
+    assert!(
+        mean_error < 0.004,
+        "粗格顶点的平均径向误差 {mean_error:.6} mm，预期小于 4 µm"
+    );
+}
+
+#[test]
+fn translating_the_grid_preserves_lod_zero_crossings() {
+    // 同一份整型距离场，只调整世界原点。d=0 的格点靠负侧，极小的负插值也会生成伪面。
+    let mesh_at = |offset| {
+        let mut grid = SparseGrid::<i8>::new(GridConfig::default(), DVec3::splat(offset));
+        for z in 0..=12 {
+            for y in 0..=12 {
+                for x in 0..=12 {
+                    let d = (x - 6_i32).abs() + (y - 6_i32).abs() + (z - 6_i32).abs() - 4;
+                    grid.set([x, y, z], d as i8);
+                }
+            }
+        }
+        grid.extract_surface_lod(2)
+    };
+    let original = mesh_at(0.0);
+    let shifted = mesh_at(47.64965);
+    assert_eq!(original.positions.len(), shifted.positions.len());
+    assert_eq!(original.indices, shifted.indices);
+}
+
+#[test]
+fn diagonally_separated_voxels_have_separate_watertight_lod_surfaces() {
+    let mut grid = grid();
+    for p in [[2, 2, 2], [4, 4, 2]] {
+        grid.set(p, -20);
+    }
+    let mesh = grid.extract_surface_lod(2);
+    assert_eq!(mesh.indices.len() / 3, 24, "两颗孤立样点各由六个四边形包围");
+    assert_watertight(&mesh);
+    assert_eq!(mesh.positions.len(), 16, "两个闭壳各有八个独立顶点");
+    let mut positions: Vec<_> = mesh.positions.iter().map(|p| p.map(f32::to_bits)).collect();
+    positions.sort_unstable();
+    positions.dedup();
+    assert_eq!(positions.len(), 16, "分支顶点在空间中也应分离");
+
+    let parallel = grid.extract_surface_lod_chunks(2, 4);
+    assert_eq!(mesh.positions, parallel.positions);
+    assert_eq!(mesh.indices, parallel.indices);
+    let mut tiled = canonical(&grid.extract_surface_lod_in(2, [-2; 3], [1, 4, 4]));
+    tiled.extend(canonical(&grid.extract_surface_lod_in(2, [2, -2, -2], [4; 3])));
+    tiled.sort_unstable();
+    assert_eq!(tiled, canonical(&mesh), "跨块的轮廓应与整体提取逐面相同");
+}
+
 /// 槽底是平面，粗格顶点也必须**精确**落在 z=7。
 ///
 /// 平面上三线性与对偶都是精确的，所以这条不该有误差预算：
@@ -280,6 +345,60 @@ fn empty_grid_lod_is_empty() {
     assert!(g.extract_surface_lod(4).positions.is_empty());
 }
 
+#[test]
+fn quantized_zero_endpoint_is_closed_and_has_no_collapsed_display_faces() {
+    let mut g = grid();
+    g.fill_box([0; 3], [17; 3], -48);
+    // An air pocket ends exactly on a sampled point. Adjacent surface cells may
+    // put their vertices on the same endpoint even though their indices differ.
+    g.set([6, 6, 6], 0);
+    g.set([8, 6, 6], 32);
+    for mut mesh in [
+        g.extract_surface(),
+        g.extract_surface_lod(1),
+        g.extract_surface_lod(2),
+    ] {
+        assert_watertight(&mesh);
+        mesh.split_crease_normals(0.707);
+        let collapsed = mesh
+            .indices
+            .chunks_exact(3)
+            .filter(|face| {
+                let [a, b, c] = [face[0], face[1], face[2]].map(|id| mesh.positions[id as usize]);
+                a == b || b == c || c == a
+            })
+            .count();
+        assert_eq!(
+            collapsed, 0,
+            "an edge with identical endpoints creates a zero-area face"
+        );
+        // The display mesh duplicates vertices at crease seams. Check incidence
+        // at the actual f32 positions rather than at its split shading indices.
+        let mut positions = std::collections::HashMap::new();
+        let mut welded = MeshData::default();
+        for &id in &mesh.indices {
+            let pos = mesh.positions[id as usize].map(f32::to_bits);
+            let next = positions.len() as u32;
+            welded.indices.push(*positions.entry(pos).or_insert(next));
+        }
+        assert_watertight(&welded);
+        let pocket: Vec<_> = mesh
+            .indices
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let p = mesh.positions[id as usize];
+                (0.4..1.1).contains(&p[0])
+                    && (0.4..1.0).contains(&p[1])
+                    && (0.4..1.0).contains(&p[2])
+            })
+            .collect();
+        assert!(
+            pocket.len() >= 12,
+            "the positive sample must retain a closed pocket"
+        );
+    }
+}
 
 /// 性能基准（默认跳过）：200×200×100 mm 毛坯 @ h=0.1，k=4。
 ///

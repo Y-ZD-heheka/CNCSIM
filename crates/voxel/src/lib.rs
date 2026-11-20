@@ -234,52 +234,47 @@ impl MeshData {
     ///
     /// 顺序完全由三角形顺序决定，不引入任何不确定性。
     pub fn split_crease_normals(&mut self, cos_thresh: f32) {
-        if self.indices.len() < 3 || self.normals.len() != self.positions.len() {
-            return;
-        }
-        let n0 = self.positions.len();
-        let mut pos = self.positions.clone();
-        let mut nrm = self.normals.clone();
-        let mut col = self.colors.clone();
-        let mut idx = Vec::with_capacity(self.indices.len());
-        for t in self.indices.as_chunks::<3>().0 {
-            let (a, b, c) = (
-                self.positions[t[0] as usize],
-                self.positions[t[1] as usize],
-                self.positions[t[2] as usize],
-            );
-            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-            let cr = [
-                u[1] * v[2] - u[2] * v[1],
-                u[2] * v[0] - u[0] * v[2],
-                u[0] * v[1] - u[1] * v[0],
-            ];
-            let len = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
-            if len < 1e-12 {
-                idx.extend_from_slice(t);
+        let src_vertices = self.positions.len();
+        let has_normals = self.normals.len() == src_vertices;
+        let mut write = 0;
+        for read in (0..self.indices.len() / 3).map(|face| face * 3) {
+            let mut tri = [self.indices[read], self.indices[read + 1], self.indices[read + 2]];
+            let [a, b, c] = tri.map(|i| self.positions[i as usize]);
+            // 过零点恰在格点上时，不同单元格可能给出完全重合的顶点。塌缩面没有
+            // 面积，不进入显示索引。其余面的独立色号和法线保持原有语义。
+            if a == b || b == c || c == a {
                 continue;
             }
-            let f = [cr[0] / len, cr[1] / len, cr[2] / len];
-            for &i in t {
-                let vn = self.normals[i as usize];
-                let d = vn[0] * f[0] + vn[1] * f[1] + vn[2] * f[2];
-                if d >= cos_thresh {
-                    idx.push(i); // 夹角小：继续共用，保持平滑
-                } else {
-                    // 硬边：复制一份，用面法向
-                    idx.push(pos.len() as u32);
-                    pos.push(self.positions[i as usize]);
-                    nrm.push(f);
-                    col.push(self.colors.get(i as usize).copied().unwrap_or([0, 128, 0, 255]));
+            if has_normals {
+                let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let cr = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                let len = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
+                if len >= 1e-12 {
+                    let f = [cr[0] / len, cr[1] / len, cr[2] / len];
+                    for id in &mut tri {
+                        let i = *id as usize;
+                        let vn = self.normals[i];
+                        if vn[0] * f[0] + vn[1] * f[1] + vn[2] * f[2] < cos_thresh {
+                            if self.colors.len() < src_vertices {
+                                self.colors.resize(src_vertices, [0, 128, 0, 255]);
+                            }
+                            *id = self.positions.len() as u32;
+                            self.positions.push(self.positions[i]);
+                            self.normals.push(f);
+                            self.colors.push(self.colors[i]);
+                        }
+                    }
                 }
             }
+            self.indices[write..write + 3].copy_from_slice(&tri);
+            write += 3;
         }
-        let _ = n0;
-        self.positions = pos;
-        self.normals = nrm;
-        self.colors = col;
-        self.indices = idx;
+        self.indices.truncate(write);
     }
 }
 
